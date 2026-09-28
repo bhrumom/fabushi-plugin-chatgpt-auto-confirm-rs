@@ -10,7 +10,6 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungsten
 
 #[derive(Debug, Clone, Deserialize)]
 struct TargetInfo {
-    id: String,
     #[serde(rename = "type")]
     kind: String,
     title: String,
@@ -289,20 +288,21 @@ mod tests {
     fn target_prefers_chatgpt_page() {
         let targets = vec![
             TargetInfo {
-                id: "1".into(),
                 kind: "page".into(),
                 title: "Other".into(),
                 url: "https://example.com".into(),
                 websocket_debugger_url: Some("ws://localhost/1".into()),
             },
             TargetInfo {
-                id: "2".into(),
                 kind: "page".into(),
                 title: "ChatGPT".into(),
                 url: "https://chatgpt.com/c/abc".into(),
                 websocket_debugger_url: Some("ws://localhost/2".into()),
             },
         ];
-        assert_eq!(select_chatgpt_target(&targets).unwrap().id, "2");
+        assert_eq!(
+            select_chatgpt_target(&targets).unwrap().url,
+            "https://chatgpt.com/c/abc"
+        );
     }
 }

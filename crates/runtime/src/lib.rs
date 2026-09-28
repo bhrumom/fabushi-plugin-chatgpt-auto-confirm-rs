@@ -15,6 +15,8 @@ pub struct RunOptions {
     pub stale_reload_after: Duration,
     pub rate_limit_pause: Duration,
     pub max_rate_limit_pauses: u32,
+    pub dispatch_confirm_after: Duration,
+    pub continuation_after: Duration,
 }
 
 impl Default for RunOptions {
@@ -26,6 +28,8 @@ impl Default for RunOptions {
             stale_reload_after: Duration::from_secs(15 * 60),
             rate_limit_pause: Duration::from_secs(5 * 60),
             max_rate_limit_pauses: 3,
+            dispatch_confirm_after: Duration::from_secs(90),
+            continuation_after: Duration::from_secs(30 * 60),
         }
     }
 }
@@ -36,12 +40,16 @@ pub async fn run_prompt(cdp: &ChatGptCdp, prompt: &str, options: RunOptions) -> 
     cdp.send_prompt(prompt).await?;
 
     let started = Instant::now();
+    let mut dispatch_started = Instant::now();
     let mut last_progress = Instant::now();
+    let mut last_continuation = Instant::now();
     let mut last_fingerprint = String::new();
     let mut stable_terminal_count = 0u8;
     let mut approvals_clicked = 0u32;
     let mut recoveries = 0u32;
     let mut rate_limit_pauses = 0u32;
+    let mut dispatch_retries = 0u32;
+    let mut continuations = 0u32;
 
     loop {
         if started.elapsed() > options.timeout {
@@ -58,6 +66,15 @@ pub async fn run_prompt(cdp: &ChatGptCdp, prompt: &str, options: RunOptions) -> 
         let snapshot = cdp.snapshot().await?;
 
         if snapshot.user_turns < baseline_users + 1 {
+            if dispatch_started.elapsed() >= options.dispatch_confirm_after {
+                warn!(
+                    dispatch_retries,
+                    "prompt dispatch not confirmed within window; resending original prompt"
+                );
+                cdp.send_prompt(prompt).await?;
+                dispatch_retries += 1;
+                dispatch_started = Instant::now();
+            }
             sleep(options.poll_interval).await;
             continue;
         }
@@ -119,6 +136,22 @@ pub async fn run_prompt(cdp: &ChatGptCdp, prompt: &str, options: RunOptions) -> 
             recoveries += 1;
             last_progress = Instant::now();
             sleep(Duration::from_secs(3)).await;
+            continue;
+        }
+
+        if last_continuation.elapsed() >= options.continuation_after
+            && !snapshot.response_in_flight()
+            && !snapshot.is_terminal()
+        {
+            warn!(
+                continuations,
+                "no terminal reply within continuation window; asking ChatGPT to continue all work"
+            );
+            cdp.send_prompt("继续完成所有").await?;
+            continuations += 1;
+            last_continuation = Instant::now();
+            last_progress = Instant::now();
+            sleep(Duration::from_secs(1)).await;
             continue;
         }
 

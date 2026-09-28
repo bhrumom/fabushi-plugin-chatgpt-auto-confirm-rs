@@ -45,6 +45,10 @@ enum Commands {
         stale_reload_seconds: u64,
         #[arg(long, default_value_t = 300)]
         rate_limit_pause_seconds: u64,
+        #[arg(long, default_value_t = 90)]
+        dispatch_confirm_seconds: u64,
+        #[arg(long, default_value_t = 1800)]
+        continuation_seconds: u64,
     },
     Open {
         #[arg(long, default_value = "https://chatgpt.com/")]
@@ -103,6 +107,8 @@ async fn main() -> Result<()> {
             poll_ms,
             stale_reload_seconds,
             rate_limit_pause_seconds,
+            dispatch_confirm_seconds,
+            continuation_seconds,
         } => {
             let cdp = ChatGptCdp::connect(&cli.cdp).await?;
             let options = RunOptions {
@@ -111,6 +117,8 @@ async fn main() -> Result<()> {
                 auto_confirm,
                 stale_reload_after: Duration::from_secs(stale_reload_seconds),
                 rate_limit_pause: Duration::from_secs(rate_limit_pause_seconds),
+                dispatch_confirm_after: Duration::from_secs(dispatch_confirm_seconds),
+                continuation_after: Duration::from_secs(continuation_seconds),
                 ..RunOptions::default()
             };
             let report = run_prompt(&cdp, &prompt, options)
