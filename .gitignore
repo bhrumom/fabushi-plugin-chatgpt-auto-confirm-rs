@@ -1,0 +1,7 @@
+/target
+/.idea
+/.vscode
+*.log
+state/
+profiles/
+.env
