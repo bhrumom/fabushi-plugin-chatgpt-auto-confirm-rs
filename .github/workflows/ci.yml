@@ -54,13 +54,19 @@ jobs:
           "${{ steps.chrome.outputs.binary }}" \
             --headless=new \
             --disable-gpu \
+            --disable-dev-shm-usage \
             --no-sandbox \
             --remote-debugging-address=127.0.0.1 \
             --remote-debugging-port=9222 \
             --user-data-dir=/tmp/fabushi-fixture-profile \
             about:blank >/tmp/fabushi-chrome.log 2>&1 &
-          for i in $(seq 1 50); do
+          chrome_pid=$!
+          for i in $(seq 1 150); do
             if curl -fsS http://127.0.0.1:9222/json/version >/dev/null; then exit 0; fi
+            if ! kill -0 "$chrome_pid" 2>/dev/null; then
+              cat /tmp/fabushi-chrome.log
+              exit 1
+            fi
             sleep 0.2
           done
           cat /tmp/fabushi-chrome.log
