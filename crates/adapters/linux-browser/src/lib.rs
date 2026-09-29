@@ -126,8 +126,14 @@ impl ManagedChromium {
         let profile_lock = acquire_profile_lock(&profile_lock_path)?;
         let stdout_log = config.log_dir.join("chromium.stdout.log");
         let stderr_log = config.log_dir.join("chromium.stderr.log");
-        let stdout = OpenOptions::new().create(true).append(true).open(&stdout_log)?;
-        let stderr = OpenOptions::new().create(true).append(true).open(&stderr_log)?;
+        let stdout = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&stdout_log)?;
+        let stderr = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&stderr_log)?;
 
         let mut command = Command::new(&config.browser_binary);
         command
@@ -144,7 +150,9 @@ impl ManagedChromium {
         if !config.headed {
             command.arg("--headless=new").arg("--disable-gpu");
         }
-        let child = command.spawn().context("failed to start managed Chromium")?;
+        let child = command
+            .spawn()
+            .context("failed to start managed Chromium")?;
         let launch = BrowserLaunch {
             pid: child.id(),
             endpoint: format!("http://127.0.0.1:{}", config.port),
@@ -176,7 +184,10 @@ impl ManagedChromium {
     }
 
     pub fn is_alive(&self) -> Result<bool> {
-        let mut child = self.child.lock().map_err(|_| anyhow::anyhow!("chromium child mutex poisoned"))?;
+        let mut child = self
+            .child
+            .lock()
+            .map_err(|_| anyhow::anyhow!("chromium child mutex poisoned"))?;
         match child.as_mut() {
             Some(child) => Ok(child.try_wait()?.is_none()),
             None => Ok(false),
@@ -184,7 +195,10 @@ impl ManagedChromium {
     }
 
     pub fn force_terminate(&self) -> Result<()> {
-        let mut child = self.child.lock().map_err(|_| anyhow::anyhow!("chromium child mutex poisoned"))?;
+        let mut child = self
+            .child
+            .lock()
+            .map_err(|_| anyhow::anyhow!("chromium child mutex poisoned"))?;
         if let Some(child) = child.as_mut() {
             if child.try_wait()?.is_none() {
                 child.kill().context("force terminate Chromium")?;
@@ -229,7 +243,9 @@ fn acquire_profile_lock(path: &Path) -> Result<File> {
                 .open(path)
                 .with_context(|| format!("acquire profile lock {}", path.display()))
         }
-        Err(error) => Err(error).with_context(|| format!("acquire profile lock {}", path.display())),
+        Err(error) => {
+            Err(error).with_context(|| format!("acquire profile lock {}", path.display()))
+        }
     }
 }
 
@@ -258,7 +274,8 @@ mod managed_tests {
 
     #[test]
     fn live_profile_owner_cannot_be_reacquired() {
-        let root = std::env::temp_dir().join(format!("fabushi-browser-lock-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("fabushi-browser-lock-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join(".lock");
@@ -272,7 +289,8 @@ mod managed_tests {
 
     #[test]
     fn stale_profile_owner_is_reclaimed() {
-        let root = std::env::temp_dir().join(format!("fabushi-browser-stale-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("fabushi-browser-stale-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join(".lock");
