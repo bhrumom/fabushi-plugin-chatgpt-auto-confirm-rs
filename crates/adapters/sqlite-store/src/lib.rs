@@ -482,71 +482,209 @@ WHERE run_id = ?1 AND owner_id = ?2 AND expires_at_ms > ?4
         waiting_until_ms: Option<i64>,
         error: Option<&str>,
     ) -> Result<()> {
-        let mut task = task.clone();
-        task.last_report = report.cloned();
-        task.recovery_context = recovery.cloned();
-        task.waiting_until_ms = waiting_until_ms;
-        task.last_error = error.map(str::to_owned);
-        task.updated_at_ms = now_ms();
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("sqlite mutex poisoned"))?;
+        let tx = connection.transaction()?;
+        let body: String = tx.query_row(
+            "SELECT body_json FROM tasks WHERE task_id=?1",
+            params![task.id],
+            |row| row.get(0),
+        )?;
+        let mut settled: QueueTask = serde_json::from_str(&body)?;
+        let from_phase = settled.phase.clone();
 
-        if let Some(report) = report {
-            task.applied_revision = Some(report.applied_task_revision);
+        settled.last_report = report.cloned();
+        settled.recovery_context = recovery.cloned();
+        settled.waiting_until_ms = waiting_until_ms;
+        settled.last_error = error.map(str::to_owned);
+        settled.updated_at_ms = now_ms();
+
+        let desired_phase = if let Some(report) = report {
+            settled.applied_revision = Some(report.applied_task_revision);
             if report.all_tasks_complete {
-                task.status = TaskState::Completed;
+                settled.status = TaskState::Completed;
+                Some(QueuePhase::Completed)
             } else if report.status == fabushi_chatgpt_domain::TaskReportStatus::Blocked
                 && waiting_until_ms.is_none()
             {
-                task.status = TaskState::Blocked;
+                settled.status = TaskState::Blocked;
+                None
             } else {
-                task.continuation_depth += 1;
-                if task.max_task_continuations > 0
-                    && task.continuation_depth > task.max_task_continuations
+                settled.continuation_depth += 1;
+                if settled.max_task_continuations > 0
+                    && settled.continuation_depth > settled.max_task_continuations
                 {
-                    task.status = TaskState::Failed;
-                    task.last_error = Some("task_continuation_limit_reached".into());
+                    settled.status = TaskState::Failed;
+                    settled.last_error = Some("task_continuation_limit_reached".into());
+                    Some(QueuePhase::FailedRetryable)
                 } else {
-                    task.status = if waiting_until_ms.is_some() {
+                    settled.status = if waiting_until_ms.is_some() {
                         TaskState::Waiting
                     } else {
                         TaskState::Queued
                     };
+                    Some(QueuePhase::Recovering)
                 }
             }
         } else if waiting_until_ms.is_some() {
-            task.status = TaskState::Waiting;
+            settled.status = TaskState::Waiting;
+            Some(QueuePhase::Recovering)
         } else if recovery.is_some() {
             if error.is_some() {
-                task.runtime_retries += 1;
-                if task.runtime_retries > task.max_runtime_retries {
-                    task.status = TaskState::Failed;
+                settled.runtime_retries += 1;
+                if settled.runtime_retries > settled.max_runtime_retries {
+                    settled.status = TaskState::Failed;
+                    Some(QueuePhase::FailedRetryable)
                 } else {
-                    task.status = TaskState::Queued;
+                    settled.status = TaskState::Queued;
+                    Some(QueuePhase::Recovering)
                 }
             } else {
-                task.status = TaskState::Queued;
+                settled.status = TaskState::Queued;
+                Some(QueuePhase::Recovering)
             }
         } else if error.is_some() {
-            task.runtime_retries += 1;
-            if task.runtime_retries > task.max_runtime_retries {
-                task.status = TaskState::Failed;
+            settled.runtime_retries += 1;
+            if settled.runtime_retries > settled.max_runtime_retries {
+                settled.status = TaskState::Failed;
+                Some(QueuePhase::FailedRetryable)
             } else {
-                task.status = TaskState::Queued;
+                settled.status = TaskState::Queued;
+                Some(QueuePhase::FailedRetryable)
             }
+        } else {
+            None
+        };
+
+        if let Some(next_phase) = desired_phase
+            && settled.phase != next_phase
+        {
+            settled.transition_phase(next_phase)?;
         }
 
-        let connection = self
+        tx.execute(
+            "UPDATE tasks SET status=?2, body_json=?3, updated_at_ms=?4 WHERE task_id=?1",
+            params![
+                settled.id,
+                Self::task_status_name(&settled.status),
+                serde_json::to_string(&settled)?,
+                settled.updated_at_ms
+            ],
+        )?;
+
+        if settled.phase != from_phase {
+            let latest_run: Option<String> = tx
+                .query_row(
+                    "SELECT run_id FROM runs WHERE task_id=?1 ORDER BY started_at_ms DESC LIMIT 1",
+                    params![settled.id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            tx.execute(
+                r#"
+INSERT INTO queue_events(task_id,run_id,from_phase,to_phase,reason,created_at_ms)
+VALUES (?1,?2,?3,?4,'task_settlement',?5)
+"#,
+                params![
+                    settled.id,
+                    latest_run,
+                    phase_name(&from_phase),
+                    phase_name(&settled.phase),
+                    settled.updated_at_ms
+                ],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn requeue_conversation(
+        &self,
+        task: &QueueTask,
+        report: &AutomationTaskReport,
+        reason: &str,
+    ) -> Result<()> {
+        let mut connection = self
             .connection
             .lock()
             .map_err(|_| anyhow!("sqlite mutex poisoned"))?;
-        connection.execute(
+        let tx = connection.transaction()?;
+        let body: String = tx.query_row(
+            "SELECT body_json FROM tasks WHERE task_id=?1",
+            params![task.id],
+            |row| row.get(0),
+        )?;
+        let mut queued: QueueTask = serde_json::from_str(&body)?;
+        let from_phase = queued.phase.clone();
+
+        queued.prompt = task.prompt.clone();
+        queued.original_prompt = task.original_prompt.clone();
+        queued.acceptance_prompt = task.acceptance_prompt.clone();
+        queued.conversation_kind = task.conversation_kind.clone();
+        queued.known_exact_head = task.known_exact_head.clone();
+        queued.known_ci_evidence = task.known_ci_evidence.clone();
+        queued.current_stage = task.current_stage.clone();
+        queued.pending_work = task.pending_work.clone();
+        queued.context_references = task.context_references.clone();
+        queued.execution_profile = task.execution_profile.clone();
+        queued.last_report = Some(report.clone());
+        queued.recovery_context = None;
+        queued.waiting_until_ms = None;
+        queued.last_error = None;
+        queued.applied_revision = None;
+        queued.continuation_depth += 1;
+        queued.updated_at_ms = now_ms();
+
+        if queued.max_task_continuations > 0
+            && queued.continuation_depth > queued.max_task_continuations
+        {
+            queued.status = TaskState::Failed;
+            queued.last_error = Some("conversation_transition_limit_reached".into());
+            if queued.phase.can_transition_to(&QueuePhase::FailedRetryable) {
+                queued.transition_phase(QueuePhase::FailedRetryable)?;
+            }
+        } else {
+            queued.status = TaskState::Queued;
+            if queued.phase != QueuePhase::Recovering {
+                queued.transition_phase(QueuePhase::Recovering)?;
+            }
+        }
+
+        tx.execute(
             "UPDATE tasks SET status=?2, body_json=?3, updated_at_ms=?4 WHERE task_id=?1",
             params![
-                task.id,
-                Self::task_status_name(&task.status),
-                serde_json::to_string(&task)?,
-                task.updated_at_ms
+                queued.id,
+                Self::task_status_name(&queued.status),
+                serde_json::to_string(&queued)?,
+                queued.updated_at_ms
             ],
         )?;
+
+        let latest_run: Option<String> = tx
+            .query_row(
+                "SELECT run_id FROM runs WHERE task_id=?1 ORDER BY started_at_ms DESC LIMIT 1",
+                params![queued.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        tx.execute(
+            r#"
+INSERT INTO queue_events(task_id,run_id,from_phase,to_phase,reason,created_at_ms)
+VALUES (?1,?2,?3,?4,?5,?6)
+"#,
+            params![
+                queued.id,
+                latest_run,
+                phase_name(&from_phase),
+                phase_name(&queued.phase),
+                reason,
+                queued.updated_at_ms
+            ],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
