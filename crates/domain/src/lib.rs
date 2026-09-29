@@ -26,6 +26,8 @@ pub struct PageSnapshot {
     pub response_action_turn_bound_to_last: bool,
     pub awaiting_assistant: bool,
     pub assistant_text: String,
+    #[serde(default)]
+    pub visible_assistant_messages: Vec<String>,
     pub composer_text: String,
     pub approval_card_key: Option<String>,
     pub observed_model: Option<String>,
@@ -105,6 +107,7 @@ pub enum RunState {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct RunCounters {
     pub approvals_clicked: u32,
     pub recoveries: u32,
@@ -274,11 +277,13 @@ pub struct QueueTask {
     pub prompt: String,
     pub original_prompt: String,
     pub acceptance_prompt: Option<String>,
+    #[serde(default)]
     pub conversation_kind: ConversationKind,
     #[serde(default)]
     pub known_exact_head: Option<String>,
     #[serde(default)]
     pub known_ci_evidence: Vec<String>,
+    #[serde(default)]
     #[serde(default)]
     pub current_stage: Option<String>,
     #[serde(default)]
@@ -368,6 +373,8 @@ pub struct RunRecord {
     pub target_id: Option<String>,
     pub last_activity_fingerprint: Option<String>,
     pub latest_assistant_text: Option<String>,
+    #[serde(default)]
+    pub visible_progress_messages: Vec<String>,
     pub counters: RunCounters,
     #[serde(default)]
     pub checkpoint: RunCheckpoint,
@@ -386,6 +393,7 @@ impl RunRecord {
             target_id: None,
             last_activity_fingerprint: None,
             latest_assistant_text: None,
+            visible_progress_messages: Vec::new(),
             counters: RunCounters::default(),
             checkpoint: RunCheckpoint::default(),
             started_at_ms,
@@ -434,6 +442,8 @@ pub struct RunEvent {
     pub target_id: Option<String>,
     pub activity_fingerprint: Option<String>,
     pub latest_assistant_text: Option<String>,
+    #[serde(default)]
+    pub visible_progress_messages: Vec<String>,
     pub counters: RunCounters,
     pub payload_json: String,
 }
@@ -447,6 +457,7 @@ impl RunEvent {
             target_id: None,
             activity_fingerprint: None,
             latest_assistant_text: None,
+            visible_progress_messages: Vec::new(),
             counters,
             payload_json: "{}".into(),
         }
@@ -460,6 +471,7 @@ pub struct RecoveryEnvelope {
     pub run_id: String,
     pub exact_commit: Option<String>,
     pub conversation_url: Option<String>,
+    #[serde(default)]
     pub conversation_kind: ConversationKind,
     pub original_goal: String,
     pub acceptance_prompt: Option<String>,
@@ -480,7 +492,9 @@ pub struct RecoveryEnvelope {
     pub pending_work: Vec<String>,
     #[serde(default)]
     pub context_references: Vec<String>,
+    #[serde(default)]
     pub last_committed_outbound_message: Option<String>,
+    #[serde(default)]
     pub outbound_delivery_confirmed: bool,
     pub continuation_instruction: String,
 }
