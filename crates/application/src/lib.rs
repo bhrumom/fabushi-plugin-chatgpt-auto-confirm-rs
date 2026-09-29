@@ -347,8 +347,10 @@ impl<'a> RunPrompt<'a> {
                     )?;
                     self.browser.send_prompt(&outbound).await?;
                 }
-                self.clock.sleep(options.poll_interval).await;
-                continue;
+                if !checkpoint.outbound_delivery_confirmed {
+                    self.clock.sleep(options.poll_interval).await;
+                    continue;
+                }
             }
 
             let fingerprint = snapshot.activity_fingerprint();
