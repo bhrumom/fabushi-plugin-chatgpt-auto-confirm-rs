@@ -111,7 +111,7 @@ Canonical URL validation is implemented in `crates/domain`, and the SQLite mater
 Default policy:
 - 90 seconds: dispatch not confirmed -> resend original prompt.
 - 15 minutes with no observable progress -> reload the current conversation.
-- Too many requests / 请求过于频繁 -> click Got it / 明白了 when present, pause 5 minutes, maximum 3 rate-limit pauses before failing the run.
+- Too many requests / 请求过于频繁 -> require a currently visible semantic dialog/notice, click Got it / 明白了 when present, pause 5 minutes, maximum 3 rate-limit pauses; if the condition is still present after the threshold, emit FreshConversationRequested and resume through a fresh-conversation RecoveryEnvelope instead of simply failing the run.
 - 30 minutes without terminal completion, when not actively streaming -> send 继续完成所有.
 - Continue until stable Copy-button terminal evidence or the configured global run timeout.
 
@@ -221,7 +221,7 @@ Required scenario matrix:
 14. RecoveryEnvelope handoff/replay;
 15. final completion does not create another Acceptance conversation.
 
-The built-in workflow exercises the safely reproducible live subset directly through the shipping CLI/runtime/SQLite path. Rare/destructive conditions use an optional runner-installed scenario driver with a fixed evidence contract. If that driver or a real precondition is unavailable, the scenario must be reported not-configured; it may not be replaced by a mock or synthetic ChatGPT DOM state. Rate-limit and conversation-too-long only count when the driver attests that the condition was naturally observed on real ChatGPT and synthetic_ui=false.
+The built-in workflow exercises the safely reproducible live subset directly through the shipping CLI/runtime/SQLite path. Gate D also ships a repository-owned, versioned real-environment scenario driver at scripts/real-environment-scenario-driver.py and uses it by default for target crash, browser crash, message-confirmation timeout, continuation, disconnection, rate-limit, and conversation-too-long. The driver operates the shipping binary plus real authenticated ChatGPT and only uses allowed CDP target close, host process SIGKILL, or opt-in Linux network-interface fault controls; it never fabricates dialogs, assistant turns, or other ChatGPT UI state. An external driver path is retained only as an explicit override and is never required for final certification. If a required host permission or real precondition is unavailable, the repository-owned driver reports not-configured. Rate-limit and conversation-too-long only count when the condition was naturally observed on real ChatGPT and synthetic_ui=false.
 
 Evidence must record:
 - exact commit SHA and GitHub Actions run;
@@ -233,7 +233,8 @@ Evidence must record:
 - Work/Acceptance conversation-kind sequence;
 - RecoveryEnvelope persistence across a new process;
 - per-scenario passed/failed/not-configured status;
-- external scenario-driver SHA-256 when used;
+- repository-owned scenario-driver SHA-256, or the explicit override SHA-256 when an override is used;
+- per-scenario artifact SHA-256 values, workflow run ID, real_chatgpt=true, synthetic_ui=false, canonical conversation URL and concrete observations for every passed real-environment scenario;
 - SHA-256 of the final matrix artifact;
 - auto-confirm proof when an actual Allow once card appears.
 
@@ -294,7 +295,7 @@ Implemented on the migration branch after the initial Rust cut:
 - fail-closed ExecutionProfile verification for model and thinking effort;
 - Linux profile directory mode 0700;
 - real headless Chromium fixture job in GitHub Actions;
-- separate self-hosted authenticated Linux ChatGPT 15-scenario evidence workflow with exact-commit matrix, cross-process RecoveryEnvelope/Work-Acceptance coverage, optional real-environment scenario-driver contract, and artifact hash binding.
+- separate self-hosted authenticated Linux ChatGPT 15-scenario evidence workflow with exact-commit matrix, cross-process RecoveryEnvelope/Work-Acceptance coverage, repository-owned real-environment scenario driver by default, optional explicit driver override, and per-scenario/final artifact hash binding.
 
 Not yet claimed complete:
 - Gate D live authenticated ChatGPT Linux E2E evidence: the full matrix harness is implemented, but this repository still lacks a retained certify=true run where all 15 real-environment scenarios passed on a user-owned logged-in Linux browser session.

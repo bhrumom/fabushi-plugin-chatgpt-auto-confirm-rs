@@ -41,14 +41,14 @@ BUILTIN_SCENARIOS = {
     "final_completion_no_duplicate_acceptance",
 }
 
-EXTERNAL_SCENARIOS = [
+REAL_ENVIRONMENT_SCENARIOS = [
     "target_crash_recovery",
-    "browser_crash_recovery",
     "message_confirmation_timeout",
     "continuation",
     "disconnection",
     "rate_limit",
     "conversation_too_long",
+    "browser_crash_recovery",
 ]
 
 NATURAL_UI_SCENARIOS = {"rate_limit", "conversation_too_long"}
@@ -249,46 +249,58 @@ def scenario(status, source, evidence=None, reason=None):
     return payload
 
 
-def validate_external_result(payload, scenario_name, commit, scenario_dir):
+def validate_external_result(
+    payload, scenario_name, commit, workflow_run_id, scenario_dir
+):
     if payload.get("schema") != "fabushi.authenticated-external-scenario.v1":
-        raise ValueError("external driver returned unsupported schema")
+        raise ValueError("scenario driver returned unsupported schema")
     if payload.get("scenario") != scenario_name:
-        raise ValueError("external driver scenario mismatch")
+        raise ValueError("scenario driver scenario mismatch")
+    if payload.get("exact_commit") != commit:
+        raise ValueError("scenario driver exact_commit mismatch")
+    if str(payload.get("workflow_run_id") or "") != str(workflow_run_id):
+        raise ValueError("scenario driver workflow_run_id mismatch")
     status = payload.get("status")
     if status not in {"passed", "not-configured", "failed"}:
-        raise ValueError("external driver status must be passed/not-configured/failed")
+        raise ValueError("scenario driver status must be passed/not-configured/failed")
+    observations = payload.get("observations")
+    if not isinstance(observations, list):
+        raise ValueError("scenario driver observations must be a list")
     if status != "passed":
         return {
             "status": status,
-            "reason": payload.get("reason") or "external driver did not pass scenario",
-            "observations": payload.get("observations") or [],
+            "reason": payload.get("reason") or "scenario driver did not pass scenario",
+            "observations": observations,
+            "natural_condition": payload.get("natural_condition"),
         }
-    if payload.get("exact_commit") != commit:
-        raise ValueError("external driver exact_commit mismatch")
     if payload.get("real_chatgpt") is not True:
-        raise ValueError("passed external scenario must assert real_chatgpt=true")
+        raise ValueError("passed scenario must assert real_chatgpt=true")
     if payload.get("synthetic_ui") is not False:
-        raise ValueError("passed external scenario must assert synthetic_ui=false")
+        raise ValueError("passed scenario must assert synthetic_ui=false")
     if scenario_name in NATURAL_UI_SCENARIOS and payload.get("natural_condition") is not True:
         raise ValueError(
             f"{scenario_name} may only pass from a naturally observed real ChatGPT condition"
         )
     url = payload.get("conversation_url")
     if not canonical_chatgpt_url(url):
-        raise ValueError("passed external scenario lacks canonical ChatGPT conversation URL")
-    observations = payload.get("observations")
-    if not isinstance(observations, list) or not observations:
-        raise ValueError("passed external scenario requires non-empty observations")
+        raise ValueError("passed scenario lacks canonical ChatGPT conversation URL")
+    if not observations:
+        raise ValueError("passed scenario requires non-empty observations")
 
+    artifact_files = payload.get("artifact_files")
+    if not isinstance(artifact_files, list) or not artifact_files:
+        raise ValueError("passed scenario requires at least one scenario artifact")
     artifact_hashes = {}
     root = Path(scenario_dir).resolve()
-    for relative in payload.get("artifact_files") or []:
+    for relative in artifact_files:
         rel = Path(relative)
+        if rel.is_absolute():
+            raise ValueError("scenario artifact path must be relative")
         candidate = (root / rel).resolve()
         if root != candidate and root not in candidate.parents:
-            raise ValueError("external artifact escaped its scenario evidence directory")
+            raise ValueError("scenario artifact escaped its scenario evidence directory")
         if not candidate.is_file():
-            raise ValueError(f"external artifact is missing: {relative}")
+            raise ValueError(f"scenario artifact is missing: {relative}")
         artifact_hashes[str(rel)] = sha256_file(candidate)
 
     return {
@@ -298,33 +310,52 @@ def validate_external_result(payload, scenario_name, commit, scenario_dir):
         "fault_injection": payload.get("fault_injection") or "none",
         "natural_condition": payload.get("natural_condition"),
         "artifact_sha256": artifact_hashes,
+        "real_chatgpt": True,
+        "synthetic_ui": False,
+        "exact_commit": commit,
+        "workflow_run_id": str(workflow_run_id),
     }
 
 
-def run_external_driver(args, matrix, evidence_dir):
-    driver = args.external_driver
-    for scenario_name in EXTERNAL_SCENARIOS:
-        if not driver:
+def driver_command(driver_path):
+    path = Path(driver_path)
+    if path.suffix == ".py":
+        return [sys.executable, str(path)]
+    return [str(path)]
+
+
+def run_real_environment_driver(args, matrix, evidence_dir):
+    repository_driver = Path(__file__).with_name("real-environment-scenario-driver.py").resolve()
+    override = Path(args.external_driver).resolve() if args.external_driver else None
+    driver_path = override or repository_driver
+    driver_source = "external-driver-override" if override else "repository-driver"
+
+    matrix["scenario_driver"] = {
+        "source": driver_source,
+        "path": str(driver_path),
+        "sha256": sha256_file(driver_path) if driver_path.is_file() else None,
+        "repository_owned_default": override is None,
+    }
+
+    for scenario_name in REAL_ENVIRONMENT_SCENARIOS:
+        if not driver_path.is_file():
             matrix["scenarios"][scenario_name] = scenario(
                 "not-configured",
-                "external-driver",
-                reason="no external real-environment scenario driver was configured",
+                driver_source,
+                reason=f"scenario driver is missing: {driver_path}",
+            )
+            continue
+        if driver_path.suffix != ".py" and not os.access(driver_path, os.X_OK):
+            matrix["scenarios"][scenario_name] = scenario(
+                "not-configured",
+                driver_source,
+                reason=f"scenario driver is not executable: {driver_path}",
             )
             continue
 
-        driver_path = Path(driver)
-        if not driver_path.is_file() or not os.access(driver_path, os.X_OK):
-            matrix["scenarios"][scenario_name] = scenario(
-                "not-configured",
-                "external-driver",
-                reason=f"external scenario driver is not executable: {driver}",
-            )
-            continue
-
-        scenario_dir = Path(evidence_dir) / "external" / scenario_name
+        scenario_dir = Path(evidence_dir) / "real-environment" / scenario_name
         scenario_dir.mkdir(parents=True, exist_ok=True)
-        argv = [
-            str(driver_path),
+        argv = driver_command(driver_path) + [
             "run",
             scenario_name,
             "--binary",
@@ -335,31 +366,54 @@ def run_external_driver(args, matrix, evidence_dir):
             str(scenario_dir),
             "--commit",
             args.commit,
+            "--workflow-run-id",
+            str(args.workflow_run_id),
             "--model",
             args.model,
             "--thinking",
             args.thinking,
+            "--fault-window-seconds",
+            str(args.fault_window_seconds),
         ]
+        if args.allow_browser_crash:
+            argv.append("--allow-browser-crash")
+        if args.allow_network_faults:
+            argv.append("--allow-network-faults")
+        if args.network_interface:
+            argv += ["--network-interface", args.network_interface]
+
         try:
             result = run_json(
-                f"external-{scenario_name}",
+                f"scenario-{scenario_name}",
                 argv,
                 evidence_dir,
                 timeout_seconds=args.external_timeout_seconds,
             )
             checked = validate_external_result(
-                result, scenario_name, args.commit, scenario_dir
+                result,
+                scenario_name,
+                args.commit,
+                args.workflow_run_id,
+                scenario_dir,
             )
             matrix["scenarios"][scenario_name] = scenario(
                 checked["status"],
-                "external-driver",
+                driver_source,
                 evidence=checked if checked["status"] == "passed" else None,
                 reason=checked.get("reason"),
             )
+            if checked["status"] != "passed":
+                matrix["scenarios"][scenario_name]["observations"] = checked.get(
+                    "observations", []
+                )
+                if scenario_name in NATURAL_UI_SCENARIOS:
+                    matrix["scenarios"][scenario_name]["natural_condition"] = bool(
+                        checked.get("natural_condition")
+                    )
         except Exception as error:
             matrix["scenarios"][scenario_name] = scenario(
                 "failed",
-                "external-driver",
+                driver_source,
                 reason=str(error),
             )
 
@@ -716,19 +770,59 @@ def self_test():
     )
 
     with __import__("tempfile").TemporaryDirectory() as tmp:
+        artifact = Path(tmp) / "observation.json"
+        write_json(artifact, {"synthetic_ui": False, "natural_condition": True})
         payload = {
             "schema": "fabushi.authenticated-external-scenario.v1",
             "scenario": "rate_limit",
             "status": "passed",
             "exact_commit": "abc",
+            "workflow_run_id": "123",
             "real_chatgpt": True,
             "synthetic_ui": False,
             "natural_condition": True,
             "conversation_url": "https://chatgpt.com/c/live",
             "observations": ["visible current rate-limit dialog"],
+            "artifact_files": ["observation.json"],
         }
-        checked = validate_external_result(payload, "rate_limit", "abc", tmp)
+        checked = validate_external_result(
+            payload, "rate_limit", "abc", "123", tmp
+        )
         assert checked["status"] == "passed"
+        assert checked["artifact_sha256"]["observation.json"] == sha256_file(artifact)
+
+        missing_natural = dict(payload)
+        missing_natural["natural_condition"] = False
+        try:
+            validate_external_result(
+                missing_natural, "rate_limit", "abc", "123", tmp
+            )
+            raise AssertionError("natural scenario incorrectly passed without natural_condition")
+        except ValueError:
+            pass
+
+        unavailable = {
+            "schema": "fabushi.authenticated-external-scenario.v1",
+            "scenario": "conversation_too_long",
+            "status": "not-configured",
+            "exact_commit": "abc",
+            "workflow_run_id": "123",
+            "real_chatgpt": True,
+            "synthetic_ui": False,
+            "natural_condition": False,
+            "observations": ["natural condition absent"],
+            "reason": "real ChatGPT did not naturally present the condition",
+        }
+        checked = validate_external_result(
+            unavailable, "conversation_too_long", "abc", "123", tmp
+        )
+        assert checked["status"] == "not-configured"
+
+    repository_driver = Path(__file__).with_name(
+        "real-environment-scenario-driver.py"
+    )
+    assert repository_driver.is_file()
+    assert sha256_file(repository_driver)
     print("authenticated-e2e-matrix self-test: PASS")
 
 
@@ -743,14 +837,22 @@ def parse_args():
     parser.add_argument("--prompt", default="回复：Linux E2E PASS")
     parser.add_argument("--model", default="GPT-5.6 Sol")
     parser.add_argument("--thinking", default="Extra High")
-    parser.add_argument("--external-driver", default="")
+    parser.add_argument(
+        "--external-driver",
+        default="",
+        help="optional explicit override; empty uses the repository-owned driver",
+    )
+    parser.add_argument("--allow-browser-crash", action="store_true")
+    parser.add_argument("--allow-network-faults", action="store_true")
+    parser.add_argument("--network-interface", default="")
+    parser.add_argument("--fault-window-seconds", type=float, default=12.0)
     parser.add_argument("--certify", action="store_true")
     parser.add_argument("--command-timeout-seconds", type=int, default=14400)
     parser.add_argument("--external-timeout-seconds", type=int, default=7200)
     args = parser.parse_args()
     if args.self_test:
         return args
-    for name in ("binary", "cdp", "evidence_dir", "commit"):
+    for name in ("binary", "cdp", "evidence_dir", "commit", "workflow_run_id"):
         if not getattr(args, name):
             parser.error(f"--{name.replace('_', '-')} is required")
     return args
@@ -779,18 +881,16 @@ def main():
             "model": args.model,
             "thinking_effort": args.thinking,
         },
-        "external_driver": {
-            "path": args.external_driver or None,
-            "sha256": sha256_file(args.external_driver)
-            if args.external_driver and Path(args.external_driver).is_file()
-            else None,
-        },
+        "scenario_driver": {"status": "pending"},
+        "real_chatgpt": False,
+        "synthetic_ui": False,
         "preflight": {"status": "pending"},
         "scenarios": {},
     }
 
     run_builtin(args, matrix, evidence_dir)
-    run_external_driver(args, matrix, evidence_dir)
+    matrix["real_chatgpt"] = matrix.get("preflight", {}).get("status") == "ready"
+    run_real_environment_driver(args, matrix, evidence_dir)
 
     for name in SCENARIOS:
         matrix["scenarios"].setdefault(

@@ -1,47 +1,88 @@
-# Authenticated Linux Gate D operations
+# Authenticated Linux Gate D runbook
 
-Status: final-environment acceptance runbook
+The workflow `.github/workflows/authenticated-linux-e2e.yml` runs only on a user-owned self-hosted Linux runner with an already authenticated ChatGPT Chromium session. It never imports or exports passwords, cookies, OTPs, access tokens, or raw browser storage.
 
-The workflow .github/workflows/authenticated-linux-e2e.yml runs only on a user-owned self-hosted Linux runner with an already authenticated ChatGPT Chromium session. It never imports or exports passwords, cookies, OTPs, access tokens, or browser storage.
+## Default ownership
+
+Gate D no longer depends on an unversioned runner-installed scenario program. The exact checked-out commit owns both orchestration layers:
+
+- `scripts/authenticated-e2e-matrix.py` owns the 15-scenario matrix and final certification decision.
+- `scripts/real-environment-scenario-driver.py` is the default real-environment driver for target crash, browser crash, message-confirmation timeout, continuation, disconnection, rate-limit, and conversation-too-long.
+
+The optional `scenario_driver` workflow input is only an explicit override. Leaving it empty is the normal and certification-ready path.
 
 ## Modes
 
-Use certify=false for preflight. The workflow still writes evidence/matrix.json and records unavailable external conditions as not-configured. This mode is useful for checking the authenticated browser, model/thinking selection, the shipping queue path, RecoveryEnvelope replay, and Work/Acceptance switching without pretending final certification succeeded.
+Use `certify=false` for preflight. The workflow still writes `evidence/matrix.json` and records unavailable host permissions or natural external conditions as `not-configured`. This mode is useful for checking the authenticated browser, model/thinking selection, shipping queue path, RecoveryEnvelope replay, Work/Acceptance switching, and repository-owned driver wiring without pretending final certification succeeded.
 
-Use certify=true only for final Gate D certification. The matrix process exits non-zero unless all 15 required scenarios are passed. The evidence artifact is uploaded even when certification fails.
+Use `certify=true` only for final Gate D certification. The matrix exits non-zero unless all 15 required scenarios are passed. The evidence artifact is uploaded even when certification fails.
+
+## Repository-owned real-environment controls
+
+The driver never fabricates ChatGPT DOM state, assistant text, dialogs, toasts, rate-limit surfaces, or conversation-too-long markers.
+
+It uses only these real controls:
+
+- target crash: close the RunWorker-owned real CDP page target through Chromium's local `/json/close/<target-id>`, then require the shipping RunWorker to recover to a canonical real conversation;
+- browser crash: after explicit `allow_browser_crash=true`, discover the authenticated Chromium process/profile from the configured CDP port, run the shipping queue path in managed-browser mode, SIGKILL that Chromium process, then require AccountBrowserActor to restart the browser/profile and recover the run;
+- message-confirmation timeout: after explicit `allow_network_faults=true`, temporarily bring the selected/default-route Linux interface down before confirmation and require a real shipping dispatch retry;
+- continuation: interrupt the real network after the initial user turn is confirmed and require the shipping continuation counter to advance before terminal completion;
+- disconnection: interrupt the real network after initial dispatch, require the real page semantic observation `connection_interrupted=true`, restore the interface, and require the shipping run to settle;
+- rate-limit: inspect the current real page. If no currently visible semantic rate-limit surface exists, report `not-configured`. If it exists naturally, run shipping handling and require pause/recovery evidence. A passed result requires `natural_condition=true`;
+- conversation-too-long: inspect the current real page. If the real condition is absent, report `not-configured`. If it exists naturally, require the shipping application to return its real fresh-conversation recovery semantic. A passed result requires `natural_condition=true`.
+
+Network fault control uses the Linux `ip link set dev <iface> down/up` path. The workflow input `network_interface` may name the interface; when empty the repository driver discovers the default-route non-loopback interface. The runner must be root or have passwordless sudo permission for the required `ip` command. Missing permission is `not-configured`, never PASS.
+
+Browser and network fault controls are destructive and therefore explicit workflow opt-ins. Final `certify=true` cannot succeed while those required scenarios remain `not-configured`.
 
 ## Built-in live scenarios
 
-The repository-owned harness directly proves: normal send/final completion; same-conversation multi-turn RecoveryEnvelope resume; Work completion; Acceptance completion; a new-process SQLite rehydration boundary; Work -> Acceptance -> Work switching; RecoveryEnvelope preservation; and no duplicate Acceptance after final completion.
+The matrix harness directly proves normal send/final completion, same-conversation multi-turn RecoveryEnvelope resume, Work completion, Acceptance completion, a new-process SQLite rehydration boundary, Work -> Acceptance -> Work switching, RecoveryEnvelope preservation, and no duplicate Acceptance after final completion.
 
-The queue scenario intentionally uses separate CLI processes around the first incomplete Work result. The second process must reconstruct the task from SQLite and continue from the canonical conversation URL carried by RecoveryEnvelope. Subsequent runs prove the Work/Acceptance sequence work, work, acceptance, work, acceptance before terminal settlement.
+The queue scenario intentionally uses separate CLI processes around the first incomplete Work result. The second process must reconstruct the task from SQLite and continue from the canonical conversation URL carried by RecoveryEnvelope. Subsequent runs prove the Work/Acceptance sequence `work -> work -> acceptance -> work -> acceptance` before terminal settlement.
 
-## External real-environment scenario driver
+## Evidence contract
 
-The following scenarios are not safely reproducible on every authenticated runner without extra host state: target_crash_recovery, browser_crash_recovery, message_confirmation_timeout, continuation, disconnection, rate_limit, and conversation_too_long.
+Every repository-driver invocation receives:
 
-Install an executable driver on the self-hosted runner and pass its absolute path through the workflow scenario_driver input. The harness invokes it without a shell:
+```text
+run <scenario>
+  --binary <exact-HEAD shipping binary>
+  --cdp <authenticated CDP endpoint>
+  --evidence-dir <scenario directory>
+  --commit <exact workflow SHA>
+  --workflow-run-id <GitHub Actions run ID>
+  --model <required model>
+  --thinking <required thinking>
+```
 
-driver run <scenario> --binary <shipping-binary> --cdp <endpoint> --evidence-dir <scenario-dir> --commit <sha> --model <model> --thinking <thinking>
+The driver prints exactly one JSON document with schema `fabushi.authenticated-external-scenario.v1`. Every status binds `exact_commit` and `workflow_run_id`. A passed result additionally requires:
 
-The driver writes any files under the supplied scenario directory and prints exactly one JSON document to stdout with schema fabushi.authenticated-external-scenario.v1. A passing document contains at least:
+- `real_chatgpt: true`;
+- `synthetic_ui: false`;
+- canonical `https://chatgpt.com/c/... ` or `https://chat.openai.com/c/...` conversation URL;
+- non-empty concrete `observations`;
+- at least one scenario-local artifact path;
+- SHA-256 validation of every listed artifact by the matrix harness;
+- `natural_condition: true` for rate-limit and conversation-too-long.
 
-- scenario: the requested scenario name;
-- status: passed;
-- exact_commit: the workflow SHA;
-- real_chatgpt: true;
-- synthetic_ui: false;
-- conversation_url: a canonical https://chatgpt.com/c/... or https://chat.openai.com/c/... URL;
-- observations: a non-empty list of concrete live observations;
-- artifact_files: optional paths relative to the scenario evidence directory;
-- fault_injection: none, host, or network as applicable.
+The matrix records the SHA-256 of the repository-owned driver from the exact checked-out commit. If `scenario_driver` overrides it, the override path and SHA-256 are recorded and the matrix source changes to `external-driver-override`.
 
-For rate_limit and conversation_too_long, a passed result also requires natural_condition=true. Injecting a fake dialog, toast, assistant turn, or DOM marker is not acceptable Gate D evidence.
+## Rate-limit threshold semantics
 
-The driver must not read or export cookies, tokens, passwords, OTPs, or raw authenticated browser storage. Host-level process/network controls and normal CDP actions against the already authorized profile are allowed when required by the scenario.
+Production application behavior is authoritative: a currently visible real rate-limit semantic surface is dismissed and backed off for 5 minutes, up to 3 pauses. If the real condition remains after the threshold, the application emits `FreshConversationRequested` with reason `rate_limit_threshold_exceeded`; runtime classifies that reason as requiring a fresh conversation and builds a RecoveryEnvelope with no stale conversation URL. It does not simply fail the task.
 
 ## Evidence review
 
-Retain the uploaded authenticated-linux-e2e-<sha> artifact. Verify matrix.json has schema fabushi.authenticated-linux-e2e-matrix.v2, exact_commit equals the PR HEAD, certification_complete=true, and every required scenario is passed. Verify matrix.sha256 against matrix.json and retain any external scenario artifacts and their hashes.
+Retain the uploaded `authenticated-linux-e2e-<sha>` artifact. Verify:
 
-A green ordinary ci run is not Gate D. A preview Gate D run with certification_complete=false is not Gate D certification. A mock, fixture, synthetic DOM state, or a run from another commit is not Gate D evidence.
+1. `matrix.json` has schema `fabushi.authenticated-linux-e2e-matrix.v2`;
+2. `exact_commit` equals the PR HEAD and `workflow_run_id` equals the Actions run;
+3. `real_chatgpt=true` and `synthetic_ui=false`;
+4. `scenario_driver.repository_owned_default=true` unless an explicit override was intentionally used, and its SHA-256 is present;
+5. every required scenario is `passed` for final certification;
+6. every passed real-environment scenario has canonical conversation URL, concrete observations and non-empty `artifact_sha256`;
+7. rate-limit and conversation-too-long have `natural_condition=true`;
+8. `matrix.sha256` verifies `matrix.json`.
+
+A green ordinary CI run is not Gate D. A preview Gate D run with `certification_complete=false` is not Gate D certification. A mock, fixture, synthetic DOM state, missing natural condition, or a run from another commit is not Gate D evidence.

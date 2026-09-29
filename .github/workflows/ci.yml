@@ -21,7 +21,8 @@ jobs:
         run: ./scripts/check-architecture.sh
       - name: authenticated evidence harness contract
         run: |
-          python3 -m py_compile scripts/verify-e2e-report.py scripts/authenticated-e2e-matrix.py
+          python3 -m py_compile scripts/verify-e2e-report.py scripts/authenticated-e2e-matrix.py scripts/real-environment-scenario-driver.py
+          python3 scripts/real-environment-scenario-driver.py --self-test
           python3 scripts/authenticated-e2e-matrix.py --self-test
       - name: fmt
         run: cargo fmt --all -- --check

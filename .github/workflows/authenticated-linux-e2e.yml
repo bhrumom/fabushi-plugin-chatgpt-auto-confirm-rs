@@ -20,9 +20,28 @@ on:
         required: true
         default: "Extra High"
       scenario_driver:
-        description: "Optional executable path on the self-hosted runner implementing rare/destructive real-environment scenario driver v1"
+        description: "Optional override path for the scenario driver; empty uses the repository-owned driver from this exact commit"
         required: false
         default: ""
+      allow_browser_crash:
+        description: "Allow the repository driver to SIGKILL and recover the authenticated Chromium process for the browser-crash scenario"
+        required: true
+        type: boolean
+        default: false
+      allow_network_faults:
+        description: "Allow the repository driver to temporarily bring the default Linux network interface down/up for real fault scenarios"
+        required: true
+        type: boolean
+        default: false
+      network_interface:
+        description: "Optional Linux interface for network faults; empty auto-detects the default route interface"
+        required: false
+        default: ""
+      fault_window_seconds:
+        description: "Real host/network fault observation window"
+        required: true
+        type: number
+        default: 12
       certify:
         description: "Fail the workflow unless all 15 required real ChatGPT scenarios pass"
         required: true
@@ -54,6 +73,10 @@ jobs:
           REQUIRED_MODEL: "${{ inputs.model }}"
           REQUIRED_THINKING: "${{ inputs.thinking }}"
           SCENARIO_DRIVER: "${{ inputs.scenario_driver }}"
+          ALLOW_BROWSER_CRASH: "${{ inputs.allow_browser_crash }}"
+          ALLOW_NETWORK_FAULTS: "${{ inputs.allow_network_faults }}"
+          NETWORK_INTERFACE: "${{ inputs.network_interface }}"
+          FAULT_WINDOW_SECONDS: "${{ inputs.fault_window_seconds }}"
           CERTIFY: "${{ inputs.certify }}"
         run: |
           set -euo pipefail
@@ -67,9 +90,19 @@ jobs:
             --prompt "$ACCEPTANCE_PROMPT"
             --model "$REQUIRED_MODEL"
             --thinking "$REQUIRED_THINKING"
+            --fault-window-seconds "$FAULT_WINDOW_SECONDS"
           )
           if [[ -n "$SCENARIO_DRIVER" ]]; then
             args+=(--external-driver "$SCENARIO_DRIVER")
+          fi
+          if [[ "$ALLOW_BROWSER_CRASH" == "true" ]]; then
+            args+=(--allow-browser-crash)
+          fi
+          if [[ "$ALLOW_NETWORK_FAULTS" == "true" ]]; then
+            args+=(--allow-network-faults)
+          fi
+          if [[ -n "$NETWORK_INTERFACE" ]]; then
+            args+=(--network-interface "$NETWORK_INTERFACE")
           fi
           if [[ "$CERTIFY" == "true" ]]; then
             args+=(--certify)
