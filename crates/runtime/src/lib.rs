@@ -188,7 +188,7 @@ impl AccountBrowserActor {
         &self,
         lease: &TargetLease,
         canonical_url: &str,
-    ) -> Result<ChatGptCdp> {
+    ) -> Result<(TargetLease, ChatGptCdp)> {
         if let Some(durable) = self.store.target_lease_for_run(&lease.run_id)?
             && durable.target_id == lease.target_id
             && durable.owner_id == lease.owner_id
@@ -197,13 +197,11 @@ impl AccountBrowserActor {
                 ChatGptCdp::connect_target_id(&self.endpoint, &lease.target_id).await
         {
             browser.navigate(canonical_url).await?;
-            return Ok(browser);
+            return Ok((lease.clone(), browser));
         }
         let _ = self.store.release_target(&lease.target_id, &lease.owner_id);
-        let (_, browser) = self
-            .lease_target(&lease.run_id, &lease.owner_id, Some(canonical_url))
-            .await?;
-        Ok(browser)
+        self.lease_target(&lease.run_id, &lease.owner_id, Some(canonical_url))
+            .await
     }
 }
 
@@ -259,40 +257,12 @@ impl RunWorker {
             .as_ref()
             .map(RecoveryEnvelope::render_prompt);
         let prompt = recovery_prompt.as_deref().unwrap_or(&task.prompt);
-        let (target_lease, browser) = self
+        let (mut target_lease, mut browser) = self
             .account
             .lease_target(&run_id, &self.owner_id, recovery_url.as_deref())
             .await?;
 
         let journal = self.store.journal(&run_id, &self.owner_id);
-        let heartbeat_stop = Arc::new(AtomicBool::new(false));
-        let heartbeat_flag = heartbeat_stop.clone();
-        let heartbeat_store = self.store.clone();
-        let heartbeat_account = self.account.clone();
-        let heartbeat_target_id = target_lease.target_id.clone();
-        let heartbeat_run_id = run_id.clone();
-        let heartbeat_owner_id = self.owner_id.clone();
-        let heartbeat_lease_ms = self.lease_duration_ms;
-        let mut heartbeat = tokio::spawn(async move {
-            while !heartbeat_flag.load(Ordering::Relaxed) {
-                tokio::time::sleep(Duration::from_secs(20)).await;
-                if heartbeat_flag.load(Ordering::Relaxed) {
-                    break;
-                }
-                let worker_ok = heartbeat_store.renew_lease(
-                    &heartbeat_run_id,
-                    &heartbeat_owner_id,
-                    now_ms(),
-                    heartbeat_lease_ms,
-                )?;
-                let ownership_ok = heartbeat_account
-                    .renew_worker_ownership(&heartbeat_target_id, &heartbeat_owner_id)?;
-                if !worker_ok || !ownership_ok {
-                    bail!("durable worker or target ownership lease was lost");
-                }
-            }
-            Ok::<(), anyhow::Error>(())
-        });
         let mut target_event = RunEvent::new(
             RunEventKind::TargetReattached,
             RunState::Dispatching,
@@ -307,40 +277,206 @@ impl RunWorker {
             ..RunOptions::default()
         };
         let clock = TokioClock::default();
-        let runner = RunPrompt::with_journal(&browser, &clock, &journal);
-        let run = runner.execute(prompt, options);
-        tokio::pin!(run);
-        let result = tokio::select! {
-            result = &mut run => result,
-            heartbeat_result = &mut heartbeat => {
-                match heartbeat_result {
-                    Ok(Ok(())) => Err(anyhow!("ownership heartbeat stopped unexpectedly")),
-                    Ok(Err(error)) => Err(error),
-                    Err(error) => Err(anyhow!("ownership heartbeat task failed: {error}")),
-                }
-            }
-        };
 
-        let report = match result {
-            Ok(report) => report,
-            Err(error) => {
-                self.store.settle_task(
-                    &task,
-                    None,
-                    task.recovery_context.as_ref(),
-                    None,
-                    Some(&error.to_string()),
-                )?;
-                heartbeat_stop.store(true, Ordering::Relaxed);
-                if !heartbeat.is_finished() {
-                    let _ = heartbeat.await;
+        let report = loop {
+            let heartbeat_stop = Arc::new(AtomicBool::new(false));
+            let heartbeat_flag = heartbeat_stop.clone();
+            let heartbeat_store = self.store.clone();
+            let heartbeat_account = self.account.clone();
+            let heartbeat_target_id = target_lease.target_id.clone();
+            let heartbeat_run_id = run_id.clone();
+            let heartbeat_owner_id = self.owner_id.clone();
+            let heartbeat_lease_ms = self.lease_duration_ms;
+            let mut heartbeat = tokio::spawn(async move {
+                while !heartbeat_flag.load(Ordering::Relaxed) {
+                    tokio::time::sleep(Duration::from_secs(20)).await;
+                    if heartbeat_flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let worker_ok = heartbeat_store.renew_lease(
+                        &heartbeat_run_id,
+                        &heartbeat_owner_id,
+                        now_ms(),
+                        heartbeat_lease_ms,
+                    )?;
+                    let ownership_ok = heartbeat_account
+                        .renew_worker_ownership(&heartbeat_target_id, &heartbeat_owner_id)?;
+                    if !worker_ok || !ownership_ok {
+                        bail!("durable worker or target ownership lease was lost");
+                    }
                 }
-                let _ = self
-                    .account
-                    .release_target_ownership(&target_lease.target_id, &self.owner_id);
-                self.store.release_lease(&run_id, &self.owner_id)?;
-                let _ = browser.close_owned_target().await;
-                return Err(error);
+                Ok::<(), anyhow::Error>(())
+            });
+
+            let result = {
+                let runner = RunPrompt::with_journal(&browser, &clock, &journal);
+                let run = runner.execute(prompt, options.clone());
+                tokio::pin!(run);
+                tokio::select! {
+                    result = &mut run => result,
+                    heartbeat_result = &mut heartbeat => {
+                        match heartbeat_result {
+                            Ok(Ok(())) => Err(anyhow!("ownership heartbeat stopped unexpectedly")),
+                            Ok(Err(error)) => Err(error),
+                            Err(error) => Err(anyhow!("ownership heartbeat task failed: {error}")),
+                        }
+                    }
+                }
+            };
+
+            heartbeat_stop.store(true, Ordering::Relaxed);
+            if !heartbeat.is_finished() {
+                heartbeat.abort();
+                let _ = heartbeat.await;
+            }
+
+            match result {
+                Ok(report) => break report,
+                Err(error) => {
+                    let target_exists = browser.target_exists().await;
+                    match target_exists {
+                        Ok(false) => {
+                            let current_run = self
+                                .store
+                                .snapshot()?
+                                .runs
+                                .into_iter()
+                                .find(|run| run.run_id == run_id)
+                                .ok_or_else(|| anyhow!("run {run_id} disappeared during target recovery"))?;
+                            let mut checkpoint = current_run.checkpoint;
+                            if checkpoint.counters.target_recoveries >= 3 {
+                                checkpoint.pending_recovery =
+                                    Some("target_recovery_limit_exceeded".into());
+                                fabushi_chatgpt_application::RunJournal::record_with_checkpoint(
+                                    &journal,
+                                    &RunEvent {
+                                        kind: RunEventKind::RunFailed,
+                                        state: RunState::Failed,
+                                        canonical_conversation_url: checkpoint
+                                            .last_conversation_url
+                                            .clone(),
+                                        target_id: Some(target_lease.target_id.clone()),
+                                        activity_fingerprint: checkpoint
+                                            .last_activity_fingerprint
+                                            .clone(),
+                                        latest_assistant_text: current_run
+                                            .latest_assistant_text
+                                            .clone(),
+                                        visible_progress_messages: current_run
+                                            .visible_progress_messages
+                                            .clone(),
+                                        queue_phase: None,
+                                        counters: checkpoint.counters.clone(),
+                                        payload_json: serde_json::json!({
+                                            "reason": "target_recovery_limit_exceeded"
+                                        })
+                                        .to_string(),
+                                    },
+                                    &checkpoint,
+                                )?;
+                                return Err(anyhow!(
+                                    "target recovery limit exceeded after transport failure: {error}"
+                                ));
+                            }
+
+                            let canonical_url = checkpoint
+                                .last_conversation_url
+                                .clone()
+                                .or(current_run.canonical_conversation_url.clone())
+                                .ok_or_else(|| {
+                                    anyhow!(
+                                        "target lost before a canonical conversation URL was durable: {error}"
+                                    )
+                                })?;
+                            checkpoint.counters.target_recoveries += 1;
+                            checkpoint.pending_recovery = Some("target_lost".into());
+                            let mut lost = RunEvent::new(
+                                RunEventKind::TargetLost,
+                                RunState::Recovering,
+                                checkpoint.counters.clone(),
+                            );
+                            lost.target_id = Some(target_lease.target_id.clone());
+                            lost.canonical_conversation_url = Some(canonical_url.clone());
+                            lost.latest_assistant_text =
+                                current_run.latest_assistant_text.clone();
+                            lost.visible_progress_messages =
+                                current_run.visible_progress_messages.clone();
+                            lost.payload_json = serde_json::json!({
+                                "recovery_attempt": checkpoint.counters.target_recoveries
+                            })
+                            .to_string();
+                            fabushi_chatgpt_application::RunJournal::record_with_checkpoint(
+                                &journal,
+                                &lost,
+                                &checkpoint,
+                            )?;
+
+                            let (replacement_lease, replacement_browser) = self
+                                .account
+                                .recover_target(&target_lease, &canonical_url)
+                                .await
+                                .context("recover lost run target through account actor")?;
+                            target_lease = replacement_lease;
+                            browser = replacement_browser;
+                            checkpoint.pending_recovery = None;
+                            let mut reattached = RunEvent::new(
+                                RunEventKind::TargetReattached,
+                                RunState::Running,
+                                checkpoint.counters.clone(),
+                            );
+                            reattached.target_id = Some(target_lease.target_id.clone());
+                            reattached.canonical_conversation_url = Some(canonical_url);
+                            reattached.payload_json = serde_json::json!({
+                                "recovery_attempt": checkpoint.counters.target_recoveries
+                            })
+                            .to_string();
+                            fabushi_chatgpt_application::RunJournal::record_with_checkpoint(
+                                &journal,
+                                &reattached,
+                                &checkpoint,
+                            )?;
+                            continue;
+                        }
+                        Err(probe_error) => {
+                            let current_run = self
+                                .store
+                                .snapshot()?
+                                .runs
+                                .into_iter()
+                                .find(|run| run.run_id == run_id);
+                            if let Some(current_run) = current_run {
+                                let mut checkpoint = current_run.checkpoint;
+                                checkpoint.counters.browser_recoveries += 1;
+                                checkpoint.pending_recovery = Some("browser_lost".into());
+                                let mut lost = RunEvent::new(
+                                    RunEventKind::BrowserLost,
+                                    RunState::Recovering,
+                                    checkpoint.counters.clone(),
+                                );
+                                lost.target_id = Some(target_lease.target_id.clone());
+                                lost.canonical_conversation_url =
+                                    checkpoint.last_conversation_url.clone();
+                                lost.latest_assistant_text =
+                                    current_run.latest_assistant_text.clone();
+                                lost.visible_progress_messages =
+                                    current_run.visible_progress_messages.clone();
+                                lost.payload_json = serde_json::json!({
+                                    "probe_error": probe_error.to_string()
+                                })
+                                .to_string();
+                                fabushi_chatgpt_application::RunJournal::record_with_checkpoint(
+                                    &journal,
+                                    &lost,
+                                    &checkpoint,
+                                )?;
+                            }
+                            return Err(anyhow!(
+                                "browser/CDP endpoint lost while running target: {probe_error}; original error: {error}"
+                            ));
+                        }
+                        Ok(true) => return Err(error),
+                    }
+                }
             }
         };
 
@@ -398,10 +534,6 @@ impl RunWorker {
                 .settle_task(&task, None, None, None, Some(&report.message))?;
         }
 
-        heartbeat_stop.store(true, Ordering::Relaxed);
-        if !heartbeat.is_finished() {
-            let _ = heartbeat.await;
-        }
         self.account
             .release_target_ownership(&target_lease.target_id, &self.owner_id)?;
         self.store.release_lease(&run_id, &self.owner_id)?;
