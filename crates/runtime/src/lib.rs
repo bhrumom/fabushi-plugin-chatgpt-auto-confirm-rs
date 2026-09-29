@@ -7,13 +7,18 @@ use fabushi_chatgpt_domain::{
     RecoveryEnvelope, RunEvent, RunEventKind, RunReport, RunState, TaskReportStatus,
 };
 use std::path::Path;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, Semaphore};
 
-pub use fabushi_chatgpt_cdp::ChatGptCdp;
 pub use fabushi_chatgpt_application::QueueStore;
-pub use fabushi_chatgpt_domain::{ExecutionProfile, ObservedExecutionProfile, QueueTask, RunRecord};
+pub use fabushi_chatgpt_cdp::ChatGptCdp;
+pub use fabushi_chatgpt_domain::{
+    ExecutionProfile, ObservedExecutionProfile, QueueTask, RunRecord,
+};
 pub use fabushi_chatgpt_linux_browser::{BrowserLaunch, find_chromium_binary, launch_chromium};
 pub use fabushi_chatgpt_sqlite_store::SqliteStore;
 
@@ -46,7 +51,9 @@ pub async fn run_prompt(
     options: RunOptions,
 ) -> Result<RunReport> {
     let clock = TokioClock::default();
-    RunPrompt::new(browser, &clock).execute(prompt, options).await
+    RunPrompt::new(browser, &clock)
+        .execute(prompt, options)
+        .await
 }
 
 #[derive(Debug, Clone)]
@@ -100,7 +107,9 @@ impl AccountBrowserActor {
             browser.navigate(canonical_url).await?;
             return Ok(browser);
         }
-        let (_, browser) = self.lease_target(&lease.run_id, Some(canonical_url)).await?;
+        let (_, browser) = self
+            .lease_target(&lease.run_id, Some(canonical_url))
+            .await?;
         Ok(browser)
     }
 }
@@ -132,7 +141,11 @@ impl RunWorker {
         run_id: String,
         recovery_url: Option<String>,
     ) -> Result<RunReport> {
-        let recovery_url = recovery_url.or_else(|| task.recovery_context.as_ref().and_then(|envelope| envelope.conversation_url.clone()));
+        let recovery_url = recovery_url.or_else(|| {
+            task.recovery_context
+                .as_ref()
+                .and_then(|envelope| envelope.conversation_url.clone())
+        });
         let recovery_prompt = task
             .recovery_context
             .as_ref()
@@ -204,13 +217,8 @@ impl RunWorker {
         if report.state == RunState::Complete {
             self.settle_terminal_response(&task, &run_id, &report)?;
         } else {
-            self.store.settle_task(
-                &task,
-                None,
-                None,
-                None,
-                Some(&report.message),
-            )?;
+            self.store
+                .settle_task(&task, None, None, None, Some(&report.message))?;
         }
 
         heartbeat_stop.store(true, Ordering::Relaxed);
@@ -228,13 +236,17 @@ impl RunWorker {
     ) -> Result<()> {
         match parse_task_report(&run_report.assistant_text) {
             Ok(Some(report)) => {
-                if report.task_id != task.id || report.applied_task_revision != task.current_revision {
+                if report.task_id != task.id
+                    || report.applied_task_revision != task.current_revision
+                {
                     let error = "task_report_identity_or_revision_mismatch";
-                    self.store.settle_task(task, None, None, None, Some(error))?;
+                    self.store
+                        .settle_task(task, None, None, None, Some(error))?;
                     return Ok(());
                 }
                 if report.status == TaskReportStatus::Complete && report.all_tasks_complete {
-                    self.store.settle_task(task, Some(&report), None, None, None)?;
+                    self.store
+                        .settle_task(task, Some(&report), None, None, None)?;
                     return Ok(());
                 }
 
@@ -256,13 +268,8 @@ impl RunWorker {
                     .wait_seconds
                     .filter(|seconds| *seconds > 0)
                     .map(|seconds| now_ms() + (seconds as i64 * 1000));
-                self.store.settle_task(
-                    task,
-                    Some(&report),
-                    Some(&recovery),
-                    wait_until,
-                    None,
-                )?;
+                self.store
+                    .settle_task(task, Some(&report), Some(&recovery), wait_until, None)?;
             }
             Ok(None) => {
                 if let Some(wait) = parse_task_wait(&run_report.assistant_text)? {

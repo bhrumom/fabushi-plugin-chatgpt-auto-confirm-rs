@@ -156,10 +156,7 @@ pub struct ObservedExecutionProfile {
 impl ObservedExecutionProfile {
     pub fn satisfies(&self, requested: &ExecutionProfile) -> bool {
         matches_requested(self.model.as_deref(), &requested.model)
-            && matches_requested(
-                self.thinking_effort.as_deref(),
-                &requested.thinking_effort,
-            )
+            && matches_requested(self.thinking_effort.as_deref(), &requested.thinking_effort)
     }
 }
 
@@ -235,7 +232,11 @@ pub struct QueueTask {
 }
 
 impl QueueTask {
-    pub fn new(id: impl Into<String>, account_id: impl Into<String>, prompt: impl Into<String>) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        account_id: impl Into<String>,
+        prompt: impl Into<String>,
+    ) -> Self {
         let prompt = prompt.into();
         Self {
             id: id.into(),
@@ -408,10 +409,7 @@ impl RecoveryEnvelope {
         parts.push(section("已完成", &self.completed));
         parts.push(section("剩余", &self.remaining));
         parts.push(section("阻塞", &self.blockers));
-        parts.push(format!(
-            "## 接力要求\n{}",
-            self.continuation_instruction
-        ));
+        parts.push(format!("## 接力要求\n{}", self.continuation_instruction));
         parts.join("\n\n")
     }
 }
@@ -493,10 +491,14 @@ fn validate_task_report(report: &AutomationTaskReport) -> Result<(), TaskReportE
         return Err(TaskReportError("unsupported task report protocol".into()));
     }
     if report.task_id.trim().is_empty() || report.applied_task_revision == 0 {
-        return Err(TaskReportError("task report identity/revision is invalid".into()));
+        return Err(TaskReportError(
+            "task report identity/revision is invalid".into(),
+        ));
     }
     if report.wait_seconds.unwrap_or(0) > 604_800 {
-        return Err(TaskReportError("task report wait_seconds exceeds seven days".into()));
+        return Err(TaskReportError(
+            "task report wait_seconds exceeds seven days".into(),
+        ));
     }
     for value in report
         .completed
@@ -505,7 +507,9 @@ fn validate_task_report(report: &AutomationTaskReport) -> Result<(), TaskReportE
         .chain(&report.blockers)
     {
         if value.trim().is_empty() {
-            return Err(TaskReportError("task report lists may not contain empty items".into()));
+            return Err(TaskReportError(
+                "task report lists may not contain empty items".into(),
+            ));
         }
     }
 

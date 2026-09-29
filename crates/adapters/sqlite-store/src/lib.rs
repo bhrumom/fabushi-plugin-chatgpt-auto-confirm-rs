@@ -1,7 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
-use fabushi_chatgpt_application::{
-    QueueClaim, QueueSnapshot, QueueStore, RunJournal,
-};
+use fabushi_chatgpt_application::{QueueClaim, QueueSnapshot, QueueStore, RunJournal};
 use fabushi_chatgpt_domain::{
     ApprovalFingerprint, AutomationTaskReport, QueueTask, RecoveryEnvelope, RunEvent, RunEventKind,
     RunRecord, RunState, TaskState,
@@ -20,7 +18,10 @@ pub struct SqliteStore {
 impl SqliteStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create sqlite queue directory {}", parent.display()))?;
         }
@@ -33,7 +34,8 @@ impl SqliteStore {
     }
 
     pub fn open_in_memory() -> Result<Self> {
-        let connection = Connection::open_in_memory().context("open in-memory sqlite queue store")?;
+        let connection =
+            Connection::open_in_memory().context("open in-memory sqlite queue store")?;
         let store = Self {
             connection: Arc::new(Mutex::new(connection)),
         };
@@ -42,7 +44,10 @@ impl SqliteStore {
     }
 
     fn migrate(&self) -> Result<()> {
-        let connection = self.connection.lock().map_err(|_| anyhow!("sqlite mutex poisoned"))?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("sqlite mutex poisoned"))?;
         connection.execute_batch(
             r#"
 PRAGMA journal_mode=WAL;
@@ -109,7 +114,11 @@ CREATE INDEX IF NOT EXISTS idx_worker_leases_expiry
         Ok(())
     }
 
-    pub fn journal(&self, run_id: impl Into<String>, owner_id: impl Into<String>) -> SqliteRunJournal {
+    pub fn journal(
+        &self,
+        run_id: impl Into<String>,
+        owner_id: impl Into<String>,
+    ) -> SqliteRunJournal {
         SqliteRunJournal {
             store: self.clone(),
             run_id: run_id.into(),
@@ -118,7 +127,10 @@ CREATE INDEX IF NOT EXISTS idx_worker_leases_expiry
     }
 
     pub fn journal_mode(&self) -> Result<String> {
-        let connection = self.connection.lock().map_err(|_| anyhow!("sqlite mutex poisoned"))?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("sqlite mutex poisoned"))?;
         Ok(connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?)
     }
 
@@ -168,7 +180,10 @@ impl QueueStore for SqliteStore {
         }
         task.updated_at_ms = now_ms();
 
-        let connection = self.connection.lock().map_err(|_| anyhow!("sqlite mutex poisoned"))?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("sqlite mutex poisoned"))?;
         let existing: Option<(u64, String)> = connection
             .query_row(
                 "SELECT current_revision, body_json FROM tasks WHERE task_id = ?1",
@@ -249,7 +264,10 @@ ON CONFLICT(task_id) DO UPDATE SET
         now_ms: i64,
         lease_duration_ms: i64,
     ) -> Result<Option<QueueClaim>> {
-        let mut connection = self.connection.lock().map_err(|_| anyhow!("sqlite mutex poisoned"))?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("sqlite mutex poisoned"))?;
         let tx = connection.transaction()?;
 
         tx.execute(
@@ -273,9 +291,10 @@ ON CONFLICT(task_id) DO UPDATE SET
             let status_runnable = task.status == TaskState::Queued
                 || (task.status == TaskState::Waiting
                     && task.waiting_until_ms.is_none_or(|until| until <= now_ms));
-            let dependencies_complete = task.depends_on.iter().all(|dependency| {
-                statuses.get(dependency) == Some(&TaskState::Completed)
-            });
+            let dependencies_complete = task
+                .depends_on
+                .iter()
+                .all(|dependency| statuses.get(dependency) == Some(&TaskState::Completed));
             let locks_available = task
                 .resource_locks
                 .iter()
@@ -318,7 +337,12 @@ VALUES (?1, ?2, 'dispatching', ?3, ?4, ?5, NULL)
 INSERT INTO worker_leases(run_id, task_id, owner_id, lease_revision, expires_at_ms)
 VALUES (?1, ?2, ?3, 1, ?4)
 "#,
-            params![run.run_id, run.task_id, owner_id, now_ms + lease_duration_ms],
+            params![
+                run.run_id,
+                run.task_id,
+                owner_id,
+                now_ms + lease_duration_ms
+            ],
         )?;
         tx.execute(
             r#"
@@ -339,7 +363,10 @@ VALUES (?1, 'run_started', '{}', ?2)
         now_ms: i64,
         lease_duration_ms: i64,
     ) -> Result<bool> {
-        let connection = self.connection.lock().map_err(|_| anyhow!("sqlite mutex poisoned"))?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("sqlite mutex poisoned"))?;
         let changed = connection.execute(
             r#"
 UPDATE worker_leases
@@ -352,7 +379,10 @@ WHERE run_id = ?1 AND owner_id = ?2 AND expires_at_ms > ?4
     }
 
     fn release_lease(&self, run_id: &str, owner_id: &str) -> Result<()> {
-        let connection = self.connection.lock().map_err(|_| anyhow!("sqlite mutex poisoned"))?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("sqlite mutex poisoned"))?;
         connection.execute(
             "DELETE FROM worker_leases WHERE run_id=?1 AND owner_id=?2",
             params![run_id, owner_id],
@@ -411,7 +441,10 @@ WHERE run_id = ?1 AND owner_id = ?2 AND expires_at_ms > ?4
             }
         }
 
-        let connection = self.connection.lock().map_err(|_| anyhow!("sqlite mutex poisoned"))?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("sqlite mutex poisoned"))?;
         connection.execute(
             "UPDATE tasks SET status=?2, body_json=?3, updated_at_ms=?4 WHERE task_id=?1",
             params![
@@ -425,7 +458,10 @@ WHERE run_id = ?1 AND owner_id = ?2 AND expires_at_ms > ?4
     }
 
     fn recover_expired_leases(&self, now_ms: i64) -> Result<u32> {
-        let mut connection = self.connection.lock().map_err(|_| anyhow!("sqlite mutex poisoned"))?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("sqlite mutex poisoned"))?;
         let tx = connection.transaction()?;
         let mut statement = tx.prepare(
             r#"
@@ -466,11 +502,7 @@ WHERE l.expires_at_ms <= ?1
                     conversation_url: run.canonical_conversation_url.clone(),
                     original_goal: task.original_prompt.clone(),
                     acceptance_prompt: task.acceptance_prompt.clone(),
-                    progress_messages: run
-                        .latest_assistant_text
-                        .clone()
-                        .into_iter()
-                        .collect(),
+                    progress_messages: run.latest_assistant_text.clone().into_iter().collect(),
                     completed: task
                         .last_report
                         .as_ref()
@@ -529,7 +561,10 @@ WHERE l.expires_at_ms <= ?1
     }
 
     fn snapshot(&self) -> Result<QueueSnapshot> {
-        let connection = self.connection.lock().map_err(|_| anyhow!("sqlite mutex poisoned"))?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("sqlite mutex poisoned"))?;
         let mut task_statement = connection.prepare(
             "SELECT body_json FROM tasks ORDER BY priority DESC, updated_at_ms ASC, task_id ASC",
         )?;
@@ -539,9 +574,8 @@ WHERE l.expires_at_ms <= ?1
             tasks.push(serde_json::from_str(&row?)?);
         }
 
-        let mut run_statement = connection.prepare(
-            "SELECT body_json FROM runs ORDER BY started_at_ms ASC, run_id ASC",
-        )?;
+        let mut run_statement = connection
+            .prepare("SELECT body_json FROM runs ORDER BY started_at_ms ASC, run_id ASC")?;
         let run_rows = run_statement.query_map([], |row| row.get::<_, String>(0))?;
         let mut runs = Vec::new();
         for row in run_rows {
@@ -727,7 +761,10 @@ mod tests {
 
         let snapshot = store.snapshot().unwrap();
         assert_eq!(snapshot.runs[0].revision, 2);
-        assert_eq!(snapshot.runs[0].latest_assistant_text.as_deref(), Some("progress"));
+        assert_eq!(
+            snapshot.runs[0].latest_assistant_text.as_deref(),
+            Some("progress")
+        );
     }
 
     #[test]

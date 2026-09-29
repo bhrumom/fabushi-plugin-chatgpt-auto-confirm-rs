@@ -127,7 +127,10 @@ async fn main() -> Result<()> {
         }
         Commands::ApproveOnce => {
             let cdp = ChatGptCdp::connect(&cli.cdp).await?;
-            println!("{}", serde_json::json!({"clicked": cdp.click_allow_once().await?}));
+            println!(
+                "{}",
+                serde_json::json!({"clicked": cdp.click_allow_once().await?})
+            );
         }
         Commands::Send {
             prompt,
@@ -193,11 +196,7 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&task)?);
         }
         Commands::QueueRunOnce { account_id } => {
-            let supervisor = Supervisor::open(
-                queue_db(cli.db),
-                vec![(account_id, cli.cdp)],
-                1,
-            )?;
+            let supervisor = Supervisor::open(queue_db(cli.db), vec![(account_id, cli.cdp)], 1)?;
             supervisor.recover_startup()?;
             let report = supervisor.run_one().await?;
             println!("{}", serde_json::to_string_pretty(&report)?);

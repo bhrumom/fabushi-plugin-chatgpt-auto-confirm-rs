@@ -4,8 +4,8 @@ use std::fs;
 #[tokio::test]
 #[ignore = "requires CHROMIUM_CDP_ENDPOINT"]
 async fn chromium_fixture_covers_dispatch_approval_terminal_notice_and_reload() {
-    let endpoint = std::env::var("CHROMIUM_CDP_ENDPOINT")
-        .expect("CHROMIUM_CDP_ENDPOINT is required");
+    let endpoint =
+        std::env::var("CHROMIUM_CDP_ENDPOINT").expect("CHROMIUM_CDP_ENDPOINT is required");
     let path = std::env::temp_dir().join("fabushi-chatgpt-fixture.html");
     fs::write(
         &path,
@@ -39,7 +39,9 @@ document.querySelector('[data-testid="send-button"]').onclick = () => {
     ).unwrap();
 
     let url = format!("file://{}", path.display());
-    let browser = ChatGptCdp::create_target(&endpoint, "about:blank").await.unwrap();
+    let browser = ChatGptCdp::create_target(&endpoint, "about:blank")
+        .await
+        .unwrap();
     browser.navigate(&url).await.unwrap();
     let mut initial = None;
     for _ in 0..100 {
@@ -55,7 +57,10 @@ document.querySelector('[data-testid="send-button"]').onclick = () => {
     assert!(initial.rate_limit_notice);
     assert!(initial.approval_card_key.is_some());
     assert_eq!(initial.observed_model.as_deref(), Some("GPT-5.6"));
-    assert_eq!(initial.observed_thinking_effort.as_deref(), Some("Extra High"));
+    assert_eq!(
+        initial.observed_thinking_effort.as_deref(),
+        Some("Extra High")
+    );
     assert!(browser.click_allow_once().await.unwrap());
     assert!(!browser.snapshot().await.unwrap().waiting_for_approval);
     assert!(browser.dismiss_rate_limit_notice().await.unwrap());

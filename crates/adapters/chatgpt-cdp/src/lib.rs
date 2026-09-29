@@ -31,8 +31,9 @@ pub struct ChatGptCdp {
 impl ChatGptCdp {
     pub async fn connect(endpoint: &str) -> Result<Self> {
         let targets = fetch_targets(endpoint).await?;
-        let target = select_chatgpt_target(&targets)
-            .ok_or_else(|| anyhow!("no ChatGPT page target found; open https://chatgpt.com first"))?;
+        let target = select_chatgpt_target(&targets).ok_or_else(|| {
+            anyhow!("no ChatGPT page target found; open https://chatgpt.com first")
+        })?;
         Self::connect_target(endpoint, target).await
     }
 
@@ -89,7 +90,9 @@ impl ChatGptCdp {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let payload = json!({"id": id, "method": method, "params": params});
         let mut socket = self.socket.lock().await;
-        socket.send(Message::Text(payload.to_string().into())).await?;
+        socket
+            .send(Message::Text(payload.to_string().into()))
+            .await?;
 
         while let Some(message) = socket.next().await {
             let message = message?;
@@ -131,7 +134,10 @@ impl ChatGptCdp {
         if let Some(exception) = result.get("exceptionDetails") {
             bail!("JavaScript evaluation failed: {exception}");
         }
-        Ok(result.pointer("/result/value").cloned().unwrap_or(Value::Null))
+        Ok(result
+            .pointer("/result/value")
+            .cloned()
+            .unwrap_or(Value::Null))
     }
 
     pub async fn snapshot(&self) -> Result<PageSnapshot> {
@@ -151,12 +157,18 @@ impl ChatGptCdp {
 
     pub async fn click_allow_once(&self) -> Result<bool> {
         let value = self.evaluate(APPROVE_ONCE_SCRIPT).await?;
-        Ok(value.get("clicked").and_then(Value::as_bool).unwrap_or(false))
+        Ok(value
+            .get("clicked")
+            .and_then(Value::as_bool)
+            .unwrap_or(false))
     }
 
     pub async fn dismiss_rate_limit_notice(&self) -> Result<bool> {
         let value = self.evaluate(DISMISS_RATE_LIMIT_SCRIPT).await?;
-        Ok(value.get("clicked").and_then(Value::as_bool).unwrap_or(false))
+        Ok(value
+            .get("clicked")
+            .and_then(Value::as_bool)
+            .unwrap_or(false))
     }
 
     pub async fn ensure_profile(
@@ -173,7 +185,8 @@ impl ChatGptCdp {
     }
 
     pub async fn reload(&self) -> Result<()> {
-        self.command("Page.reload", json!({"ignoreCache": false})).await?;
+        self.command("Page.reload", json!({"ignoreCache": false}))
+            .await?;
         Ok(())
     }
 
@@ -458,8 +471,15 @@ mod tests {
 
     #[test]
     fn approval_script_is_exact_and_never_mentions_always_allow() {
-        assert!(APPROVE_ONCE_SCRIPT.contains("^(allow once|允许一次|approve once|仅允许本次|允许本次)$"));
-        assert!(!APPROVE_ONCE_SCRIPT.to_ascii_lowercase().contains("always allow"));
+        assert!(
+            APPROVE_ONCE_SCRIPT
+                .contains("^(allow once|允许一次|approve once|仅允许本次|允许本次)$")
+        );
+        assert!(
+            !APPROVE_ONCE_SCRIPT
+                .to_ascii_lowercase()
+                .contains("always allow")
+        );
     }
 
     #[test]

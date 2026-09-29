@@ -533,7 +533,10 @@ mod tests {
         }
 
         async fn send_prompt(&self, prompt: &str) -> Result<()> {
-            self.sent.lock().expect("sent poisoned").push(prompt.to_owned());
+            self.sent
+                .lock()
+                .expect("sent poisoned")
+                .push(prompt.to_owned());
             Ok(())
         }
 
@@ -581,7 +584,10 @@ mod tests {
 
     impl RunJournal for FakeJournal {
         fn record(&self, event: &RunEvent) -> Result<()> {
-            self.events.lock().expect("events poisoned").push(event.clone());
+            self.events
+                .lock()
+                .expect("events poisoned")
+                .push(event.clone());
             Ok(())
         }
 
@@ -601,7 +607,10 @@ mod tests {
 
         fn settle_approval(&self, fingerprint: &ApprovalFingerprint) -> Result<()> {
             let mut approvals = self.approvals.lock().expect("approvals poisoned");
-            approvals.entry(fingerprint.0.clone()).or_insert((0, false)).1 = true;
+            approvals
+                .entry(fingerprint.0.clone())
+                .or_insert((0, false))
+                .1 = true;
             Ok(())
         }
     }
@@ -632,7 +641,10 @@ mod tests {
             .await
             .expect("run should complete");
         assert_eq!(report.state, RunState::Complete);
-        assert_eq!(report.conversation_url.as_deref(), Some("https://chatgpt.com/c/abc123"));
+        assert_eq!(
+            report.conversation_url.as_deref(),
+            Some("https://chatgpt.com/c/abc123")
+        );
         assert_eq!(browser.sent(), vec!["hello"]);
     }
 
@@ -683,7 +695,14 @@ mod tests {
             .expect("run should complete");
         assert_eq!(report.approvals_clicked, 1);
         assert_eq!(*browser.approvals.lock().expect("approvals poisoned"), 1);
-        assert!(journal.events.lock().unwrap().iter().any(|event| event.kind == RunEventKind::ApprovalApplied));
+        assert!(
+            journal
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| event.kind == RunEventKind::ApprovalApplied)
+        );
     }
 
     #[tokio::test]
