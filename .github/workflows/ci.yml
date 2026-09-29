@@ -42,7 +42,7 @@ jobs:
           set -euo pipefail
           for candidate in google-chrome-stable google-chrome chromium chromium-browser; do
             if command -v "$candidate" >/dev/null 2>&1; then
-              echo "binary=$(command -v "$candidate")" }} "$GITHUB_OUTPUT"
+              echo "binary=$(command -v "$candidate")" >> "$GITHUB_OUTPUT"
               exit 0
             fi
           done
