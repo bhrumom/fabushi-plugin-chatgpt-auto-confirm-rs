@@ -6,6 +6,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
@@ -20,6 +21,9 @@ struct TargetInfo {
     #[serde(rename = "webSocketDebuggerUrl")]
     websocket_debugger_url: Option<String>,
 }
+
+const PAGE_READY_TIMEOUT: Duration = Duration::from_secs(15);
+const PAGE_READY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 pub struct ChatGptCdp {
     endpoint: String,
@@ -50,7 +54,9 @@ impl ChatGptCdp {
             .json()
             .await
             .context("invalid /json/new target response")?;
-        Self::connect_target(endpoint, &target).await
+        let browser = Self::connect_target(endpoint, &target).await?;
+        browser.wait_for_navigation_target(initial_url).await?;
+        Ok(browser)
     }
 
     pub async fn connect_target_id(endpoint: &str, target_id: &str) -> Result<Self> {
@@ -151,6 +157,62 @@ impl ChatGptCdp {
             .unwrap_or(Value::Null))
     }
 
+    async fn wait_for_navigation_target(&self, expected_url: &str) -> Result<()> {
+        let expected_url_json = serde_json::to_string(expected_url)?;
+        let script = format!(
+            r#"(() => {{
+                const expected = new URL({expected_url_json});
+                const current = new URL(window.location.href);
+                const targetReached =
+                    current.href === expected.href ||
+                    (
+                        current.protocol === expected.protocol &&
+                        current.host === expected.host &&
+                        current.pathname === expected.pathname
+                    );
+                return document.readyState === "complete" && targetReached;
+            }})()"#
+        );
+        let started = Instant::now();
+        loop {
+            let ready = self
+                .evaluate(&script)
+                .await
+                .ok()
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            if ready {
+                return Ok(());
+            }
+            if started.elapsed() >= PAGE_READY_TIMEOUT {
+                bail!("CDP page did not become ready after navigation to {expected_url}");
+            }
+            tokio::time::sleep(PAGE_READY_POLL_INTERVAL).await;
+        }
+    }
+
+    async fn wait_for_reload_complete(&self, previous_time_origin: f64) -> Result<()> {
+        let script = format!(
+            r#"document.readyState === "complete" && performance.timeOrigin !== {previous_time_origin}"#
+        );
+        let started = Instant::now();
+        loop {
+            let ready = self
+                .evaluate(&script)
+                .await
+                .ok()
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            if ready {
+                return Ok(());
+            }
+            if started.elapsed() >= PAGE_READY_TIMEOUT {
+                bail!("CDP page did not become ready after reload");
+            }
+            tokio::time::sleep(PAGE_READY_POLL_INTERVAL).await;
+        }
+    }
+
     pub async fn snapshot(&self) -> Result<PageSnapshot> {
         let value = self.evaluate(SNAPSHOT_SCRIPT).await?;
         serde_json::from_value(value).context("failed to decode ChatGPT page snapshot")
@@ -196,14 +258,19 @@ impl ChatGptCdp {
     }
 
     pub async fn reload(&self) -> Result<()> {
+        let previous_time_origin = self
+            .evaluate("performance.timeOrigin")
+            .await?
+            .as_f64()
+            .ok_or_else(|| anyhow!("performance.timeOrigin was not numeric before reload"))?;
         self.command("Page.reload", json!({"ignoreCache": false}))
             .await?;
-        Ok(())
+        self.wait_for_reload_complete(previous_time_origin).await
     }
 
     pub async fn navigate(&self, url: &str) -> Result<()> {
         self.command("Page.navigate", json!({"url": url})).await?;
-        Ok(())
+        self.wait_for_navigation_target(url).await
     }
 
     pub async fn close_owned_target(&self) -> Result<()> {
