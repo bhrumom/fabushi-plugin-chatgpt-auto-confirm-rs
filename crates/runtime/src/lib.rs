@@ -1077,8 +1077,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires FABUSHI_CHROMIUM_BIN on a Linux runner"]
     async fn managed_browser_restart_recreates_target() {
-        let browser_binary = std::env::var("FABUSHI_CHROMIUM_BIN")
-            .expect("FABUSHI_CHROMIUM_BIN is required");
+        let browser_binary =
+            std::env::var("FABUSHI_CHROMIUM_BIN").expect("FABUSHI_CHROMIUM_BIN is required");
         let root = std::env::temp_dir().join(format!("fabushi-managed-browser-{}", now_ms()));
         let profile_dir = root.join("profile");
         let log_dir = root.join("logs");
