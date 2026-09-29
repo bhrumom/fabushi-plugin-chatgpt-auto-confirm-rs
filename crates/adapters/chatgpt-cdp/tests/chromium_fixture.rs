@@ -11,9 +11,10 @@ async fn chromium_fixture_covers_dispatch_approval_terminal_notice_and_reload() 
         &path,
         r#"<!doctype html>
 <html><body>
-<button aria-label="GPT-5.6">GPT-5.6</button>
+<button aria-label="GPT-5.6 Sol">GPT-5.6 Sol</button>
 <button aria-label="Extra High">Extra High</button>
-<div id="rate">Too many requests <button id="gotit">Got it</button></div>
+<div style="display:none">Too many requests from an old transcript fixture</div>
+<div id="rate" role="dialog">Too many requests <button id="gotit">Got it</button></div>
 <section data-testid="approval-card" data-message-id="approval-1">
 <span>Use tool?</span><button id="allow">Allow once</button><button id="always">Always allow</button>
 </section>
@@ -56,7 +57,7 @@ document.querySelector('[data-testid="send-button"]').onclick = () => {
     assert!(initial.waiting_for_approval);
     assert!(initial.rate_limit_notice);
     assert!(initial.approval_card_key.is_some());
-    assert_eq!(initial.observed_model.as_deref(), Some("GPT-5.6"));
+    assert_eq!(initial.observed_model.as_deref(), Some("GPT-5.6 Sol"));
     assert_eq!(
         initial.observed_thinking_effort.as_deref(),
         Some("Extra High")
@@ -64,7 +65,9 @@ document.querySelector('[data-testid="send-button"]').onclick = () => {
     assert!(browser.click_allow_once().await.unwrap());
     assert!(!browser.snapshot().await.unwrap().waiting_for_approval);
     assert!(browser.dismiss_rate_limit_notice().await.unwrap());
-    assert!(!browser.snapshot().await.unwrap().rate_limit_notice);
+    let after_rate_limit = browser.snapshot().await.unwrap();
+    assert!(!after_rate_limit.rate_limit_notice);
+    assert!(!after_rate_limit.rate_limit_dialog_visible);
     browser.send_prompt("fixture prompt").await.unwrap();
     let terminal = browser.snapshot().await.unwrap();
     assert_eq!(terminal.user_turns, 1);

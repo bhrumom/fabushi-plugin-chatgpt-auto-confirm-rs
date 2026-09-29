@@ -53,7 +53,7 @@ enum Commands {
         dispatch_confirm_seconds: u64,
         #[arg(long, default_value_t = 1800)]
         continuation_seconds: u64,
-        #[arg(long, default_value = "GPT-5.6")]
+        #[arg(long, default_value = "GPT-5.6 Sol")]
         model: String,
         #[arg(long, default_value = "Extra High")]
         thinking: String,
@@ -73,7 +73,7 @@ enum Commands {
         revision: u64,
         #[arg(long, default_value_t = 0)]
         priority: i32,
-        #[arg(long, default_value = "GPT-5.6")]
+        #[arg(long, default_value = "GPT-5.6 Sol")]
         model: String,
         #[arg(long, default_value = "Extra High")]
         thinking: String,

@@ -14,7 +14,7 @@ on:
       model:
         description: "Required model"
         required: true
-        default: "GPT-5.6"
+        default: "GPT-5.6 Sol"
       thinking:
         description: "Required thinking effort"
         required: true

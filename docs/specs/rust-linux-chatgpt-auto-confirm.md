@@ -160,7 +160,7 @@ Inspect current page:
 cargo run -p fabushi-chatgpt-auto-confirm -- status
 
 Send and monitor with fail-closed execution profile verification:
-cargo run -p fabushi-chatgpt-auto-confirm -- send --prompt "完成这个任务" --model "GPT-5.6" --thinking "Extra High" --auto-confirm true
+cargo run -p fabushi-chatgpt-auto-confirm -- send --prompt "完成这个任务" --model "GPT-5.6 Sol" --thinking "Extra High" --auto-confirm true
 
 Enqueue a durable task:
 cargo run -p fabushi-chatgpt-auto-confirm -- --db ./queue.sqlite3 queue-enqueue --task-id task-1 --prompt "完成这个任务"

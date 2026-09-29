@@ -149,6 +149,7 @@ pub enum QueuePhase {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct RunCheckpoint {
     pub conversation_kind: ConversationKind,
     pub counters: RunCounters,
@@ -215,7 +216,7 @@ pub struct ExecutionProfile {
 impl Default for ExecutionProfile {
     fn default() -> Self {
         Self {
-            model: "GPT-5.6".into(),
+            model: "GPT-5.6 Sol".into(),
             thinking_effort: "Extra High".into(),
             connector_requirements: Vec::new(),
             tool_mode: None,
@@ -773,7 +774,7 @@ mod tests {
     fn execution_profile_is_fail_closed() {
         let requested = ExecutionProfile::default();
         let observed = ObservedExecutionProfile {
-            model: Some("GPT-5.6".into()),
+            model: Some("GPT-5.6 Sol".into()),
             thinking_effort: Some("High".into()),
         };
         assert!(!observed.satisfies(&requested));
@@ -794,6 +795,7 @@ mod tests {
             remaining: vec!["真实 E2E".into()],
             blockers: vec![],
             continuation_instruction: "继续完成剩余工作".into(),
+            ..Default::default()
         };
         let rendered = envelope.render_prompt();
         assert!(rendered.contains("正在检查 CI"));

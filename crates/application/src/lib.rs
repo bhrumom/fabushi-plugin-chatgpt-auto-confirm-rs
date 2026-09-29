@@ -1123,7 +1123,7 @@ mod tests {
     async fn execution_profile_fails_closed() {
         let browser = FakeBrowser::new([PageSnapshot::default()]);
         *browser.observed_profile.lock().unwrap() = ObservedExecutionProfile {
-            model: Some("GPT-5.6".into()),
+            model: Some("GPT-5.6 Sol".into()),
             thinking_effort: Some("High".into()),
         };
         let clock = FakeClock::new();

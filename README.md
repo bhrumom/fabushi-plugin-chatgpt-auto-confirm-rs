@@ -56,7 +56,7 @@ This runtime does not request or export your ChatGPT password, OTP, cookies, or 
 ./target/release/fabushi-chatgpt-auto-confirm --db ./queue.sqlite3 queue-enqueue \
   --task-id task-1 \
   --prompt "完成这个任务" \
-  --model "GPT-5.6" \
+  --model "GPT-5.6 Sol" \
   --thinking "Extra High"
 
 ./target/release/fabushi-chatgpt-auto-confirm --db ./queue.sqlite3 queue-status
