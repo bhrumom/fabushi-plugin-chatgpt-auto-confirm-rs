@@ -733,6 +733,7 @@ mod tests {
             copy_available_on_last_assistant: true,
             response_actions_complete: true,
             response_action_turn_bound_to_last: true,
+            assistant_message_settled: true,
             ..Default::default()
         };
         assert!(snapshot.is_terminal());
