@@ -4,8 +4,7 @@ use fabushi_chatgpt_application::{
     Clock, RunOptions, RunPrompt, parse_task_report, parse_task_wait,
 };
 use fabushi_chatgpt_domain::{
-    AutomationTaskReport, PageSnapshot, QueueTask, RecoveryEnvelope, RunEvent, RunEventKind,
-    RunReport, RunState, TaskReportStatus, TaskState,
+    RecoveryEnvelope, RunEvent, RunEventKind, RunReport, RunState, TaskReportStatus,
 };
 use std::path::Path;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};

@@ -177,13 +177,39 @@ impl QueueStore for SqliteStore {
             if task.current_revision < revision {
                 return Ok(());
             }
-            if task.current_revision == revision && task != previous {
-                bail!(
-                    "task {} revision {} changed without incrementing revision",
-                    task.id,
-                    revision
-                );
+            if task.current_revision == revision {
+                let content_changed = task.account_id != previous.account_id
+                    || task.title != previous.title
+                    || task.prompt != previous.prompt
+                    || task.original_prompt != previous.original_prompt
+                    || task.acceptance_prompt != previous.acceptance_prompt
+                    || task.spec_digest != previous.spec_digest
+                    || task.connector != previous.connector
+                    || task.depends_on != previous.depends_on
+                    || task.resource_locks != previous.resource_locks
+                    || task.priority != previous.priority
+                    || task.timeout_seconds != previous.timeout_seconds
+                    || task.max_task_continuations != previous.max_task_continuations
+                    || task.max_runtime_retries != previous.max_runtime_retries
+                    || task.execution_profile != previous.execution_profile;
+                if content_changed {
+                    bail!(
+                        "task {} revision {} changed without incrementing revision",
+                        task.id,
+                        revision
+                    );
+                }
+                return Ok(());
             }
+            task.status = TaskState::Queued;
+            task.applied_revision = previous.applied_revision;
+            task.runtime_retries = 0;
+            task.attempts = 0;
+            task.continuation_depth = 0;
+            task.recovery_context = None;
+            task.last_report = None;
+            task.last_error = None;
+            task.created_at_ms = previous.created_at_ms;
         }
 
         let body = serde_json::to_string(&task)?;
@@ -353,13 +379,24 @@ WHERE run_id = ?1 AND owner_id = ?2 AND expires_at_ms > ?4
             {
                 task.status = TaskState::Blocked;
             } else {
-                task.status = if waiting_until_ms.is_some() {
-                    TaskState::Waiting
-                } else {
-                    TaskState::Queued
-                };
                 task.continuation_depth += 1;
+                if task.max_task_continuations > 0
+                    && task.continuation_depth > task.max_task_continuations
+                {
+                    task.status = TaskState::Failed;
+                    task.last_error = Some("task_continuation_limit_reached".into());
+                } else {
+                    task.status = if waiting_until_ms.is_some() {
+                        TaskState::Waiting
+                    } else {
+                        TaskState::Queued
+                    };
+                }
             }
+        } else if waiting_until_ms.is_some() {
+            task.status = TaskState::Waiting;
+        } else if recovery.is_some() {
+            task.status = TaskState::Queued;
         } else if error.is_some() {
             task.runtime_retries += 1;
             if task.runtime_retries > task.max_runtime_retries {
