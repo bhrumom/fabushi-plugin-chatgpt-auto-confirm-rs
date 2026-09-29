@@ -163,6 +163,7 @@ pub struct RunCheckpoint {
     pub rate_limit_resume_at_ms: Option<i64>,
     pub continuation_deadline_ms: i64,
     pub refresh_attempts: u32,
+    pub terminal_evidence_count: u8,
     pub last_activity_fingerprint: Option<String>,
     pub last_committed_outbound_message: Option<String>,
     pub last_conversation_url: Option<String>,
