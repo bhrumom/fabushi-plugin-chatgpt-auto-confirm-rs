@@ -616,8 +616,8 @@ mod tests {
 
     #[test]
     fn approval_fingerprint_is_stable() {
-        let a = ApprovalFingerprint::from_source(" card: Allow once ");
-        let b = ApprovalFingerprint::from_source("card: Allow once");
+        let a = ApprovalFingerprint::from_source(" approval-card-42 ");
+        let b = ApprovalFingerprint::from_source("approval-card-42");
         assert_eq!(a, b);
     }
 

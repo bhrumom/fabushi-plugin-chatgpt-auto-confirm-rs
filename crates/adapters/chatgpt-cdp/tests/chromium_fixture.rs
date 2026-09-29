@@ -39,8 +39,15 @@ document.querySelector('[data-testid="send-button"]').onclick = () => {
     ).unwrap();
 
     let url = format!("file://{}", path.display());
-    let browser = ChatGptCdp::create_target(&endpoint, &url).await.unwrap();
-    let initial = browser.snapshot().await.unwrap();
+    let browser = ChatGptCdp::create_target(&endpoint, "about:blank").await.unwrap();
+    browser.navigate(&url).await.unwrap();
+    let initial = loop {
+        let snapshot = browser.snapshot().await.unwrap();
+        if snapshot.waiting_for_approval && snapshot.rate_limit_notice {
+            break snapshot;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
     assert!(initial.waiting_for_approval);
     assert!(initial.rate_limit_notice);
     assert!(initial.approval_card_key.is_some());
