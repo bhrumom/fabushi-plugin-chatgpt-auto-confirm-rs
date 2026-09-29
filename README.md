@@ -72,3 +72,12 @@ The durable runtime uses append-only run events, materialized run state, worker 
 ## Acceptance
 
 The normal `ci` workflow runs architecture, fmt, workspace tests, clippy, release build, and a real headless Chromium fixture. Production ChatGPT acceptance is deliberately separate in `authenticated-linux-e2e.yml` because it requires a user-owned authenticated Linux browser session. A fixture or mock is never reported as production ChatGPT evidence.
+
+
+### Authenticated Gate D matrix
+
+The self-hosted authenticated workflow now has two modes. A normal dispatch runs the built-in live scenarios that can be exercised safely from the repository itself: normal send, same-conversation multi-turn recovery, Work completion, independent Acceptance completion, a cross-process SQLite rehydration boundary, Work -> Acceptance -> Work switching, RecoveryEnvelope replay, and proof that a terminal Acceptance is not claimed again.
+
+The seven rare or destructive scenarios (target crash, browser crash, dispatch-confirmation timeout, continuation, disconnection, real rate limit, and real conversation-too-long) use an optional executable scenario driver already installed on the self-hosted runner. The driver is an environment fixture provider, not a substitute for the product implementation. A passed driver result must bind the exact commit, a canonical real ChatGPT conversation URL, non-synthetic UI evidence, and scenario observations. Rate-limit and conversation-too-long may only pass from naturally observed real ChatGPT conditions; DOM injection cannot certify them.
+
+Run the workflow with certify=false to collect a preflight/matrix artifact even when external conditions are missing. Missing conditions are recorded as not-configured and certification_complete=false. Run with certify=true only for final certification; the job then fails unless all 15 required scenarios are passed. See docs/operations/authenticated-linux-e2e.md for the driver contract and evidence schema.

@@ -202,16 +202,42 @@ A Chromium fixture must prove:
 
 ### Gate D — real authenticated Linux ChatGPT
 
-Human-owned login, no credential injection. Evidence must record:
-- exact commit SHA;
+Human-owned login, no credential injection. The repository-owned workflow is a scenario matrix, not a single send. It must bind the exact commit and distinguish repository-owned live scenarios from external real-environment fault/precondition scenarios.
+
+Required scenario matrix:
+1. normal send and final reply;
+2. multi-turn continuation in the same canonical conversation;
+3. Work completion;
+4. Acceptance/planning completion;
+5. target crash recovery;
+6. browser crash recovery;
+7. process restart recovery;
+8. message-confirmation timeout recovery;
+9. continuation;
+10. disconnection;
+11. real rate-limit handling;
+12. real conversation-too-long recovery;
+13. Work -> Acceptance -> Work switching;
+14. RecoveryEnvelope handoff/replay;
+15. final completion does not create another Acceptance conversation.
+
+The built-in workflow exercises the safely reproducible live subset directly through the shipping CLI/runtime/SQLite path. Rare/destructive conditions use an optional runner-installed scenario driver with a fixed evidence contract. If that driver or a real precondition is unavailable, the scenario must be reported not-configured; it may not be replaced by a mock or synthetic ChatGPT DOM state. Rate-limit and conversation-too-long only count when the driver attests that the condition was naturally observed on real ChatGPT and synthetic_ui=false.
+
+Evidence must record:
+- exact commit SHA and GitHub Actions run;
 - Linux distro and arch;
 - Chromium version;
-- CLI command;
-- starting conversation URL;
-- canonical final /c/... URL;
-- prompt dispatch proof;
-- stable terminal Copy proof;
+- redacted command metadata;
+- starting/canonical conversation URLs where applicable;
+- stable terminal completion evidence;
+- Work/Acceptance conversation-kind sequence;
+- RecoveryEnvelope persistence across a new process;
+- per-scenario passed/failed/not-configured status;
+- external scenario-driver SHA-256 when used;
+- SHA-256 of the final matrix artifact;
 - auto-confirm proof when an actual Allow once card appears.
+
+A preview run may succeed with certification_complete=false so missing external conditions can be diagnosed. A certification run must set certify=true and fail unless all 15 scenarios are passed.
 
 ### Gate E — full source replacement
 
@@ -268,9 +294,9 @@ Implemented on the migration branch after the initial Rust cut:
 - fail-closed ExecutionProfile verification for model and thinking effort;
 - Linux profile directory mode 0700;
 - real headless Chromium fixture job in GitHub Actions;
-- separate self-hosted authenticated Linux ChatGPT evidence workflow with commit/environment/artifact hash binding.
+- separate self-hosted authenticated Linux ChatGPT 15-scenario evidence workflow with exact-commit matrix, cross-process RecoveryEnvelope/Work-Acceptance coverage, optional real-environment scenario-driver contract, and artifact hash binding.
 
 Not yet claimed complete:
-- Gate D live authenticated ChatGPT Linux E2E on a user-owned logged-in Linux browser session.
+- Gate D live authenticated ChatGPT Linux E2E evidence: the full matrix harness is implemented, but this repository still lacks a retained certify=true run where all 15 real-environment scenarios passed on a user-owned logged-in Linux browser session.
 
-The source account/session export path is intentionally not reproduced because the security contract forbids credential/cookie export. GitHub-hosted CI proves Gates A-C only. Full replacement certification remains blocked until Gate D is executed successfully on an authenticated self-hosted Linux runner and its evidence artifact is retained.
+The source account/session export path is intentionally not reproduced because the security contract forbids credential/cookie export. GitHub-hosted CI proves Gates A-C plus the Gate D harness contract only. Full replacement certification remains blocked until Gate D is executed with certify=true on an authenticated self-hosted Linux runner, all 15 matrix scenarios are passed without synthetic UI substitution, and the exact-SHA evidence artifact is retained.

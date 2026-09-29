@@ -385,6 +385,7 @@ ON CONFLICT(task_id) DO UPDATE SET
         {
             run.checkpoint = checkpoint;
         }
+        run.checkpoint.conversation_kind = task.conversation_kind.clone();
 
         tx.execute(
             "UPDATE tasks SET status='running', body_json=?2, updated_at_ms=?3 WHERE task_id=?1",
@@ -1596,6 +1597,10 @@ mod tests {
             .unwrap();
         assert_eq!(next.task.conversation_kind, ConversationKind::Acceptance);
         assert_eq!(next.task.prompt, "independent acceptance prompt");
+        assert_eq!(
+            next.run.checkpoint.conversation_kind,
+            ConversationKind::Acceptance
+        );
     }
 
     #[test]

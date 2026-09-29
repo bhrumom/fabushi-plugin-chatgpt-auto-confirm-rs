@@ -436,3 +436,12 @@ Architecture is a release gate, not documentation advice.
 10. run real authenticated Linux acceptance.
 
 Do not split into distributed services unless profiling or isolation evidence proves the modular monolith insufficient.
+
+
+## 18. Authenticated acceptance evidence
+
+Gate D is an evidence layer over the shipping composition root, not a second automation implementation. The repository-owned matrix calls the real CLI/runtime and records one status for each required live scenario. Normal send, cross-process RecoveryEnvelope resume, multi-turn continuity, and Work/Acceptance switching are exercised directly. Rare/destructive conditions are delegated only to a runner-installed environment scenario driver with a fixed JSON contract.
+
+The external driver is allowed to control host/network/browser failure conditions but must not fabricate ChatGPT semantic state by injecting synthetic dialogs or assistant turns. Real rate-limit and conversation-too-long certification requires a naturally observed condition. Missing preconditions remain not-configured and cannot be promoted to passed by documentation or lower-layer tests.
+
+Every new queue run copies the authoritative QueueTask conversation_kind into its durable RunCheckpoint. This keeps crash/restart evidence aligned with the shipping Work/Acceptance owner even when the new run did not originate from a RecoveryEnvelope checkpoint.

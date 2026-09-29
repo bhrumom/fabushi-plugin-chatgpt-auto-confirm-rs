@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       cdp_endpoint:
-        description: "CDP endpoint reachable from a self-hosted authenticated Linux runner"
+        description: "CDP endpoint reachable from a user-owned authenticated Linux runner"
         required: true
         default: "http://127.0.0.1:9222"
       prompt:
-        description: "Acceptance prompt"
+        description: "Baseline live ChatGPT acceptance prompt"
         required: true
         default: "回复：Linux E2E PASS"
       model:
@@ -19,6 +19,15 @@ on:
         description: "Required thinking effort"
         required: true
         default: "Extra High"
+      scenario_driver:
+        description: "Optional executable path on the self-hosted runner implementing rare/destructive real-environment scenario driver v1"
+        required: false
+        default: ""
+      certify:
+        description: "Fail the workflow unless all 15 required real ChatGPT scenarios pass"
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -26,27 +35,52 @@ permissions:
 jobs:
   authenticated-chatgpt:
     runs-on: [self-hosted, linux]
+    timeout-minutes: 720
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.98.0"
-      - name: Verify authenticated ChatGPT and run exact UI profile
+
+      - name: Build exact-HEAD acceptance binary
+        run: cargo build --release -p fabushi-chatgpt-auto-confirm
+
+      - name: Run authenticated Gate D matrix
+        id: gate-d
         shell: bash
+        env:
+          CDP_ENDPOINT: "${{ inputs.cdp_endpoint }}"
+          ACCEPTANCE_PROMPT: "${{ inputs.prompt }}"
+          REQUIRED_MODEL: "${{ inputs.model }}"
+          REQUIRED_THINKING: "${{ inputs.thinking }}"
+          SCENARIO_DRIVER: "${{ inputs.scenario_driver }}"
+          CERTIFY: "${{ inputs.certify }}"
         run: |
           set -euo pipefail
           mkdir -p evidence
-          cargo run --release -p fabushi-chatgpt-auto-confirm -- \
-            --cdp "${{ inputs.cdp_endpoint }}" \
-            send \
-            --prompt "${{ inputs.prompt }}" \
-            --model "${{ inputs.model }}" \
-            --thinking "${{ inputs.thinking }}" \
-            | tee evidence/run-report.json
-          python3 scripts/verify-e2e-report.py evidence/run-report.json "$GITHUB_SHA" > evidence/acceptance.json
-          sha256sum evidence/acceptance.json > evidence/acceptance.sha256
-      - uses: actions/upload-artifact@v4
+          args=(
+            --binary "$GITHUB_WORKSPACE/target/release/fabushi-chatgpt-auto-confirm"
+            --cdp "$CDP_ENDPOINT"
+            --evidence-dir "$GITHUB_WORKSPACE/evidence"
+            --commit "$GITHUB_SHA"
+            --workflow-run-id "$GITHUB_RUN_ID"
+            --prompt "$ACCEPTANCE_PROMPT"
+            --model "$REQUIRED_MODEL"
+            --thinking "$REQUIRED_THINKING"
+          )
+          if [[ -n "$SCENARIO_DRIVER" ]]; then
+            args+=(--external-driver "$SCENARIO_DRIVER")
+          fi
+          if [[ "$CERTIFY" == "true" ]]; then
+            args+=(--certify)
+          fi
+          python3 scripts/authenticated-e2e-matrix.py "${args[@]}" | tee evidence/matrix-console.json
+
+      - name: Upload exact-HEAD Gate D evidence
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: authenticated-linux-e2e-${{ github.sha }}
           path: evidence/
           if-no-files-found: error
+          retention-days: 30
