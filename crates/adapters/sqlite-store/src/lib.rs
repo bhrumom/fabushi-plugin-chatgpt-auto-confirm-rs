@@ -496,6 +496,13 @@ WHERE l.expires_at_ms <= ?1
                     TaskState::Queued
                 };
                 task.last_error = Some("worker_lease_expired".into());
+                let mut recovered_progress = run.visible_progress_messages.clone();
+                if let Some(latest) = run.latest_assistant_text.as_ref()
+                    && !latest.trim().is_empty()
+                    && !recovered_progress.iter().any(|value| value == latest)
+                {
+                    recovered_progress.push(latest.clone());
+                }
                 task.recovery_context = Some(RecoveryEnvelope {
                     version: 2,
                     task_id: task.id.clone(),
@@ -505,8 +512,8 @@ WHERE l.expires_at_ms <= ?1
                     conversation_kind: task.conversation_kind.clone(),
                     original_goal: task.original_prompt.clone(),
                     acceptance_prompt: task.acceptance_prompt.clone(),
-                    interrupted_turn_visible_content: run.visible_progress_messages.clone(),
-                    progress_messages: run.visible_progress_messages.clone(),
+                    interrupted_turn_visible_content: recovered_progress.clone(),
+                    progress_messages: recovered_progress,
                     completed: task
                         .last_report
                         .as_ref()
