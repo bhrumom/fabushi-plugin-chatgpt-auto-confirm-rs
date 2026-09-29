@@ -685,11 +685,11 @@ VALUES (?1,?2,?3,?4)
                 |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)),
             )
             .optional()?;
-        if let Some((attempts, settled)) = state {
-            if settled || attempts >= max_attempts {
-                tx.commit()?;
-                return Ok(false);
-            }
+        if let Some((attempts, settled)) = state
+            && (settled || attempts >= max_attempts)
+        {
+            tx.commit()?;
+            return Ok(false);
         }
         tx.execute(
             r#"
