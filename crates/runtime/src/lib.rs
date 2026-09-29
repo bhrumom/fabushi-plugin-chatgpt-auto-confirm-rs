@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use fabushi_chatgpt_application::{
-    Clock, RunOptions, RunPrompt, parse_task_report, parse_task_wait,
+    Clock, RunPrompt, parse_task_report, parse_task_wait,
 };
 use fabushi_chatgpt_domain::{
     RecoveryEnvelope, RunEvent, RunEventKind, RunReport, RunState, TaskReportStatus,
@@ -14,7 +14,7 @@ use std::sync::{
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, Semaphore};
 
-pub use fabushi_chatgpt_application::QueueStore;
+pub use fabushi_chatgpt_application::{QueueStore, RunOptions};
 pub use fabushi_chatgpt_cdp::ChatGptCdp;
 pub use fabushi_chatgpt_domain::{
     ExecutionProfile, ObservedExecutionProfile, QueueTask, RunRecord,
