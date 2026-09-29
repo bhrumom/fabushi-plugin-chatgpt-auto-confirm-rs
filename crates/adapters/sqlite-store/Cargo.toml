@@ -1,5 +1,5 @@
 [package]
-name = "fabushi-chatgpt-application"
+name = "fabushi-chatgpt-sqlite-store"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,9 +7,10 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-async-trait.workspace = true
-fabushi-chatgpt-domain = { path = "../domain" }
+fabushi-chatgpt-application = { path = "../../application" }
+fabushi-chatgpt-domain = { path = "../../domain" }
+rusqlite.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
+tempfile = "3.23"
