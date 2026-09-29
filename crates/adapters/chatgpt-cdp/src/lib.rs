@@ -281,57 +281,119 @@ const SNAPSHOT_SCRIPT: &str = r#"
   const textOf = (el) => norm(el?.innerText || el?.textContent || '');
   const aria = (el) => norm(el?.getAttribute?.('aria-label') || '');
   const testid = (el) => norm(el?.getAttribute?.('data-testid') || '');
-  const buttons = [...document.querySelectorAll('button')];
-  const pageText = norm(document.body?.innerText || '');
+  const visible = (el) => !!el && el.getClientRects().length > 0 &&
+    getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+  const buttons = [...document.querySelectorAll('button')].filter(visible);
   const isStop = (b) => /(^|\b)(stop|停止|停止生成|停止回答)(\b|$)/i.test([textOf(b), aria(b), testid(b)].join(' '));
-  const isCopy = (b) => /(copy|复制)/i.test([textOf(b), aria(b), testid(b)].join(' '));
+  const isCopy = (b) => /^(copy|复制)(\b|$)/i.test(norm(textOf(b) || aria(b) || testid(b)));
   const isApproval = (b) => /^(allow once|允许一次|approve once|仅允许本次|允许本次)$/i.test(norm(textOf(b) || aria(b)));
+  const isRateLimitText = (text) => /(too many requests|request(?:s)?\s+(?:are\s+)?too frequent|请求过于频繁|请求太频繁)/i.test(text);
+  const isConnectionText = (text) => /(connection interrupted|connection lost|network error|连接中断|网络错误|网络连接中断)/i.test(text);
+  const isTooLongText = (text) => /(conversation (?:is )?too long|maximum conversation length|start a new chat|对话过长|会话过长|新建(?:一个)?对话)/i.test(text);
+  const statusCandidates = [...document.querySelectorAll(
+    '[role="dialog"],[role="alert"],[role="status"],[aria-live="assertive"],[aria-live="polite"],[data-testid*="toast"],[data-testid*="modal"],[data-testid*="error"]'
+  )].filter(visible);
+  const rateLimitContainer = statusCandidates.find((el) => isRateLimitText(textOf(el))) || null;
+  const connectionContainer = statusCandidates.find((el) => isConnectionText(textOf(el))) || null;
+  const tooLongContainer = statusCandidates.find((el) => isTooLongText(textOf(el))) || null;
+  const ackButton = rateLimitContainer
+    ? [...rateLimitContainer.querySelectorAll('button')].filter(visible)
+        .find((b) => /^(got it|ok|okay|明白了|知道了)$/i.test(norm(textOf(b) || aria(b))) ) || null
+    : null;
 
   const userTurns = [...document.querySelectorAll('[data-message-author-role="user"]')];
   const assistantTurns = [...document.querySelectorAll('[data-message-author-role="assistant"]')];
   const lastAssistant = assistantTurns.at(-1) || null;
-  const lastAssistantButtons = lastAssistant ? [...lastAssistant.querySelectorAll('button')] : [];
+  const lastUser = userTurns.at(-1) || null;
+  const lastAssistantButtons = lastAssistant
+    ? [...lastAssistant.querySelectorAll('button')].filter(visible)
+    : [];
   const copyAvailable = lastAssistantButtons.some(isCopy);
   const actionButtons = lastAssistantButtons.filter((b) => {
-    const s = [textOf(b), aria(b), testid(b)].join(' ');
-    return /(copy|复制|good|bad|like|dislike|regenerate|retry|branch|read aloud|朗读|分享|share)/i.test(s);
+    const value = [textOf(b), aria(b), testid(b)].join(' ');
+    return /(copy|复制|good|bad|like|dislike|regenerate|retry|branch|read aloud|朗读|分享|share)/i.test(value);
   });
-  const lastUser = userTurns.at(-1);
   const lastAssistantAfterLastUser = !!lastAssistant && !!lastUser &&
     (lastUser.compareDocumentPosition(lastAssistant) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
-  const composer = document.querySelector('#prompt-textarea, textarea, [contenteditable="true"][data-lexical-editor="true"], [contenteditable="true"]');
+
+  const composerCandidates = [
+    document.querySelector('#prompt-textarea'),
+    document.querySelector('textarea'),
+    document.querySelector('[contenteditable="true"][data-lexical-editor="true"]'),
+    document.querySelector('[contenteditable="true"]')
+  ].filter(Boolean);
+  const composer = composerCandidates.find(visible) || composerCandidates[0] || null;
   const composerText = norm(composer?.value ?? composer?.innerText ?? composer?.textContent ?? '');
+  const composerReady = visible(composer) &&
+    composer?.getAttribute?.('aria-disabled') !== 'true' &&
+    !composer?.hasAttribute?.('disabled');
+  const enabledSend = buttons.find((b) => {
+    const value = [textOf(b), aria(b), testid(b)].join(' ');
+    return /(send|发送)/i.test(value) && !b.disabled && b.getAttribute('aria-disabled') !== 'true';
+  }) || null;
+
   const approvalButton = buttons.find(isApproval) || null;
   const approvalCard = approvalButton?.closest('[role="dialog"], [data-testid], article, section, div') || null;
   const approvalKey = approvalButton
     ? norm([
         approvalCard?.getAttribute?.('data-testid'),
         approvalCard?.getAttribute?.('data-message-id'),
-        textOf(approvalCard).slice(0, 300),
+        textOf(approvalCard).slice(0, 500),
         textOf(approvalButton)
       ].join('|'))
     : null;
-  const activeModel = [...document.querySelectorAll('button,[role="button"]')]
-    .map((el) => textOf(el) || aria(el))
-    .find((text) => /gpt[- ]?5|gpt[- ]?4|o[134]|model/i.test(text)) || null;
-  const activeThinking = [...document.querySelectorAll('button,[role="button"]')]
-    .map((el) => textOf(el) || aria(el))
-    .find((text) => /extra high|极高|high|高|medium|中|low|低/i.test(text)) || null;
+
+  const stopAvailable = buttons.some(isStop);
+  const explicitStreaming = !!lastAssistant && !!lastAssistant.querySelector(
+    '[aria-busy="true"],[data-testid*="streaming"],.result-streaming'
+  );
+  const assistantStreaming = stopAvailable || explicitStreaming;
+  const awaitingAssistant = userTurns.length > assistantTurns.length;
+  const waitingForApproval = !!approvalButton;
+  const assistantSettled = lastAssistantAfterLastUser && copyAvailable &&
+    !assistantStreaming && !waitingForApproval && !awaitingAssistant;
+
+  const visibleAssistantMessages = assistantTurns
+    .filter(visible)
+    .map((el) => textOf(el))
+    .filter(Boolean);
+
+  const visibleLabels = [...document.querySelectorAll('button,[role="button"]')]
+    .filter(visible)
+    .map((el) => textOf(el) || aria(el));
+  const activeModel = visibleLabels.find((text) => /gpt[- ]?5(?:\.6)?(?:\s+sol)?|gpt[- ]?4|o[134]/i.test(text)) || null;
+  const activeThinking = visibleLabels.find((text) => /extra high|极高|high|高|medium|中|low|低/i.test(text)) || null;
+
+  const authControl = buttons.find((b) =>
+    /^(log in|login|sign in|登录|登入)$/i.test(norm(textOf(b) || aria(b)))
+  ) || null;
+  const hostIsChatGpt = /(^|\.)chatgpt\.com$|(^|\.)chat\.openai\.com$/i.test(location.hostname);
+  const conversationLoaded = hostIsChatGpt && (!!composer || userTurns.length > 0 || assistantTurns.length > 0);
 
   return {
     url: location.href,
     title: document.title,
     user_turns: userTurns.length,
     assistant_turns: assistantTurns.length,
-    stop_available: buttons.some(isStop),
-    waiting_for_approval: buttons.some(isApproval),
-    rate_limit_notice: /(too many requests|request.*frequent|请求过于频繁|请求太频繁)/i.test(pageText),
-    connection_interrupted: /(connection interrupted|network error|连接中断|网络错误)/i.test(pageText),
+    stop_available: stopAvailable,
+    waiting_for_approval: waitingForApproval,
+    rate_limit_notice: !!rateLimitContainer,
+    rate_limit_dialog_visible: !!rateLimitContainer,
+    rate_limit_ack_available: !!ackButton,
+    connection_interrupted: !!connectionContainer,
+    conversation_too_long: !!tooLongContainer,
+    conversation_loaded: conversationLoaded,
+    authentication_required: !!authControl && !composerReady,
+    composer_ready: composerReady,
+    send_unavailable: !enabledSend,
+    assistant_streaming: assistantStreaming,
+    assistant_message_settled: assistantSettled,
     copy_available_on_last_assistant: copyAvailable,
-    response_actions_complete: copyAvailable && actionButtons.length >= 1,
+    response_actions_complete: assistantSettled && actionButtons.length >= 1,
     response_action_turn_bound_to_last: lastAssistantAfterLastUser && assistantTurns.length >= userTurns.length,
-    awaiting_assistant: userTurns.length > assistantTurns.length,
+    awaiting_assistant: awaitingAssistant,
     assistant_text: norm(lastAssistant?.innerText || lastAssistant?.textContent || ''),
+    visible_assistant_messages: visibleAssistantMessages,
     composer_text: composerText,
     approval_card_key: approvalKey,
     observed_model: activeModel,
@@ -375,8 +437,13 @@ const SEND_PROMPT_SCRIPT: &str = r#"
 const APPROVE_ONCE_SCRIPT: &str = r#"
 (() => {
   const norm = (v) => String(v ?? '').replace(/\s+/g, ' ').trim();
-  const buttons = [...document.querySelectorAll('button')];
-  const exact = buttons.find((b) => /^(allow once|允许一次|approve once|仅允许本次|允许本次)$/i.test(norm(b.innerText || b.textContent || b.getAttribute('aria-label'))));
+  const visible = (el) => !!el && el.getClientRects().length > 0 &&
+    getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+  const exact = [...document.querySelectorAll('button')]
+    .filter(visible)
+    .find((b) => /^(allow once|允许一次|approve once|仅允许本次|允许本次)$/i.test(
+      norm(b.innerText || b.textContent || b.getAttribute('aria-label'))
+    ));
   if (!exact) return {clicked:false};
   exact.click();
   return {clicked:true, label:norm(exact.innerText || exact.getAttribute('aria-label'))};
@@ -386,9 +453,19 @@ const APPROVE_ONCE_SCRIPT: &str = r#"
 const DISMISS_RATE_LIMIT_SCRIPT: &str = r#"
 (() => {
   const norm = (v) => String(v ?? '').replace(/\s+/g, ' ').trim();
-  const pageText = norm(document.body?.innerText || '');
-  if (!/(too many requests|request.*frequent|请求过于频繁|请求太频繁)/i.test(pageText)) return {clicked:false};
-  const button = [...document.querySelectorAll('button')].find((b) => /^(got it|ok|明白了|知道了)$/i.test(norm(b.innerText || b.textContent || b.getAttribute('aria-label'))));
+  const visible = (el) => !!el && el.getClientRects().length > 0 &&
+    getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+  const isRateLimitText = (text) => /(too many requests|request(?:s)?\s+(?:are\s+)?too frequent|请求过于频繁|请求太频繁)/i.test(text);
+  const containers = [...document.querySelectorAll(
+    '[role="dialog"],[role="alert"],[role="status"],[aria-live="assertive"],[aria-live="polite"],[data-testid*="toast"],[data-testid*="modal"],[data-testid*="error"]'
+  )].filter(visible);
+  const current = containers.find((el) => isRateLimitText(norm(el.innerText || el.textContent || '')));
+  if (!current) return {clicked:false};
+  const button = [...current.querySelectorAll('button')]
+    .filter(visible)
+    .find((b) => /^(got it|ok|okay|明白了|知道了)$/i.test(
+      norm(b.innerText || b.textContent || b.getAttribute('aria-label'))
+    ));
   if (!button) return {clicked:false};
   button.click();
   return {clicked:true};
