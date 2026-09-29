@@ -737,6 +737,7 @@ fn event(
         if !snapshot.assistant_text.trim().is_empty() {
             event.latest_assistant_text = Some(snapshot.assistant_text.clone());
         }
+        event.visible_progress_messages = snapshot.visible_assistant_messages.clone();
     }
     event
 }
@@ -1040,6 +1041,8 @@ mod tests {
         let limited = PageSnapshot {
             user_turns: 1,
             rate_limit_notice: true,
+            rate_limit_dialog_visible: true,
+            rate_limit_ack_available: true,
             ..Default::default()
         };
         let browser = FakeBrowser::new([
