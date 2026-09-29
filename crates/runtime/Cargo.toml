@@ -7,9 +7,9 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-fabushi-chatgpt-cdp = { path = "../cdp" }
+async-trait.workspace = true
+fabushi-chatgpt-application = { path = "../application" }
+fabushi-chatgpt-cdp = { path = "../adapters/chatgpt-cdp" }
 fabushi-chatgpt-domain = { path = "../domain" }
-serde.workspace = true
-serde_json.workspace = true
+fabushi-chatgpt-linux-browser = { path = "../adapters/linux-browser" }
 tokio.workspace = true
-tracing.workspace = true

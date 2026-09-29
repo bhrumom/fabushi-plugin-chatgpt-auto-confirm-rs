@@ -1,4 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
+use async_trait::async_trait;
+use fabushi_chatgpt_application::BrowserPort;
 use fabushi_chatgpt_domain::PageSnapshot;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
@@ -161,6 +163,33 @@ impl ChatGptCdp {
     }
 }
 
+#[async_trait]
+impl BrowserPort for ChatGptCdp {
+    async fn snapshot(&self) -> Result<PageSnapshot> {
+        ChatGptCdp::snapshot(self).await
+    }
+
+    async fn send_prompt(&self, prompt: &str) -> Result<()> {
+        ChatGptCdp::send_prompt(self, prompt).await
+    }
+
+    async fn approve_once(&self) -> Result<bool> {
+        ChatGptCdp::click_allow_once(self).await
+    }
+
+    async fn dismiss_rate_limit_notice(&self) -> Result<bool> {
+        ChatGptCdp::dismiss_rate_limit_notice(self).await
+    }
+
+    async fn reload(&self) -> Result<()> {
+        ChatGptCdp::reload(self).await
+    }
+
+    async fn navigate(&self, url: &str) -> Result<()> {
+        ChatGptCdp::navigate(self, url).await
+    }
+}
+
 fn select_chatgpt_target(targets: &[TargetInfo]) -> Option<&TargetInfo> {
     targets
         .iter()
@@ -184,6 +213,7 @@ const SNAPSHOT_SCRIPT: &str = r#"
   const aria = (el) => norm(el?.getAttribute?.('aria-label') || '');
   const testid = (el) => norm(el?.getAttribute?.('data-testid') || '');
   const buttons = [...document.querySelectorAll('button')];
+  const pageText = norm(document.body?.innerText || '');
   const isStop = (b) => /(^|\b)(stop|停止|停止生成|停止回答)(\b|$)/i.test([textOf(b), aria(b), testid(b)].join(' '));
   const isCopy = (b) => /(copy|复制)/i.test([textOf(b), aria(b), testid(b)].join(' '));
   const isApproval = (b) => /(allow once|允许一次|approve once|仅允许本次|允许本次)/i.test([textOf(b), aria(b)].join(' '));
@@ -212,6 +242,7 @@ const SNAPSHOT_SCRIPT: &str = r#"
     assistant_turns: assistantTurns.length,
     stop_available: buttons.some(isStop),
     waiting_for_approval: buttons.some(isApproval),
+    rate_limit_notice: /(too many requests|request.*frequent|请求过于频繁|请求太频繁)/i.test(pageText),
     copy_available_on_last_assistant: copyAvailable,
     response_actions_complete: copyAvailable && actionButtons.length >= 1,
     response_action_turn_bound_to_last: lastAssistantAfterLastUser && assistantTurns.length >= userTurns.length,

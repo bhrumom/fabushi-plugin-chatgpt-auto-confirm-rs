@@ -1,5 +1,5 @@
 [package]
-name = "fabushi-chatgpt-cdp"
+name = "fabushi-chatgpt-application"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,10 +9,7 @@ rust-version.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 fabushi-chatgpt-domain = { path = "../domain" }
-futures-util.workspace = true
-reqwest.workspace = true
-serde.workspace = true
+
+[dev-dependencies]
 serde_json.workspace = true
 tokio.workspace = true
-tokio-tungstenite.workspace = true
-url.workspace = true

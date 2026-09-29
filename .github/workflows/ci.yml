@@ -17,6 +17,8 @@ jobs:
         with:
           toolchain: "1.98.0"
           components: rustfmt, clippy
+      - name: architecture
+        run: ./scripts/check-architecture.sh
       - name: fmt
         run: cargo fmt --all -- --check
       - name: test

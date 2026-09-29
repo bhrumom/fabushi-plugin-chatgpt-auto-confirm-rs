@@ -4,7 +4,20 @@ Rust/Linux rewrite of bhrumom/fabushi-plugin-chatgpt-auto-confirm.
 
 The current implementation can attach to a Chromium or Chrome session through CDP, send a ChatGPT prompt, automatically click Allow once / 允许一次, monitor the latest turn, recover from stalls, and return only after stable Copy-button terminal evidence.
 
-The authoritative migration and acceptance contract is docs/specs/rust-linux-chatgpt-auto-confirm.md.
+The authoritative migration contract is `docs/specs/rust-linux-chatgpt-auto-confirm.md`. The canonical architecture is `docs/architecture.md`; architecture decisions are recorded under `docs/adr/`.
+
+## Architecture
+
+This is a modular monolith with strict Hexagonal Architecture boundaries:
+
+- `crates/domain` — pure invariants and durable value types;
+- `crates/application` — use cases, recovery policy, Browser/Clock ports;
+- `crates/adapters/chatgpt-cdp` — ChatGPT/CDP implementation;
+- `crates/adapters/linux-browser` — Linux Chromium process implementation;
+- `crates/runtime` — composition root and future actor supervisor;
+- `crates/cli` — thin operator surface.
+
+Run the architecture gate with `./scripts/check-architecture.sh`.
 
 ## Build
 

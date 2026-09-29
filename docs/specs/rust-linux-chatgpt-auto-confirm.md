@@ -25,18 +25,23 @@ This repository is not a line-by-line Swift translation. The source behavior is 
 
 ## 3. Architecture
 
-The workspace is split into explicit layers:
+The canonical architecture is defined in `docs/architecture.md` and the accepted ADRs under `docs/adr/`.
 
-- crates/domain: pure state machine, terminal evidence and durable report types. No browser/process I/O.
-- crates/cdp: Chrome DevTools Protocol transport and ChatGPT DOM adapter.
-- crates/runtime: Linux Chromium lifecycle, prompt dispatch, monitoring, approval and recovery policy.
-- crates/cli: operator-facing CLI.
+The design is a recoverable modular monolith using Hexagonal Architecture plus actor-style runtime supervision. The enforced dependency direction is:
 
-Dependency direction is one-way:
+`cli -> runtime -> application -> domain`
 
-cli -> runtime -> cdp -> domain
+Concrete infrastructure implements application ports and points inward:
 
-Domain code must never depend on Chromium, Linux, JSON-RPC transport, filesystem paths, or UI selectors.
+- `crates/adapters/chatgpt-cdp` -> application/domain
+- `crates/adapters/linux-browser` -> OS/process only
+- future `crates/adapters/sqlite-store` -> application/domain
+
+`runtime` is the composition root. Recovery policy belongs in `application`, terminal/canonical-URL invariants belong in `domain`, and browser selectors/CDP details belong only in adapters.
+
+CI runs `scripts/check-architecture.sh` to reject dependency inversion and selector leakage.
+
+Production topology is one authenticated browser process per account profile, one leased page target per active run, with Supervisor -> AccountBrowserActor -> RunWorker ownership. Durable recovery will use SQLite WAL, append-only run events, materialized run state, approval fingerprints, and worker leases.
 
 ## 4. Linux browser model
 
@@ -99,7 +104,7 @@ A conversation URL becomes durable only after ChatGPT exposes a stable canonical
 
 Do not persist transient local or startup URLs as recovery URLs. The final report records the URL only from a terminal snapshot.
 
-A stricter canonical URL validator and durable state store are required for full source parity.
+Canonical URL validation is now implemented in `crates/domain`; the durable state store remains required for full source parity.
 
 ### 5.5 Recovery timers
 
@@ -132,14 +137,14 @@ This is specified but not yet implemented in the initial Rust cut because it req
 |---|---|---|
 | Models.swift pure run/report state | crates/domain | partial |
 | QueueTerminalDecision.swift | crates/domain | implemented |
-| IPCAndCDP.swift CDP portion | crates/cdp | implemented for Chromium CDP |
-| macOS Unix IPC to ChatGPT.app | Linux adapter | not applicable to browser runtime |
-| ApprovalAccessibility.swift | CDP DOM adapter | AX path intentionally removed on Linux |
-| ApprovalWatcher.swift | runtime monitor | partial |
-| QueueMonitoring.swift | runtime state machine | partial |
-| QueueWorker.swift hidden worker lifecycle | runtime worker supervisor | pending |
-| QueueState.swift durable queue | runtime persistence | pending |
-| ChatScripts.swift | crates/cdp evaluated JS | partial |
+| IPCAndCDP.swift CDP portion | crates/adapters/chatgpt-cdp | implemented for Chromium CDP |
+| macOS Unix IPC to ChatGPT.app | crates/adapters/linux-browser + CDP path | not applicable to browser runtime |
+| ApprovalAccessibility.swift | crates/adapters/chatgpt-cdp | AX path intentionally removed on Linux |
+| ApprovalWatcher.swift | application use case + CDP adapter | partial |
+| QueueMonitoring.swift | crates/application recovery state machine | partial |
+| QueueWorker.swift hidden worker lifecycle | runtime Supervisor/RunWorker | pending |
+| QueueState.swift durable queue | future sqlite-store adapter | pending |
+| ChatScripts.swift | crates/adapters/chatgpt-cdp evaluated JS | partial |
 | TaskReportParsing.swift | domain/report parser | pending |
 | Node Actions controller scripts | future Rust orchestration | pending |
 | account/session export scripts | secure browser-profile boundary | redesign required |
@@ -165,6 +170,7 @@ cargo run -p fabushi-chatgpt-auto-confirm -- approve-once
 ### Gate A — Rust code quality
 
 Required:
+- ./scripts/check-architecture.sh
 - cargo fmt --all -- --check
 - cargo test --workspace
 - cargo clippy --workspace --all-targets -- -D warnings
@@ -228,16 +234,21 @@ Mocks prove code behavior only. They do not prove ChatGPT production behavior.
 
 Implemented in the first Rust cut:
 - Rust workspace and Linux CLI;
+- canonical modular-monolith/hexagonal architecture with ADRs;
+- compile-time crate boundaries plus CI architecture gate;
+- application ports for browser and virtual clock;
 - Chromium process launcher;
 - CDP target discovery and WebSocket transport;
 - composer prompt dispatch;
 - 90-second dispatch-confirm resend policy;
 - exact Allow once click path;
 - terminal latest-turn Copy evidence;
+- canonical `/c/<conversation-id>` validation in the domain layer;
 - two-poll terminal stabilization;
 - 15-minute stale reload;
 - 5-minute rate-limit pause, max 3;
 - 30-minute 继续完成所有 continuation;
+- deterministic application tests for 90-second resend, 15-minute reload, 5-minute rate-limit handling and 30-minute continuation;
 - source-aligned domain tests for terminal semantics.
 
 Not yet claimed complete:

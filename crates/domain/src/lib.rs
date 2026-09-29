@@ -9,6 +9,7 @@ pub struct PageSnapshot {
     pub assistant_turns: usize,
     pub stop_available: bool,
     pub waiting_for_approval: bool,
+    pub rate_limit_notice: bool,
     pub copy_available_on_last_assistant: bool,
     pub response_actions_complete: bool,
     pub response_action_turn_bound_to_last: bool,
@@ -31,6 +32,27 @@ impl PageSnapshot {
 
     pub fn is_terminal(&self) -> bool {
         !self.response_in_flight() && self.terminal_evidence()
+    }
+
+    pub fn canonical_conversation_url(&self) -> Option<String> {
+        let prefixes = ["https://chatgpt.com/c/", "https://chat.openai.com/c/"];
+        for prefix in prefixes {
+            if let Some(rest) = self.url.strip_prefix(prefix) {
+                let conversation_id = rest
+                    .split(['?', '#', '/'])
+                    .next()
+                    .unwrap_or_default()
+                    .trim();
+                if !conversation_id.is_empty()
+                    && conversation_id
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                {
+                    return Some(format!("{prefix}{conversation_id}"));
+                }
+            }
+        }
+        None
     }
 
     pub fn activity_fingerprint(&self) -> String {
@@ -62,6 +84,9 @@ pub struct RunReport {
     pub assistant_text: String,
     pub approvals_clicked: u32,
     pub recoveries: u32,
+    pub rate_limit_pauses: u32,
+    pub dispatch_retries: u32,
+    pub continuations: u32,
     pub message: String,
 }
 
@@ -90,6 +115,24 @@ mod tests {
             ..Default::default()
         };
         assert!(snapshot.is_terminal());
+    }
+
+    #[test]
+    fn canonical_conversation_url_rejects_transient_routes() {
+        let transient = PageSnapshot {
+            url: "https://chatgpt.com/".into(),
+            ..Default::default()
+        };
+        assert_eq!(transient.canonical_conversation_url(), None);
+
+        let durable = PageSnapshot {
+            url: "https://chatgpt.com/c/abc-123?model=gpt".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            durable.canonical_conversation_url().as_deref(),
+            Some("https://chatgpt.com/c/abc-123")
+        );
     }
 
     #[test]

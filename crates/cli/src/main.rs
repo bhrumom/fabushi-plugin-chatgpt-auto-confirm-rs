@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use fabushi_chatgpt_cdp::ChatGptCdp;
-use fabushi_chatgpt_runtime::{RunOptions, find_chromium_binary, launch_chromium, run_prompt};
+use fabushi_chatgpt_runtime::{
+    ChatGptCdp, RunOptions, find_chromium_binary, launch_chromium, run_prompt,
+};
 use std::path::PathBuf;
 use std::time::Duration;
 use tracing_subscriber::EnvFilter;
@@ -76,15 +77,15 @@ async fn main() -> Result<()> {
         } => {
             let binary = find_chromium_binary(browser_binary.as_deref())?;
             let profile = profile.unwrap_or_else(default_profile_dir);
-            let pid = launch_chromium(&binary, &profile, port, headed, &url)?;
+            let launch = launch_chromium(&binary, &profile, port, headed, &url)?;
             println!(
                 "{}",
                 serde_json::json!({
-                    "pid": pid,
-                    "browser": binary,
-                    "profile": profile,
-                    "cdp": format!("http://127.0.0.1:{port}"),
-                    "headed": headed,
+                    "pid": launch.pid,
+                    "browser": launch.browser_binary,
+                    "profile": launch.profile_dir,
+                    "cdp": launch.endpoint,
+                    "headed": launch.headed,
                     "url": url,
                 })
             );
