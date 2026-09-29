@@ -151,6 +151,8 @@ pub enum QueuePhase {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunCheckpoint {
     pub conversation_kind: ConversationKind,
+    pub counters: RunCounters,
+    pub run_deadline_ms: i64,
     pub baseline_user_turns: usize,
     pub outbound_baseline_user_turns: usize,
     pub dispatch_attempts: u32,
@@ -173,6 +175,8 @@ pub struct RunReport {
     pub state: RunState,
     pub conversation_url: Option<String>,
     pub assistant_text: String,
+    #[serde(default)]
+    pub visible_progress_messages: Vec<String>,
     pub approvals_clicked: u32,
     pub recoveries: u32,
     pub rate_limit_pauses: u32,
