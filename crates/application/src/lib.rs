@@ -63,6 +63,81 @@ pub struct QueueSnapshot {
     pub runs: Vec<RunRecord>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountBrowserLease {
+    pub account_id: String,
+    pub owner_id: String,
+    pub process_identity: String,
+    pub browser_pid: Option<u32>,
+    pub endpoint: Option<String>,
+    pub profile_dir: String,
+    pub expires_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableTargetLease {
+    pub target_id: String,
+    pub run_id: String,
+    pub account_id: String,
+    pub owner_id: String,
+    pub expires_at_ms: i64,
+}
+
+pub trait OwnershipStore: Send + Sync {
+    fn acquire_account_browser(
+        &self,
+        account_id: &str,
+        owner_id: &str,
+        process_identity: &str,
+        profile_dir: &str,
+        now_ms: i64,
+        lease_duration_ms: i64,
+    ) -> Result<bool>;
+    fn bind_account_browser_process(
+        &self,
+        account_id: &str,
+        owner_id: &str,
+        browser_pid: u32,
+        endpoint: &str,
+        now_ms: i64,
+    ) -> Result<()>;
+    fn renew_account_browser(
+        &self,
+        account_id: &str,
+        owner_id: &str,
+        now_ms: i64,
+        lease_duration_ms: i64,
+    ) -> Result<bool>;
+    fn release_account_browser(&self, account_id: &str, owner_id: &str) -> Result<()>;
+    fn account_browser_lease(&self, account_id: &str) -> Result<Option<AccountBrowserLease>>;
+    fn acquire_target(
+        &self,
+        target_id: &str,
+        run_id: &str,
+        account_id: &str,
+        owner_id: &str,
+        now_ms: i64,
+        lease_duration_ms: i64,
+    ) -> Result<bool>;
+    fn renew_target(
+        &self,
+        target_id: &str,
+        owner_id: &str,
+        now_ms: i64,
+        lease_duration_ms: i64,
+    ) -> Result<bool>;
+    fn release_target(&self, target_id: &str, owner_id: &str) -> Result<()>;
+    fn target_lease_for_run(&self, run_id: &str) -> Result<Option<DurableTargetLease>>;
+    fn record_browser_lifecycle(
+        &self,
+        account_id: &str,
+        owner_id: &str,
+        event_type: &str,
+        details_json: &str,
+        now_ms: i64,
+    ) -> Result<()>;
+}
+
 pub trait QueueStore: Send + Sync {
     fn enqueue_task(&self, task: &QueueTask) -> Result<()>;
     fn claim_next_runnable(
