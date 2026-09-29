@@ -409,10 +409,7 @@ pub struct QueueTask {
 }
 
 impl QueueTask {
-    pub fn transition_phase(
-        &mut self,
-        next: QueuePhase,
-    ) -> Result<(), QueueTransitionError> {
+    pub fn transition_phase(&mut self, next: QueuePhase) -> Result<(), QueueTransitionError> {
         if !self.phase.can_transition_to(&next) {
             return Err(QueueTransitionError {
                 from: self.phase.clone(),
