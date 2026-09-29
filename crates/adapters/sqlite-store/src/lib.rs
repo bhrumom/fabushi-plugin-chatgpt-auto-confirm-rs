@@ -1269,6 +1269,67 @@ mod tests {
     }
 
     #[test]
+    fn durable_account_and_target_ownership_excludes_live_competitors() {
+        let store = SqliteStore::open_in_memory().unwrap();
+
+        assert!(
+            store
+                .acquire_account_browser(
+                    "account-a",
+                    "actor-a",
+                    "cdp:http://127.0.0.1:9222",
+                    "user-owned-profile:account-a",
+                    1_000,
+                    100,
+                )
+                .unwrap()
+        );
+        assert!(
+            !store
+                .acquire_account_browser(
+                    "account-a",
+                    "actor-b",
+                    "cdp:http://127.0.0.1:9223",
+                    "user-owned-profile:account-a",
+                    1_050,
+                    100,
+                )
+                .unwrap()
+        );
+        assert!(
+            store
+                .acquire_account_browser(
+                    "account-a",
+                    "actor-b",
+                    "cdp:http://127.0.0.1:9223",
+                    "user-owned-profile:account-a",
+                    1_101,
+                    100,
+                )
+                .unwrap()
+        );
+
+        assert!(
+            store
+                .acquire_target("target-a", "run-a", "account-a", "worker-a", 2_000, 100)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .acquire_target("target-b", "run-a", "account-a", "worker-b", 2_050, 100)
+                .unwrap()
+        );
+        assert!(
+            store
+                .acquire_target("target-b", "run-a", "account-a", "worker-b", 2_101, 100)
+                .unwrap()
+        );
+        let lease = store.target_lease_for_run("run-a").unwrap().unwrap();
+        assert_eq!(lease.target_id, "target-b");
+        assert_eq!(lease.owner_id, "worker-b");
+    }
+
+    #[test]
     fn approval_fingerprint_is_attempt_bounded_and_settled() {
         let store = SqliteStore::open_in_memory().unwrap();
         let task = task("a");

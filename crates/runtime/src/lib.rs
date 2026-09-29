@@ -1,6 +1,8 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
-use fabushi_chatgpt_application::{Clock, RunPrompt, parse_task_report, parse_task_wait};
+use fabushi_chatgpt_application::{
+    Clock, OwnershipStore, RunPrompt, parse_task_report, parse_task_wait,
+};
 use fabushi_chatgpt_domain::{
     RecoveryEnvelope, RunEvent, RunEventKind, RunReport, RunState, TaskReportStatus,
 };
@@ -62,19 +64,31 @@ pub async fn run_prompt(
 pub struct TargetLease {
     pub run_id: String,
     pub target_id: String,
+    pub owner_id: String,
 }
 
 pub struct AccountBrowserActor {
     account_id: String,
     endpoint: String,
+    store: SqliteStore,
+    owner_id: String,
+    lease_duration_ms: i64,
     target_mutation: Mutex<()>,
 }
 
 impl AccountBrowserActor {
-    pub fn new(account_id: impl Into<String>, endpoint: impl Into<String>) -> Self {
+    pub fn new(
+        account_id: impl Into<String>,
+        endpoint: impl Into<String>,
+        store: SqliteStore,
+        owner_id: impl Into<String>,
+    ) -> Self {
         Self {
             account_id: account_id.into(),
             endpoint: endpoint.into(),
+            store,
+            owner_id: owner_id.into(),
+            lease_duration_ms: 60_000,
             target_mutation: Mutex::new(()),
         }
     }
@@ -83,19 +97,92 @@ impl AccountBrowserActor {
         &self.account_id
     }
 
+    fn acquire_browser_ownership(&self) -> Result<()> {
+        let acquired = self.store.acquire_account_browser(
+            &self.account_id,
+            &self.owner_id,
+            &format!("attached-cdp:{}", self.endpoint),
+            &format!("user-owned-profile:{}", self.account_id),
+            now_ms(),
+            self.lease_duration_ms,
+        )?;
+        if !acquired {
+            bail!(
+                "account {} browser ownership is held by another live actor",
+                self.account_id
+            );
+        }
+        self.store.record_browser_lifecycle(
+            &self.account_id,
+            &self.owner_id,
+            "attached",
+            &serde_json::json!({"endpoint": self.endpoint}).to_string(),
+            now_ms(),
+        )?;
+        Ok(())
+    }
+
+    fn renew_worker_ownership(&self, target_id: &str, worker_owner_id: &str) -> Result<bool> {
+        let now = now_ms();
+        let account_ok = self.store.renew_account_browser(
+            &self.account_id,
+            &self.owner_id,
+            now,
+            self.lease_duration_ms,
+        )?;
+        let target_ok = self.store.renew_target(
+            target_id,
+            worker_owner_id,
+            now,
+            self.lease_duration_ms,
+        )?;
+        Ok(account_ok && target_ok)
+    }
+
+    fn release_target_ownership(&self, target_id: &str, worker_owner_id: &str) -> Result<()> {
+        self.store.release_target(target_id, worker_owner_id)
+    }
+
     pub async fn lease_target(
         &self,
         run_id: &str,
+        worker_owner_id: &str,
         recovery_url: Option<&str>,
     ) -> Result<(TargetLease, ChatGptCdp)> {
         let _guard = self.target_mutation.lock().await;
+        self.acquire_browser_ownership()?;
         let url = recovery_url.unwrap_or("https://chatgpt.com/");
         let browser = ChatGptCdp::create_target(&self.endpoint, url)
             .await
             .with_context(|| format!("account {} failed to create target", self.account_id))?;
+        let target_id = browser.target_id().to_owned();
+        let acquired = self.store.acquire_target(
+            &target_id,
+            run_id,
+            &self.account_id,
+            worker_owner_id,
+            now_ms(),
+            self.lease_duration_ms,
+        )?;
+        if !acquired {
+            let _ = browser.close_owned_target().await;
+            bail!("run {run_id} could not acquire durable ownership of target {target_id}");
+        }
+        if let Err(error) = self.store.record_browser_lifecycle(
+            &self.account_id,
+            &self.owner_id,
+            "target_leased",
+            &serde_json::json!({"run_id": run_id, "target_id": target_id}).to_string(),
+            now_ms(),
+        ) {
+            let _ = self.store.release_target(&target_id, worker_owner_id);
+            let _ = browser.close_owned_target().await;
+            return Err(error);
+        }
         let lease = TargetLease {
             run_id: run_id.into(),
-            target_id: browser.target_id().into(),
+            target_id,
+            owner_id: worker_owner_id.into(),
         };
         Ok((lease, browser))
     }
@@ -105,14 +192,40 @@ impl AccountBrowserActor {
         lease: &TargetLease,
         canonical_url: &str,
     ) -> Result<ChatGptCdp> {
-        if let Ok(browser) = ChatGptCdp::connect_target_id(&self.endpoint, &lease.target_id).await {
+        if let Some(durable) = self.store.target_lease_for_run(&lease.run_id)?
+            && durable.target_id == lease.target_id
+            && durable.owner_id == lease.owner_id
+            && durable.expires_at_ms > now_ms()
+            && let Ok(browser) =
+                ChatGptCdp::connect_target_id(&self.endpoint, &lease.target_id).await
+        {
             browser.navigate(canonical_url).await?;
             return Ok(browser);
         }
+        let _ = self
+            .store
+            .release_target(&lease.target_id, &lease.owner_id);
         let (_, browser) = self
-            .lease_target(&lease.run_id, Some(canonical_url))
+            .lease_target(&lease.run_id, &lease.owner_id, Some(canonical_url))
             .await?;
         Ok(browser)
+    }
+}
+
+impl Drop for AccountBrowserActor {
+    fn drop(&mut self) {
+        let _ = self
+            .store
+            .record_browser_lifecycle(
+                &self.account_id,
+                &self.owner_id,
+                "actor_released",
+                "{}",
+                now_ms(),
+            );
+        let _ = self
+            .store
+            .release_account_browser(&self.account_id, &self.owner_id);
     }
 }
 
@@ -155,29 +268,37 @@ impl RunWorker {
         let prompt = recovery_prompt.as_deref().unwrap_or(&task.prompt);
         let (target_lease, browser) = self
             .account
-            .lease_target(&run_id, recovery_url.as_deref())
+            .lease_target(&run_id, &self.owner_id, recovery_url.as_deref())
             .await?;
 
         let journal = self.store.journal(&run_id, &self.owner_id);
         let heartbeat_stop = Arc::new(AtomicBool::new(false));
         let heartbeat_flag = heartbeat_stop.clone();
         let heartbeat_store = self.store.clone();
+        let heartbeat_account = self.account.clone();
+        let heartbeat_target_id = target_lease.target_id.clone();
         let heartbeat_run_id = run_id.clone();
         let heartbeat_owner_id = self.owner_id.clone();
         let heartbeat_lease_ms = self.lease_duration_ms;
-        let heartbeat = tokio::spawn(async move {
+        let mut heartbeat = tokio::spawn(async move {
             while !heartbeat_flag.load(Ordering::Relaxed) {
                 tokio::time::sleep(Duration::from_secs(20)).await;
                 if heartbeat_flag.load(Ordering::Relaxed) {
                     break;
                 }
-                let _ = heartbeat_store.renew_lease(
+                let worker_ok = heartbeat_store.renew_lease(
                     &heartbeat_run_id,
                     &heartbeat_owner_id,
                     now_ms(),
                     heartbeat_lease_ms,
-                );
+                )?;
+                let ownership_ok = heartbeat_account
+                    .renew_worker_ownership(&heartbeat_target_id, &heartbeat_owner_id)?;
+                if !worker_ok || !ownership_ok {
+                    bail!("durable worker or target ownership lease was lost");
+                }
             }
+            Ok::<(), anyhow::Error>(())
         });
         let mut target_event = RunEvent::new(
             RunEventKind::TargetReattached,
@@ -193,9 +314,19 @@ impl RunWorker {
             ..RunOptions::default()
         };
         let clock = TokioClock::default();
-        let result = RunPrompt::with_journal(&browser, &clock, &journal)
-            .execute(prompt, options)
-            .await;
+        let runner = RunPrompt::with_journal(&browser, &clock, &journal);
+        let run = runner.execute(prompt, options);
+        tokio::pin!(run);
+        let result = tokio::select! {
+            result = &mut run => result,
+            heartbeat_result = &mut heartbeat => {
+                match heartbeat_result {
+                    Ok(Ok(())) => Err(anyhow!("ownership heartbeat stopped unexpectedly")),
+                    Ok(Err(error)) => Err(error),
+                    Err(error) => Err(anyhow!("ownership heartbeat task failed: {error}")),
+                }
+            }
+        };
 
         let report = match result {
             Ok(report) => report,
@@ -208,7 +339,12 @@ impl RunWorker {
                     Some(&error.to_string()),
                 )?;
                 heartbeat_stop.store(true, Ordering::Relaxed);
-                let _ = heartbeat.await;
+                if !heartbeat.is_finished() {
+                    let _ = heartbeat.await;
+                }
+                let _ = self
+                    .account
+                    .release_target_ownership(&target_lease.target_id, &self.owner_id);
                 self.store.release_lease(&run_id, &self.owner_id)?;
                 let _ = browser.close_owned_target().await;
                 return Err(error);
@@ -231,7 +367,7 @@ impl RunWorker {
                 task_id: task.id.clone(),
                 run_id: run_id.clone(),
                 exact_commit: task.known_exact_head.clone(),
-                conversation_url: None,
+                conversation_url: report.conversation_url.clone(),
                 conversation_kind: task.conversation_kind.clone(),
                 original_goal: task.original_prompt.clone(),
                 acceptance_prompt: task.acceptance_prompt.clone(),
@@ -258,7 +394,7 @@ impl RunWorker {
                 outbound_delivery_confirmed: current_checkpoint
                     .as_ref()
                     .is_some_and(|checkpoint| checkpoint.outbound_delivery_confirmed),
-                checkpoint: None,
+                checkpoint: current_checkpoint.clone(),
                 continuation_instruction:
                     "在新会话中按 RecoveryEnvelope 继续，不要重复已经完成的步骤。".into(),
             };
@@ -270,7 +406,11 @@ impl RunWorker {
         }
 
         heartbeat_stop.store(true, Ordering::Relaxed);
-        let _ = heartbeat.await;
+        if !heartbeat.is_finished() {
+            let _ = heartbeat.await;
+        }
+        self.account
+            .release_target_ownership(&target_lease.target_id, &self.owner_id)?;
         self.store.release_lease(&run_id, &self.owner_id)?;
         let _ = browser.close_owned_target().await;
         Ok(report)
@@ -405,14 +545,24 @@ impl Supervisor {
             return Err(anyhow!("at least one account browser endpoint is required"));
         }
         let store = SqliteStore::open(sqlite_path)?;
+        let owner_prefix = format!("supervisor-{}", now_ms());
+        let actors = accounts
+            .into_iter()
+            .map(|(id, endpoint)| {
+                let actor_owner_id = format!("{owner_prefix}-account-{id}");
+                Arc::new(AccountBrowserActor::new(
+                    id,
+                    endpoint,
+                    store.clone(),
+                    actor_owner_id,
+                ))
+            })
+            .collect();
         Ok(Self {
             store,
-            accounts: accounts
-                .into_iter()
-                .map(|(id, endpoint)| Arc::new(AccountBrowserActor::new(id, endpoint)))
-                .collect(),
+            accounts: actors,
             semaphore: Arc::new(Semaphore::new(max_concurrent.max(1))),
-            owner_prefix: format!("supervisor-{}", now_ms()),
+            owner_prefix,
         })
     }
 
