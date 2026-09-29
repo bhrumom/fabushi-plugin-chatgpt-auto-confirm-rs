@@ -4,8 +4,7 @@ use fabushi_chatgpt_application::{
     Clock, OwnershipStore, RunPrompt, parse_task_report, parse_task_wait,
 };
 use fabushi_chatgpt_domain::{
-    ConversationKind, RecoveryEnvelope, RunEvent, RunEventKind, RunReport, RunState,
-    TaskReportStatus,
+    RecoveryEnvelope, RunEvent, RunEventKind, RunReport, RunState, TaskReportStatus,
 };
 use std::path::Path;
 use std::sync::{
@@ -18,7 +17,7 @@ use tokio::sync::{Mutex, Semaphore};
 pub use fabushi_chatgpt_application::{QueueStore, RunOptions};
 pub use fabushi_chatgpt_cdp::ChatGptCdp;
 pub use fabushi_chatgpt_domain::{
-    ExecutionProfile, ObservedExecutionProfile, QueueTask, RunRecord,
+    ConversationKind, ExecutionProfile, ObservedExecutionProfile, QueueTask, RunRecord,
 };
 pub use fabushi_chatgpt_linux_browser::{
     BrowserLaunch, ManagedBrowserConfig, ManagedChromium, find_chromium_binary, launch_chromium,
