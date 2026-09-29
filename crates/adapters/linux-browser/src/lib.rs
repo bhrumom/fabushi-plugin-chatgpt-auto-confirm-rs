@@ -47,6 +47,12 @@ pub fn launch_chromium(
             profile_dir.display()
         )
     })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(profile_dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("failed to secure profile directory {}", profile_dir.display()))?;
+    }
 
     let mut command = Command::new(browser_binary);
     command

@@ -13,7 +13,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, Semaphore};
 
 pub use fabushi_chatgpt_cdp::ChatGptCdp;
-pub use fabushi_chatgpt_domain::{ExecutionProfile, ObservedExecutionProfile, RunRecord};
+pub use fabushi_chatgpt_application::QueueStore;
+pub use fabushi_chatgpt_domain::{ExecutionProfile, ObservedExecutionProfile, QueueTask, RunRecord};
 pub use fabushi_chatgpt_linux_browser::{BrowserLaunch, find_chromium_binary, launch_chromium};
 pub use fabushi_chatgpt_sqlite_store::SqliteStore;
 

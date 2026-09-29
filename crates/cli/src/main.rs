@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use fabushi_chatgpt_runtime::{
-    ChatGptCdp, RunOptions, find_chromium_binary, launch_chromium, run_prompt,
+    ChatGptCdp, ExecutionProfile, QueueTask, RunOptions, SqliteStore, Supervisor,
+    find_chromium_binary, launch_chromium, run_prompt,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -9,10 +10,12 @@ use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(name = "fabushi-chatgpt-auto-confirm")]
-#[command(about = "Rust/Linux ChatGPT browser automation and allow-once confirmer")]
+#[command(about = "Rust/Linux ChatGPT browser automation and durable queue runtime")]
 struct Cli {
     #[arg(long, global = true, default_value = "http://127.0.0.1:9222")]
     cdp: String,
+    #[arg(long, global = true)]
+    db: Option<PathBuf>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -50,11 +53,39 @@ enum Commands {
         dispatch_confirm_seconds: u64,
         #[arg(long, default_value_t = 1800)]
         continuation_seconds: u64,
+        #[arg(long, default_value = "GPT-5.6")]
+        model: String,
+        #[arg(long, default_value = "Extra High")]
+        thinking: String,
     },
     Open {
         #[arg(long, default_value = "https://chatgpt.com/")]
         url: String,
     },
+    QueueEnqueue {
+        #[arg(long)]
+        task_id: String,
+        #[arg(long, default_value = "default")]
+        account_id: String,
+        #[arg(long)]
+        prompt: String,
+        #[arg(long, default_value_t = 1)]
+        revision: u64,
+        #[arg(long, default_value_t = 0)]
+        priority: i32,
+        #[arg(long, default_value = "GPT-5.6")]
+        model: String,
+        #[arg(long, default_value = "Extra High")]
+        thinking: String,
+        #[arg(long)]
+        acceptance_prompt: Option<String>,
+    },
+    QueueRunOnce {
+        #[arg(long, default_value = "default")]
+        account_id: String,
+    },
+    QueueRecover,
+    QueueStatus,
 }
 
 #[tokio::main]
@@ -86,7 +117,7 @@ async fn main() -> Result<()> {
                     "profile": launch.profile_dir,
                     "cdp": launch.endpoint,
                     "headed": launch.headed,
-                    "url": url,
+                    "url": url
                 })
             );
         }
@@ -96,10 +127,7 @@ async fn main() -> Result<()> {
         }
         Commands::ApproveOnce => {
             let cdp = ChatGptCdp::connect(&cli.cdp).await?;
-            println!(
-                "{}",
-                serde_json::json!({"clicked": cdp.click_allow_once().await?})
-            );
+            println!("{}", serde_json::json!({"clicked": cdp.click_allow_once().await?}));
         }
         Commands::Send {
             prompt,
@@ -110,6 +138,8 @@ async fn main() -> Result<()> {
             rate_limit_pause_seconds,
             dispatch_confirm_seconds,
             continuation_seconds,
+            model,
+            thinking,
         } => {
             let cdp = ChatGptCdp::connect(&cli.cdp).await?;
             let options = RunOptions {
@@ -120,6 +150,12 @@ async fn main() -> Result<()> {
                 rate_limit_pause: Duration::from_secs(rate_limit_pause_seconds),
                 dispatch_confirm_after: Duration::from_secs(dispatch_confirm_seconds),
                 continuation_after: Duration::from_secs(continuation_seconds),
+                execution_profile: Some(ExecutionProfile {
+                    model,
+                    thinking_effort: thinking,
+                    connector_requirements: Vec::new(),
+                    tool_mode: None,
+                }),
                 ..RunOptions::default()
             };
             let report = run_prompt(&cdp, &prompt, options)
@@ -132,6 +168,56 @@ async fn main() -> Result<()> {
             cdp.navigate(&url).await?;
             println!("{}", serde_json::json!({"navigated": url}));
         }
+        Commands::QueueEnqueue {
+            task_id,
+            account_id,
+            prompt,
+            revision,
+            priority,
+            model,
+            thinking,
+            acceptance_prompt,
+        } => {
+            let store = SqliteStore::open(queue_db(cli.db))?;
+            let mut task = QueueTask::new(task_id, account_id, prompt);
+            task.current_revision = revision;
+            task.priority = priority;
+            task.acceptance_prompt = acceptance_prompt;
+            task.execution_profile = ExecutionProfile {
+                model,
+                thinking_effort: thinking,
+                connector_requirements: Vec::new(),
+                tool_mode: None,
+            };
+            fabushi_chatgpt_runtime::QueueStore::enqueue_task(&store, &task)?;
+            println!("{}", serde_json::to_string_pretty(&task)?);
+        }
+        Commands::QueueRunOnce { account_id } => {
+            let supervisor = Supervisor::open(
+                queue_db(cli.db),
+                vec![(account_id, cli.cdp)],
+                1,
+            )?;
+            supervisor.recover_startup()?;
+            let report = supervisor.run_one().await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Commands::QueueRecover => {
+            let store = SqliteStore::open(queue_db(cli.db))?;
+            let recovered = fabushi_chatgpt_runtime::QueueStore::recover_expired_leases(
+                &store,
+                current_time_ms(),
+            )?;
+            println!("{}", serde_json::json!({"recovered": recovered}));
+        }
+        Commands::QueueStatus => {
+            let store = SqliteStore::open(queue_db(cli.db))?;
+            let snapshot = fabushi_chatgpt_runtime::QueueStore::snapshot(&store)?;
+            println!(
+                "{}",
+                serde_json::json!({"tasks": snapshot.tasks, "runs": snapshot.runs})
+            );
+        }
     }
 
     Ok(())
@@ -143,4 +229,23 @@ fn default_profile_dir() -> PathBuf {
         .join("fabushi")
         .join("chatgpt-auto-confirm")
         .join("chromium-profile")
+}
+
+fn queue_db(explicit: Option<PathBuf>) -> PathBuf {
+    explicit.unwrap_or_else(|| {
+        dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("fabushi")
+            .join("chatgpt-auto-confirm")
+            .join("queue.sqlite3")
+    })
+}
+
+fn current_time_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
 }

@@ -16,30 +16,34 @@ DOMAIN_CARGO="crates/domain/Cargo.toml"
 APP_CARGO="crates/application/Cargo.toml"
 CDP_CARGO="crates/adapters/chatgpt-cdp/Cargo.toml"
 LINUX_CARGO="crates/adapters/linux-browser/Cargo.toml"
+SQLITE_CARGO="crates/adapters/sqlite-store/Cargo.toml"
 CLI_CARGO="crates/cli/Cargo.toml"
 
-if contains "$DOMAIN_CARGO" 'fabushi-chatgpt-(application|cdp|runtime|linux-browser)|tokio|reqwest|tungstenite|rusqlite|sqlx'; then
+if contains "$DOMAIN_CARGO" 'fabushi-chatgpt-(application|cdp|runtime|linux-browser|sqlite-store)|tokio|reqwest|tungstenite|rusqlite|sqlx'; then
   fail "domain depends on an outer layer or runtime/infrastructure library"
 fi
 
-if contains "$APP_CARGO" 'fabushi-chatgpt-(cdp|runtime|linux-browser)|reqwest|tungstenite|rusqlite|sqlx'; then
+if contains "$APP_CARGO" 'fabushi-chatgpt-(cdp|runtime|linux-browser|sqlite-store)|reqwest|tungstenite|rusqlite|sqlx'; then
   fail "application depends on a concrete adapter/runtime"
 fi
 
-if contains "$CDP_CARGO" 'fabushi-chatgpt-(runtime|linux-browser|auto-confirm)'; then
-  fail "CDP adapter depends on runtime, Linux adapter, or CLI"
+if contains "$CDP_CARGO" 'fabushi-chatgpt-(runtime|linux-browser|sqlite-store|auto-confirm)'; then
+  fail "CDP adapter depends on runtime or another outer adapter"
 fi
 
-if contains "$LINUX_CARGO" 'fabushi-chatgpt-(runtime|cdp|auto-confirm)'; then
+if contains "$LINUX_CARGO" 'fabushi-chatgpt-(runtime|cdp|sqlite-store|auto-confirm)'; then
   fail "Linux browser adapter depends on another outer adapter/runtime"
 fi
 
-if contains "$CLI_CARGO" 'fabushi-chatgpt-(application|domain|cdp|linux-browser)'; then
+if contains "$SQLITE_CARGO" 'fabushi-chatgpt-(runtime|cdp|linux-browser|auto-confirm)'; then
+  fail "SQLite adapter depends on runtime or another outer adapter"
+fi
+
+if contains "$CLI_CARGO" 'fabushi-chatgpt-(application|domain|cdp|linux-browser|sqlite-store)'; then
   fail "CLI bypasses the runtime composition root"
 fi
 
-if grep -R -n -E 'querySelector|data-testid|Runtime\.evaluate|Page\.reload|remote-debugging-port' \
-  crates/domain/src crates/application/src >/tmp/fabushi-architecture-selector-leaks.txt 2>/dev/null; then
+if grep -R -n -E 'querySelector|data-testid|Runtime\.evaluate|Page\.reload|remote-debugging-port'   crates/domain/src crates/application/src >/tmp/fabushi-architecture-selector-leaks.txt 2>/dev/null; then
   cat /tmp/fabushi-architecture-selector-leaks.txt >&2
   fail "browser/CDP implementation detail leaked into domain/application"
 fi
