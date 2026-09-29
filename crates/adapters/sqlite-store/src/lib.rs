@@ -1543,17 +1543,17 @@ mod tests {
         store
             .settle_task(&claim.task, Some(&report), None, None, None)
             .unwrap();
-        store
-            .release_lease(&claim.run.run_id, "worker-1")
-            .unwrap();
+        store.release_lease(&claim.run.run_id, "worker-1").unwrap();
 
         let snapshot = store.snapshot().unwrap();
         assert_eq!(snapshot.tasks[0].status, TaskState::Queued);
         assert_eq!(snapshot.tasks[0].phase, QueuePhase::Recovering);
-        assert!(store
-            .claim_next_runnable("worker-2", 2_000, 60_000)
-            .unwrap()
-            .is_some());
+        assert!(
+            store
+                .claim_next_runnable("worker-2", 2_000, 60_000)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -1578,9 +1578,7 @@ mod tests {
         store
             .requeue_conversation(&acceptance, &report, "work_completed_start_acceptance")
             .unwrap();
-        store
-            .release_lease(&claim.run.run_id, "worker-1")
-            .unwrap();
+        store.release_lease(&claim.run.run_id, "worker-1").unwrap();
 
         let snapshot = store.snapshot().unwrap();
         assert_eq!(snapshot.tasks[0].status, TaskState::Queued);
