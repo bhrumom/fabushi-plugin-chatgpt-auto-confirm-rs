@@ -342,7 +342,9 @@ impl RunWorker {
                                 .runs
                                 .into_iter()
                                 .find(|run| run.run_id == run_id)
-                                .ok_or_else(|| anyhow!("run {run_id} disappeared during target recovery"))?;
+                                .ok_or_else(|| {
+                                    anyhow!("run {run_id} disappeared during target recovery")
+                                })?;
                             let mut checkpoint = current_run.checkpoint;
                             if checkpoint.counters.target_recoveries >= 3 {
                                 checkpoint.pending_recovery =
@@ -397,8 +399,7 @@ impl RunWorker {
                             );
                             lost.target_id = Some(target_lease.target_id.clone());
                             lost.canonical_conversation_url = Some(canonical_url.clone());
-                            lost.latest_assistant_text =
-                                current_run.latest_assistant_text.clone();
+                            lost.latest_assistant_text = current_run.latest_assistant_text.clone();
                             lost.visible_progress_messages =
                                 current_run.visible_progress_messages.clone();
                             lost.payload_json = serde_json::json!({
