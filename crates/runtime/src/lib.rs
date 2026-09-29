@@ -270,8 +270,9 @@ impl RunWorker {
                     .settle_task(task, Some(&report), Some(&recovery), wait_until, None)?;
             }
             Ok(None) => {
-                if let Some(wait) = parse_task_wait(&run_report.assistant_text)? {
-                    if wait.task_id == task.id {
+                if let Some(wait) = parse_task_wait(&run_report.assistant_text)?
+                    && wait.task_id == task.id
+                {
                         let recovery = RecoveryEnvelope {
                             version: 1,
                             task_id: task.id.clone(),
@@ -294,7 +295,6 @@ impl RunWorker {
                             None,
                         )?;
                         return Ok(());
-                    }
                 }
                 self.store.settle_task(
                     task,
