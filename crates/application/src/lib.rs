@@ -45,11 +45,7 @@ pub trait RunJournal: Send + Sync {
     fn load_checkpoint(&self) -> Result<Option<RunCheckpoint>> {
         Ok(None)
     }
-    fn record_with_checkpoint(
-        &self,
-        event: &RunEvent,
-        checkpoint: &RunCheckpoint,
-    ) -> Result<()> {
+    fn record_with_checkpoint(&self, event: &RunEvent, checkpoint: &RunCheckpoint) -> Result<()> {
         let _ = checkpoint;
         self.record(event)
     }
@@ -228,9 +224,7 @@ impl<'a> RunPrompt<'a> {
                 &checkpoint,
             )?;
             self.browser.send_prompt(prompt).await?;
-        } else if checkpoint.dispatch_deadline_ms == 0
-            && !checkpoint.outbound_delivery_confirmed
-        {
+        } else if checkpoint.dispatch_deadline_ms == 0 && !checkpoint.outbound_delivery_confirmed {
             checkpoint.dispatch_deadline_ms =
                 add_duration_ms(now_ms, options.dispatch_confirm_after);
             checkpoint.counters = counters.clone();
@@ -360,8 +354,7 @@ impl<'a> RunPrompt<'a> {
             let fingerprint = snapshot.activity_fingerprint();
             if checkpoint.last_activity_fingerprint.as_deref() != Some(&fingerprint) {
                 checkpoint.last_activity_fingerprint = Some(fingerprint.clone());
-                checkpoint.stale_deadline_ms =
-                    add_duration_ms(now_ms, options.stale_reload_after);
+                checkpoint.stale_deadline_ms = add_duration_ms(now_ms, options.stale_reload_after);
                 checkpoint.terminal_evidence_count = 0;
                 checkpoint.counters = counters.clone();
                 self.record_checkpoint(
@@ -628,8 +621,7 @@ impl<'a> RunPrompt<'a> {
                 counters.recoveries += 1;
                 counters.refresh_attempts += 1;
                 checkpoint.refresh_attempts += 1;
-                checkpoint.stale_deadline_ms =
-                    add_duration_ms(now_ms, options.stale_reload_after);
+                checkpoint.stale_deadline_ms = add_duration_ms(now_ms, options.stale_reload_after);
                 checkpoint.connection_recovery_deadline_ms = if connection_due {
                     Some(add_duration_ms(now_ms, options.connection_recovery_after))
                 } else {
@@ -650,9 +642,7 @@ impl<'a> RunPrompt<'a> {
                 continue;
             }
 
-            if now_ms >= checkpoint.continuation_deadline_ms
-                && !snapshot.response_in_flight()
-            {
+            if now_ms >= checkpoint.continuation_deadline_ms && !snapshot.response_in_flight() {
                 if counters.continuations >= options.max_continuations {
                     checkpoint.pending_recovery =
                         Some("continuation_attempt_limit_exceeded".into());

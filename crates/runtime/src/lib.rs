@@ -341,7 +341,9 @@ impl RunWorker {
                         conversation_kind: task.conversation_kind.clone(),
                         original_goal: task.original_prompt.clone(),
                         acceptance_prompt: task.acceptance_prompt.clone(),
-                        interrupted_turn_visible_content: run_report.visible_progress_messages.clone(),
+                        interrupted_turn_visible_content: run_report
+                            .visible_progress_messages
+                            .clone(),
                         progress_messages: run_report.visible_progress_messages.clone(),
                         completed: vec![],
                         remaining: vec![wait.reason.clone()],

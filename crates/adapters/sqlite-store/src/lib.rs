@@ -606,11 +606,7 @@ pub struct SqliteRunJournal {
 }
 
 impl SqliteRunJournal {
-    fn persist_event(
-        &self,
-        event: &RunEvent,
-        checkpoint: Option<&RunCheckpoint>,
-    ) -> Result<()> {
+    fn persist_event(&self, event: &RunEvent, checkpoint: Option<&RunCheckpoint>) -> Result<()> {
         let mut connection = self
             .store
             .connection
@@ -717,11 +713,7 @@ impl RunJournal for SqliteRunJournal {
         Ok(Some(run.checkpoint))
     }
 
-    fn record_with_checkpoint(
-        &self,
-        event: &RunEvent,
-        checkpoint: &RunCheckpoint,
-    ) -> Result<()> {
+    fn record_with_checkpoint(&self, event: &RunEvent, checkpoint: &RunCheckpoint) -> Result<()> {
         self.persist_event(event, Some(checkpoint))
     }
 

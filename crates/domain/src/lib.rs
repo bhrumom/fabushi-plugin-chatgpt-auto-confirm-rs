@@ -290,7 +290,6 @@ pub struct QueueTask {
     #[serde(default)]
     pub known_ci_evidence: Vec<String>,
     #[serde(default)]
-    #[serde(default)]
     pub current_stage: Option<String>,
     #[serde(default)]
     pub pending_work: Vec<String>,
@@ -540,7 +539,10 @@ impl RecoveryEnvelope {
         if let Some(prompt) = &self.acceptance_prompt {
             parts.push(format!("## 验收/规划会话最终提示词\n{prompt}"));
         }
-        parts.push(section("上一轮异常中断前的实时回复内容", &self.interrupted_turn_visible_content));
+        parts.push(section(
+            "上一轮异常中断前的实时回复内容",
+            &self.interrupted_turn_visible_content,
+        ));
         parts.push(section("异常前实时工作进展", &self.progress_messages));
         parts.push(section("已完成", &self.completed));
         parts.push(section("当前待继续事项", &self.pending_work));
@@ -552,7 +554,10 @@ impl RecoveryEnvelope {
             parts.push(format!("## 当前阶段\n{stage}"));
         }
         if let Some(message) = &self.last_committed_outbound_message {
-            parts.push(format!("## 最近一次已提交 outbound\n{message}\nconfirmed={}", self.outbound_delivery_confirmed));
+            parts.push(format!(
+                "## 最近一次已提交 outbound\n{message}\nconfirmed={}",
+                self.outbound_delivery_confirmed
+            ));
         }
         parts.push(format!("## 接力要求\n{}", self.continuation_instruction));
         parts.join("\n\n")
