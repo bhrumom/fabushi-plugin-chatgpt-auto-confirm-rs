@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, anyhow, bail};
 use fabushi_chatgpt_application::{QueueClaim, QueueSnapshot, QueueStore, RunJournal};
 use fabushi_chatgpt_domain::{
-    ApprovalFingerprint, AutomationTaskReport, QueueTask, RecoveryEnvelope, RunEvent, RunEventKind,
-    RunRecord, RunState, TaskState,
+    ApprovalFingerprint, AutomationTaskReport, QueueTask, RecoveryEnvelope, RunCheckpoint, RunEvent,
+    RunEventKind, RunRecord, RunState, TaskState,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{HashMap, HashSet};
@@ -270,11 +270,6 @@ ON CONFLICT(task_id) DO UPDATE SET
             .map_err(|_| anyhow!("sqlite mutex poisoned"))?;
         let tx = connection.transaction()?;
 
-        tx.execute(
-            "DELETE FROM worker_leases WHERE expires_at_ms <= ?1",
-            params![now_ms],
-        )?;
-
         let tasks = Self::load_tasks_in_tx(&tx)?;
         let statuses: HashMap<String, TaskState> = tasks
             .iter()
@@ -314,6 +309,13 @@ ON CONFLICT(task_id) DO UPDATE SET
         let run_id = format!("{}-{}-{}", task.id, task.current_revision, task.attempts);
         let mut run = RunRecord::new(&run_id, &task.id, now_ms);
         run.revision = 1;
+        if let Some(checkpoint) = task
+            .recovery_context
+            .as_ref()
+            .and_then(|recovery| recovery.checkpoint.clone())
+        {
+            run.checkpoint = checkpoint;
+        }
 
         tx.execute(
             "UPDATE tasks SET status='running', body_json=?2, updated_at_ms=?3 WHERE task_id=?1",
@@ -495,14 +497,16 @@ WHERE l.expires_at_ms <= ?1
                 };
                 task.last_error = Some("worker_lease_expired".into());
                 task.recovery_context = Some(RecoveryEnvelope {
-                    version: 1,
+                    version: 2,
                     task_id: task.id.clone(),
                     run_id: run.run_id.clone(),
-                    exact_commit: None,
+                    exact_commit: task.known_exact_head.clone(),
                     conversation_url: run.canonical_conversation_url.clone(),
+                    conversation_kind: task.conversation_kind.clone(),
                     original_goal: task.original_prompt.clone(),
                     acceptance_prompt: task.acceptance_prompt.clone(),
-                    progress_messages: run.latest_assistant_text.clone().into_iter().collect(),
+                    interrupted_turn_visible_content: run.visible_progress_messages.clone(),
+                    progress_messages: run.visible_progress_messages.clone(),
                     completed: task
                         .last_report
                         .as_ref()
@@ -512,14 +516,24 @@ WHERE l.expires_at_ms <= ?1
                         .last_report
                         .as_ref()
                         .map(|report| report.remaining.clone())
-                        .unwrap_or_default(),
+                        .unwrap_or_else(|| task.pending_work.clone()),
                     blockers: task
                         .last_report
                         .as_ref()
                         .map(|report| report.blockers.clone())
                         .unwrap_or_default(),
+                    known_ci_evidence: task.known_ci_evidence.clone(),
+                    current_stage: task.current_stage.clone(),
+                    pending_work: task.pending_work.clone(),
+                    context_references: task.context_references.clone(),
+                    last_committed_outbound_message: run
+                        .checkpoint
+                        .last_committed_outbound_message
+                        .clone(),
+                    outbound_delivery_confirmed: run.checkpoint.outbound_delivery_confirmed,
+                    checkpoint: Some(run.checkpoint.clone()),
                     continuation_instruction:
-                        "从异常中断处继续；先验证已有工作，不要重复已完成步骤。".into(),
+                        "从异常中断处继续；先恢复 durable checkpoint 并观察现有会话，不要重复已完成步骤。".into(),
                 });
                 task.updated_at_ms = now_ms;
                 tx.execute(
@@ -591,8 +605,12 @@ pub struct SqliteRunJournal {
     owner_id: String,
 }
 
-impl RunJournal for SqliteRunJournal {
-    fn record(&self, event: &RunEvent) -> Result<()> {
+impl SqliteRunJournal {
+    fn persist_event(
+        &self,
+        event: &RunEvent,
+        checkpoint: Option<&RunCheckpoint>,
+    ) -> Result<()> {
         let mut connection = self
             .store
             .connection
@@ -620,6 +638,9 @@ impl RunJournal for SqliteRunJournal {
         run.revision += 1;
         run.state = event.state.clone();
         run.counters = event.counters.clone();
+        if let Some(checkpoint) = checkpoint {
+            run.checkpoint = checkpoint.clone();
+        }
         if let Some(url) = &event.canonical_conversation_url {
             run.canonical_conversation_url = Some(url.clone());
         }
@@ -631,6 +652,9 @@ impl RunJournal for SqliteRunJournal {
         }
         if let Some(text) = &event.latest_assistant_text {
             run.latest_assistant_text = Some(text.clone());
+        }
+        if !event.visible_progress_messages.is_empty() {
+            run.visible_progress_messages = event.visible_progress_messages.clone();
         }
         if matches!(
             event.kind,
@@ -665,6 +689,40 @@ VALUES (?1,?2,?3,?4)
         )?;
         tx.commit()?;
         Ok(())
+    }
+}
+
+impl RunJournal for SqliteRunJournal {
+    fn record(&self, event: &RunEvent) -> Result<()> {
+        self.persist_event(event, None)
+    }
+
+    fn load_checkpoint(&self) -> Result<Option<RunCheckpoint>> {
+        let connection = self
+            .store
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("sqlite mutex poisoned"))?;
+        let body: Option<String> = connection
+            .query_row(
+                "SELECT body_json FROM runs WHERE run_id=?1",
+                params![self.run_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(body) = body else {
+            return Ok(None);
+        };
+        let run: RunRecord = serde_json::from_str(&body)?;
+        Ok(Some(run.checkpoint))
+    }
+
+    fn record_with_checkpoint(
+        &self,
+        event: &RunEvent,
+        checkpoint: &RunCheckpoint,
+    ) -> Result<()> {
+        self.persist_event(event, Some(checkpoint))
     }
 
     fn begin_approval_attempt(
