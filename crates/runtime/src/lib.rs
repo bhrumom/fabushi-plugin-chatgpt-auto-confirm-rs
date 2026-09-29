@@ -1095,7 +1095,9 @@ impl Supervisor {
     }
 }
 
-fn recovery_requires_fresh_conversation(checkpoint: &fabushi_chatgpt_domain::RunCheckpoint) -> bool {
+fn recovery_requires_fresh_conversation(
+    checkpoint: &fabushi_chatgpt_domain::RunCheckpoint,
+) -> bool {
     matches!(
         checkpoint.pending_recovery.as_deref(),
         Some(
