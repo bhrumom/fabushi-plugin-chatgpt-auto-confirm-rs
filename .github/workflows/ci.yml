@@ -27,3 +27,45 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: release build
         run: cargo build --release -p fabushi-chatgpt-auto-confirm
+
+  chromium-fixture:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
+      - name: locate Chrome
+        id: chrome
+        shell: bash
+        run: |
+          set -euo pipefail
+          for candidate in google-chrome-stable google-chrome chromium chromium-browser; do
+            if command -v "$candidate" >/dev/null 2>&1; then
+              echo "binary=$(command -v "$candidate")" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo "No Chromium/Chrome binary found on runner" >&2
+          exit 1
+      - name: start headless Chromium CDP
+        shell: bash
+        run: |
+          "${{ steps.chrome.outputs.binary ${{" \
+            --headless=new \
+            --disable-gpu \
+            --no-sandbox \
+            --remote-debugging-address=127.0.0.1 \
+            --remote-debugging-port=9222 \
+            --user-data-dir=/tmp/fabushi-fixture-profile \
+            about:blank >/tmp/fabushi-chrome.log 2>&1 &
+          for i in $(seq 1 50); do
+            if curl -fsS http://127.0.0.1:9222/json/version >/dev/null; then exit 0; fi
+            sleep 0.2
+          done
+          cat /tmp/fabushi-chrome.log
+          exit 1
+      - name: Chromium fixture contract
+        env:
+          CHROMIUM_CDP_ENDPOINT: http://127.0.0.1:9222
+        run: cargo test -p fabushi-chatgpt-cdp --test chromium_fixture -- --ignored

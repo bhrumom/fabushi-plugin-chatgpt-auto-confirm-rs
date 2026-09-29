@@ -38,9 +38,7 @@ impl ChatGptCdp {
 
     pub async fn create_target(endpoint: &str, initial_url: &str) -> Result<Self> {
         let endpoint = endpoint.trim_end_matches('/');
-        let mut url = reqwest::Url::parse(&format!("{endpoint}/json/new"))
-            .context("invalid CDP endpoint")?;
-        url.query_pairs_mut().append_pair("", initial_url);
+        let url = format!("{endpoint}/json/new?{}", urlencoding::encode(initial_url));
         let response = reqwest::Client::new()
             .put(url)
             .send()

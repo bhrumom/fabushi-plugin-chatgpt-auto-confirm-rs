@@ -1,0 +1,52 @@
+name: authenticated-linux-e2e
+
+on:
+  workflow_dispatch:
+    inputs:
+      cdp_endpoint:
+        description: "CDP endpoint reachable from a self-hosted authenticated Linux runner"
+        required: true
+        default: "http://127.0.0.1:9222"
+      prompt:
+        description: "Acceptance prompt"
+        required: true
+        default: "回复：Linux E2E PASS"
+      model:
+        description: "Required model"
+        required: true
+        default: "GPT-5.6"
+      thinking:
+        description: "Required thinking effort"
+        required: true
+        default: "Extra High"
+
+permissions:
+  contents: read
+
+jobs:
+  authenticated-chatgpt:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
+      - name: Verify authenticated ChatGPT and run exact UI profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          cargo run --release -p fabushi-chatgpt-auto-confirm -- \
+            --cdp "${{ inputs.cdp_endpoint ${{" \
+            send \
+            --prompt "${{ inputs.prompt ${{" \
+            --model "${{ inputs.model ${{" \
+            --thinking "${{ inputs.thinking ${{" \
+            | tee evidence/run-report.json
+          python3 scripts/verify-e2e-report.py evidence/run-report.json "$GITHUB_SHA" > evidence/acceptance.json
+          sha256sum evidence/acceptance.json > evidence/acceptance.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: authenticated-linux-e2e-${{ github.sha ${{
+          path: evidence/
+          if-no-files-found: error
