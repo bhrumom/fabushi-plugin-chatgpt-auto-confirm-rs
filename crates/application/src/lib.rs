@@ -2,7 +2,8 @@ use anyhow::{Result, bail};
 use async_trait::async_trait;
 use fabushi_chatgpt_domain::{
     ApprovalFingerprint, ExecutionProfile, ObservedExecutionProfile, PageSnapshot, QueueTask,
-    RecoveryEnvelope, RunCounters, RunEvent, RunEventKind, RunRecord, RunReport, RunState,
+    RecoveryEnvelope, RunCheckpoint, RunCounters, RunEvent, RunEventKind, RunRecord, RunReport,
+    RunState,
 };
 use serde_json::json;
 use std::time::Duration;
@@ -29,6 +30,7 @@ pub trait BrowserPort: Send + Sync {
 #[async_trait]
 pub trait Clock: Send + Sync {
     fn now(&self) -> Duration;
+    fn unix_time_ms(&self) -> i64;
     async fn sleep(&self, duration: Duration);
 }
 
@@ -40,6 +42,17 @@ pub trait RunJournal: Send + Sync {
         max_attempts: u32,
     ) -> Result<bool>;
     fn settle_approval(&self, fingerprint: &ApprovalFingerprint) -> Result<()>;
+    fn load_checkpoint(&self) -> Result<Option<RunCheckpoint>> {
+        Ok(None)
+    }
+    fn record_with_checkpoint(
+        &self,
+        event: &RunEvent,
+        checkpoint: &RunCheckpoint,
+    ) -> Result<()> {
+        let _ = checkpoint;
+        self.record(event)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -93,8 +106,12 @@ pub struct RunOptions {
     pub stale_reload_after: Duration,
     pub rate_limit_pause: Duration,
     pub max_rate_limit_pauses: u32,
+    pub max_dispatch_retries: u32,
+    pub max_refresh_attempts: u32,
+    pub max_continuations: u32,
     pub dispatch_confirm_after: Duration,
     pub continuation_after: Duration,
+    pub connection_recovery_after: Duration,
     pub execution_profile: Option<ExecutionProfile>,
 }
 
@@ -110,8 +127,12 @@ impl Default for RunOptions {
             stale_reload_after: Duration::from_secs(15 * 60),
             rate_limit_pause: Duration::from_secs(5 * 60),
             max_rate_limit_pauses: 3,
+            max_dispatch_retries: 3,
+            max_refresh_attempts: 3,
+            max_continuations: 6,
             dispatch_confirm_after: Duration::from_secs(90),
             continuation_after: Duration::from_secs(30 * 60),
+            connection_recovery_after: Duration::from_secs(15 * 60),
             execution_profile: None,
         }
     }
@@ -145,7 +166,11 @@ impl<'a> RunPrompt<'a> {
     }
 
     pub async fn execute(&self, prompt: &str, options: RunOptions) -> Result<RunReport> {
-        let mut counters = RunCounters::default();
+        let mut checkpoint = match self.journal {
+            Some(journal) => journal.load_checkpoint()?.unwrap_or_default(),
+            None => RunCheckpoint::default(),
+        };
+        let mut counters = checkpoint.counters.clone();
 
         if let Some(profile) = &options.execution_profile {
             let observed = self.browser.ensure_execution_profile(profile).await?;
@@ -165,100 +190,280 @@ impl<'a> RunPrompt<'a> {
             ))?;
         }
 
-        let before = self.browser.snapshot().await?;
-        let baseline_users = before.user_turns;
-        self.record(event(
-            RunEventKind::PromptDispatchRequested,
-            RunState::Dispatching,
-            &counters,
-            Some(&before),
-            json!({"baseline_user_turns": baseline_users}),
-        ))?;
-        self.browser.send_prompt(prompt).await?;
+        let initial = self.browser.snapshot().await?;
+        let now_ms = self.clock.unix_time_ms();
+        if checkpoint.run_deadline_ms == 0 {
+            checkpoint.run_deadline_ms = add_duration_ms(now_ms, options.timeout);
+        }
+        if checkpoint.stale_deadline_ms == 0 {
+            checkpoint.stale_deadline_ms = add_duration_ms(now_ms, options.stale_reload_after);
+        }
+        if checkpoint.continuation_deadline_ms == 0 {
+            checkpoint.continuation_deadline_ms =
+                add_duration_ms(now_ms, options.continuation_after);
+        }
+        checkpoint.last_observed_at_ms = now_ms;
+        checkpoint
+            .last_conversation_url
+            .clone_from(&initial.canonical_conversation_url());
 
-        let started_at = self.clock.now();
-        let mut dispatch_started_at = started_at;
-        let mut last_progress_at = started_at;
-        let mut last_continuation_at = started_at;
-        let mut last_fingerprint = String::new();
-        let mut stable_terminal_count = 0u8;
-        let mut dispatch_confirmed = false;
+        if checkpoint.last_committed_outbound_message.is_none() {
+            checkpoint.baseline_user_turns = initial.user_turns;
+            checkpoint.outbound_baseline_user_turns = initial.user_turns;
+            checkpoint.last_committed_outbound_message = Some(prompt.to_owned());
+            checkpoint.outbound_delivery_confirmed = false;
+            checkpoint.dispatch_attempts = 1;
+            checkpoint.dispatch_deadline_ms =
+                add_duration_ms(now_ms, options.dispatch_confirm_after);
+            checkpoint.last_activity_fingerprint = Some(initial.activity_fingerprint());
+            checkpoint.counters = counters.clone();
+            self.record_checkpoint(
+                event(
+                    RunEventKind::PromptDispatchRequested,
+                    RunState::Dispatching,
+                    &counters,
+                    Some(&initial),
+                    json!({"attempt": 1, "baseline_user_turns": initial.user_turns}),
+                ),
+                &checkpoint,
+            )?;
+            self.browser.send_prompt(prompt).await?;
+        } else if checkpoint.dispatch_deadline_ms == 0
+            && !checkpoint.outbound_delivery_confirmed
+        {
+            checkpoint.dispatch_deadline_ms =
+                add_duration_ms(now_ms, options.dispatch_confirm_after);
+            checkpoint.counters = counters.clone();
+        }
 
         loop {
-            let now = self.clock.now();
-            if elapsed(now, started_at) > options.timeout {
-                let report = report_from(
+            let now_ms = self.clock.unix_time_ms();
+            if now_ms > checkpoint.run_deadline_ms {
+                checkpoint.pending_recovery = Some("global_timeout".into());
+                checkpoint.counters = counters.clone();
+                self.record_checkpoint(
+                    event(
+                        RunEventKind::RunFailed,
+                        RunState::TimedOut,
+                        &counters,
+                        None,
+                        json!({"reason": "timeout"}),
+                    ),
+                    &checkpoint,
+                )?;
+                return Ok(report_from(
                     RunState::TimedOut,
-                    None,
+                    checkpoint.last_conversation_url.clone(),
                     String::new(),
+                    Vec::new(),
                     &counters,
                     "run timed out before terminal response evidence",
-                );
-                self.record(event(
-                    RunEventKind::RunFailed,
-                    RunState::TimedOut,
-                    &counters,
-                    None,
-                    json!({"reason": "timeout"}),
-                ))?;
-                return Ok(report);
+                ));
+            }
+
+            if let Some(resume_at) = checkpoint.rate_limit_resume_at_ms {
+                if now_ms < resume_at {
+                    self.clock
+                        .sleep(wait_slice(now_ms, resume_at, options.poll_interval))
+                        .await;
+                    continue;
+                }
+                checkpoint.rate_limit_resume_at_ms = None;
+                checkpoint.counters = counters.clone();
+                self.record_checkpoint(
+                    event(
+                        RunEventKind::RateLimitBackoffFinished,
+                        RunState::Running,
+                        &counters,
+                        None,
+                        json!({}),
+                    ),
+                    &checkpoint,
+                )?;
             }
 
             let snapshot = self.browser.snapshot().await?;
+            checkpoint.last_observed_at_ms = now_ms;
+            if let Some(url) = snapshot.canonical_conversation_url() {
+                checkpoint.last_conversation_url = Some(url);
+            }
 
-            if snapshot.user_turns < baseline_users + 1 {
-                if elapsed(now, dispatch_started_at) >= options.dispatch_confirm_after {
-                    self.record(event(
-                        RunEventKind::PromptDispatchRequested,
-                        RunState::Dispatching,
-                        &counters,
-                        Some(&snapshot),
-                        json!({"retry": counters.dispatch_retries + 1}),
-                    ))?;
-                    self.browser.send_prompt(prompt).await?;
+            if !checkpoint.outbound_delivery_confirmed {
+                if snapshot.user_turns > checkpoint.outbound_baseline_user_turns {
+                    checkpoint.outbound_delivery_confirmed = true;
+                    checkpoint.dispatch_deadline_ms = 0;
+                    checkpoint.stale_deadline_ms =
+                        add_duration_ms(now_ms, options.stale_reload_after);
+                    checkpoint.continuation_deadline_ms =
+                        add_duration_ms(now_ms, options.continuation_after);
+                    checkpoint.counters = counters.clone();
+                    self.record_checkpoint(
+                        event(
+                            RunEventKind::OutboundDeliveryConfirmed,
+                            RunState::Running,
+                            &counters,
+                            Some(&snapshot),
+                            json!({"user_turns": snapshot.user_turns}),
+                        ),
+                        &checkpoint,
+                    )?;
+                } else if now_ms >= checkpoint.dispatch_deadline_ms {
+                    if counters.dispatch_retries >= options.max_dispatch_retries {
+                        checkpoint.pending_recovery =
+                            Some("dispatch_confirmation_retry_limit".into());
+                        counters.fresh_conversation_recoveries += 1;
+                        checkpoint.counters = counters.clone();
+                        self.record_checkpoint(
+                            event(
+                                RunEventKind::FreshConversationRequested,
+                                RunState::Recovering,
+                                &counters,
+                                Some(&snapshot),
+                                json!({"reason": "dispatch_confirmation_retry_limit"}),
+                            ),
+                            &checkpoint,
+                        )?;
+                        return Ok(report_from(
+                            RunState::Recovering,
+                            snapshot.canonical_conversation_url(),
+                            snapshot.assistant_text,
+                            snapshot.visible_assistant_messages,
+                            &counters,
+                            "dispatch_confirmation_retry_limit",
+                        ));
+                    }
+                    let outbound = checkpoint
+                        .last_committed_outbound_message
+                        .clone()
+                        .unwrap_or_else(|| prompt.to_owned());
                     counters.dispatch_retries += 1;
-                    dispatch_started_at = now;
+                    checkpoint.dispatch_attempts += 1;
+                    checkpoint.dispatch_deadline_ms =
+                        add_duration_ms(now_ms, options.dispatch_confirm_after);
+                    checkpoint.counters = counters.clone();
+                    self.record_checkpoint(
+                        event(
+                            RunEventKind::PromptDispatchRequested,
+                            RunState::Dispatching,
+                            &counters,
+                            Some(&snapshot),
+                            json!({"retry": counters.dispatch_retries, "attempt": checkpoint.dispatch_attempts}),
+                        ),
+                        &checkpoint,
+                    )?;
+                    self.browser.send_prompt(&outbound).await?;
                 }
                 self.clock.sleep(options.poll_interval).await;
                 continue;
             }
 
-            if !dispatch_confirmed {
-                dispatch_confirmed = true;
-                self.record(event(
-                    RunEventKind::PromptDispatchConfirmed,
-                    RunState::Running,
-                    &counters,
-                    Some(&snapshot),
-                    json!({"user_turns": snapshot.user_turns}),
-                ))?;
-            }
-
             let fingerprint = snapshot.activity_fingerprint();
-            if fingerprint != last_fingerprint {
-                last_fingerprint = fingerprint.clone();
-                last_progress_at = now;
-                stable_terminal_count = 0;
-                self.record(event(
-                    RunEventKind::SnapshotProgressed,
-                    RunState::Running,
-                    &counters,
-                    Some(&snapshot),
-                    json!({"activity_fingerprint": fingerprint}),
-                ))?;
-                if snapshot.connection_interrupted {
-                    counters.connection_interruptions += 1;
-                }
+            if checkpoint.last_activity_fingerprint.as_deref() != Some(&fingerprint) {
+                checkpoint.last_activity_fingerprint = Some(fingerprint.clone());
+                checkpoint.stale_deadline_ms =
+                    add_duration_ms(now_ms, options.stale_reload_after);
+                checkpoint.terminal_evidence_count = 0;
+                checkpoint.counters = counters.clone();
+                self.record_checkpoint(
+                    event(
+                        RunEventKind::SnapshotProgressed,
+                        RunState::Running,
+                        &counters,
+                        Some(&snapshot),
+                        json!({"activity_fingerprint": fingerprint}),
+                    ),
+                    &checkpoint,
+                )?;
             }
 
             if let Some(url) = snapshot.canonical_conversation_url() {
-                self.record(event(
-                    RunEventKind::CanonicalConversationBound,
-                    RunState::Running,
+                checkpoint.last_conversation_url = Some(url.clone());
+                checkpoint.counters = counters.clone();
+                self.record_checkpoint(
+                    event(
+                        RunEventKind::CanonicalConversationBound,
+                        RunState::Running,
+                        &counters,
+                        Some(&snapshot),
+                        json!({"url": url}),
+                    ),
+                    &checkpoint,
+                )?;
+            }
+
+            if snapshot.is_terminal() {
+                checkpoint.terminal_evidence_count =
+                    checkpoint.terminal_evidence_count.saturating_add(1);
+                checkpoint.counters = counters.clone();
+                self.record_checkpoint(
+                    event(
+                        RunEventKind::TerminalEvidenceObserved,
+                        RunState::Running,
+                        &counters,
+                        Some(&snapshot),
+                        json!({"stable_observation": checkpoint.terminal_evidence_count}),
+                    ),
+                    &checkpoint,
+                )?;
+                if checkpoint.terminal_evidence_count >= 2 {
+                    checkpoint.pending_recovery = None;
+                    checkpoint.counters = counters.clone();
+                    self.record_checkpoint(
+                        event(
+                            RunEventKind::RunCompleted,
+                            RunState::Complete,
+                            &counters,
+                            Some(&snapshot),
+                            json!({}),
+                        ),
+                        &checkpoint,
+                    )?;
+                    return Ok(report_from(
+                        RunState::Complete,
+                        snapshot.canonical_conversation_url(),
+                        snapshot.assistant_text,
+                        snapshot.visible_assistant_messages,
+                        &counters,
+                        "terminal response action row is stable and bound to the latest user turn",
+                    ));
+                }
+                self.clock.sleep(options.poll_interval).await;
+                continue;
+            }
+            checkpoint.terminal_evidence_count = 0;
+
+            if snapshot.conversation_too_long {
+                checkpoint.pending_recovery = Some("conversation_too_long".into());
+                counters.fresh_conversation_recoveries += 1;
+                checkpoint.counters = counters.clone();
+                self.record_checkpoint(
+                    event(
+                        RunEventKind::ConversationTooLongObserved,
+                        RunState::Recovering,
+                        &counters,
+                        Some(&snapshot),
+                        json!({}),
+                    ),
+                    &checkpoint,
+                )?;
+                self.record_checkpoint(
+                    event(
+                        RunEventKind::FreshConversationRequested,
+                        RunState::Recovering,
+                        &counters,
+                        Some(&snapshot),
+                        json!({"reason": "conversation_too_long"}),
+                    ),
+                    &checkpoint,
+                )?;
+                return Ok(report_from(
+                    RunState::Recovering,
+                    snapshot.canonical_conversation_url(),
+                    snapshot.assistant_text,
+                    snapshot.visible_assistant_messages,
                     &counters,
-                    Some(&snapshot),
-                    json!({"url": url}),
-                ))?;
+                    "conversation_too_long",
+                ));
             }
 
             if options.auto_confirm && snapshot.waiting_for_approval {
@@ -270,7 +475,6 @@ impl<'a> RunPrompt<'a> {
                 } else {
                     false
                 };
-
                 if should_click {
                     self.record(event(
                         RunEventKind::ApprovalObserved,
@@ -286,20 +490,47 @@ impl<'a> RunPrompt<'a> {
                         {
                             journal.settle_approval(&fingerprint)?;
                         }
-                        self.record(event(
-                            RunEventKind::ApprovalApplied,
-                            RunState::Running,
-                            &counters,
-                            Some(&snapshot),
-                            json!({}),
-                        ))?;
+                        checkpoint.counters = counters.clone();
+                        self.record_checkpoint(
+                            event(
+                                RunEventKind::ApprovalApplied,
+                                RunState::Running,
+                                &counters,
+                                Some(&snapshot),
+                                json!({}),
+                            ),
+                            &checkpoint,
+                        )?;
                         self.clock.sleep(options.approval_settle_delay).await;
                         continue;
                     }
                 }
             }
 
-            if snapshot.rate_limit_notice {
+            if snapshot.rate_limit_notice && snapshot.rate_limit_dialog_visible {
+                if counters.rate_limit_pauses >= options.max_rate_limit_pauses {
+                    checkpoint.pending_recovery = Some("rate_limit_threshold_exceeded".into());
+                    counters.fresh_conversation_recoveries += 1;
+                    checkpoint.counters = counters.clone();
+                    self.record_checkpoint(
+                        event(
+                            RunEventKind::FreshConversationRequested,
+                            RunState::Recovering,
+                            &counters,
+                            Some(&snapshot),
+                            json!({"reason": "rate_limit_threshold_exceeded"}),
+                        ),
+                        &checkpoint,
+                    )?;
+                    return Ok(report_from(
+                        RunState::Recovering,
+                        snapshot.canonical_conversation_url(),
+                        snapshot.assistant_text,
+                        snapshot.visible_assistant_messages,
+                        &counters,
+                        "rate_limit_threshold_exceeded",
+                    ));
+                }
                 self.record(event(
                     RunEventKind::RateLimitObserved,
                     RunState::Recovering,
@@ -307,98 +538,180 @@ impl<'a> RunPrompt<'a> {
                     Some(&snapshot),
                     json!({}),
                 ))?;
-                if self.browser.dismiss_rate_limit_notice().await? {
-                    counters.rate_limit_pauses += 1;
-                    if counters.rate_limit_pauses > options.max_rate_limit_pauses {
-                        bail!(
-                            "rate-limit dialog repeated more than {} times",
-                            options.max_rate_limit_pauses
-                        );
-                    }
+                let dismissed = self.browser.dismiss_rate_limit_notice().await?;
+                if snapshot.rate_limit_ack_available && !dismissed {
+                    bail!("visible rate-limit acknowledgement could not be dismissed");
+                }
+                if dismissed {
                     self.record(event(
                         RunEventKind::RateLimitDismissed,
                         RunState::Recovering,
                         &counters,
                         Some(&snapshot),
-                        json!({"pause_seconds": options.rate_limit_pause.as_secs()}),
-                    ))?;
-                    self.clock.sleep(options.rate_limit_pause).await;
-                    continue;
-                }
-            }
-
-            if snapshot.is_terminal() {
-                stable_terminal_count += 1;
-                self.record(event(
-                    RunEventKind::TerminalEvidenceObserved,
-                    RunState::Running,
-                    &counters,
-                    Some(&snapshot),
-                    json!({"stable_observation": stable_terminal_count}),
-                ))?;
-                if stable_terminal_count >= 2 {
-                    self.record(event(
-                        RunEventKind::RunCompleted,
-                        RunState::Complete,
-                        &counters,
-                        Some(&snapshot),
                         json!({}),
                     ))?;
-                    return Ok(report_from(
-                        RunState::Complete,
-                        snapshot.canonical_conversation_url(),
-                        snapshot.assistant_text,
-                        &counters,
-                        "terminal response action row is stable and bound to the latest user turn",
-                    ));
                 }
-            } else {
-                stable_terminal_count = 0;
+                counters.rate_limit_pauses += 1;
+                checkpoint.rate_limit_resume_at_ms =
+                    Some(add_duration_ms(now_ms, options.rate_limit_pause));
+                checkpoint.counters = counters.clone();
+                self.record_checkpoint(
+                    event(
+                        RunEventKind::RateLimitBackoffStarted,
+                        RunState::Recovering,
+                        &counters,
+                        Some(&snapshot),
+                        json!({"pause_seconds": options.rate_limit_pause.as_secs()}),
+                    ),
+                    &checkpoint,
+                )?;
+                continue;
             }
 
-            if elapsed(now, last_progress_at) >= options.stale_reload_after {
+            if snapshot.connection_interrupted {
+                if checkpoint.connection_recovery_deadline_ms.is_none() {
+                    counters.connection_interruptions += 1;
+                    checkpoint.connection_recovery_deadline_ms =
+                        Some(add_duration_ms(now_ms, options.connection_recovery_after));
+                    checkpoint.counters = counters.clone();
+                    self.record_checkpoint(
+                        event(
+                            RunEventKind::ConnectionInterrupted,
+                            RunState::Recovering,
+                            &counters,
+                            Some(&snapshot),
+                            json!({}),
+                        ),
+                        &checkpoint,
+                    )?;
+                }
+            } else {
+                checkpoint.connection_recovery_deadline_ms = None;
+            }
+
+            let connection_due = checkpoint
+                .connection_recovery_deadline_ms
+                .is_some_and(|deadline| now_ms >= deadline);
+            let stale_due = now_ms >= checkpoint.stale_deadline_ms;
+            if connection_due || stale_due {
+                if checkpoint.refresh_attempts >= options.max_refresh_attempts {
+                    checkpoint.pending_recovery = Some("refresh_attempt_limit_exceeded".into());
+                    counters.fresh_conversation_recoveries += 1;
+                    checkpoint.counters = counters.clone();
+                    self.record_checkpoint(
+                        event(
+                            RunEventKind::FreshConversationRequested,
+                            RunState::Recovering,
+                            &counters,
+                            Some(&snapshot),
+                            json!({"reason": "refresh_attempt_limit_exceeded"}),
+                        ),
+                        &checkpoint,
+                    )?;
+                    return Ok(report_from(
+                        RunState::Recovering,
+                        snapshot.canonical_conversation_url(),
+                        snapshot.assistant_text,
+                        snapshot.visible_assistant_messages,
+                        &counters,
+                        "refresh_attempt_limit_exceeded",
+                    ));
+                }
                 self.record(event(
                     RunEventKind::RecoveryReloadRequested,
                     RunState::Recovering,
                     &counters,
                     Some(&snapshot),
-                    json!({}),
+                    json!({"reason": if connection_due {"connection_interrupted"} else {"stale"}}),
                 ))?;
                 self.browser.reload().await?;
                 counters.recoveries += 1;
-                self.record(event(
-                    RunEventKind::RecoveryReloadApplied,
-                    RunState::Running,
-                    &counters,
-                    Some(&snapshot),
-                    json!({}),
-                ))?;
-                last_progress_at = now;
+                counters.refresh_attempts += 1;
+                checkpoint.refresh_attempts += 1;
+                checkpoint.stale_deadline_ms =
+                    add_duration_ms(now_ms, options.stale_reload_after);
+                checkpoint.connection_recovery_deadline_ms = if connection_due {
+                    Some(add_duration_ms(now_ms, options.connection_recovery_after))
+                } else {
+                    None
+                };
+                checkpoint.counters = counters.clone();
+                self.record_checkpoint(
+                    event(
+                        RunEventKind::RecoveryReloadApplied,
+                        RunState::Running,
+                        &counters,
+                        Some(&snapshot),
+                        json!({"attempt": checkpoint.refresh_attempts}),
+                    ),
+                    &checkpoint,
+                )?;
                 self.clock.sleep(options.reload_settle_delay).await;
                 continue;
             }
 
-            if elapsed(now, last_continuation_at) >= options.continuation_after
+            if now_ms >= checkpoint.continuation_deadline_ms
                 && !snapshot.response_in_flight()
-                && !snapshot.is_terminal()
             {
-                self.record(event(
-                    RunEventKind::ContinuationRequested,
-                    RunState::Running,
-                    &counters,
-                    Some(&snapshot),
-                    json!({"prompt": "continue_all"}),
-                ))?;
-                self.browser.send_prompt("继续完成所有").await?;
+                if counters.continuations >= options.max_continuations {
+                    checkpoint.pending_recovery =
+                        Some("continuation_attempt_limit_exceeded".into());
+                    counters.fresh_conversation_recoveries += 1;
+                    checkpoint.counters = counters.clone();
+                    self.record_checkpoint(
+                        event(
+                            RunEventKind::FreshConversationRequested,
+                            RunState::Recovering,
+                            &counters,
+                            Some(&snapshot),
+                            json!({"reason": "continuation_attempt_limit_exceeded"}),
+                        ),
+                        &checkpoint,
+                    )?;
+                    return Ok(report_from(
+                        RunState::Recovering,
+                        snapshot.canonical_conversation_url(),
+                        snapshot.assistant_text,
+                        snapshot.visible_assistant_messages,
+                        &counters,
+                        "continuation_attempt_limit_exceeded",
+                    ));
+                }
+                checkpoint.outbound_baseline_user_turns = snapshot.user_turns;
+                checkpoint.last_committed_outbound_message = Some("继续完成所有".into());
+                checkpoint.outbound_delivery_confirmed = false;
+                checkpoint.dispatch_attempts = 1;
+                checkpoint.dispatch_deadline_ms =
+                    add_duration_ms(now_ms, options.dispatch_confirm_after);
+                checkpoint.continuation_deadline_ms =
+                    add_duration_ms(now_ms, options.continuation_after);
                 counters.continuations += 1;
-                last_continuation_at = now;
-                last_progress_at = now;
+                checkpoint.counters = counters.clone();
+                self.record_checkpoint(
+                    event(
+                        RunEventKind::ContinuationRequested,
+                        RunState::Running,
+                        &counters,
+                        Some(&snapshot),
+                        json!({"prompt": "continue_all", "attempt": counters.continuations}),
+                    ),
+                    &checkpoint,
+                )?;
+                self.browser.send_prompt("继续完成所有").await?;
                 self.clock.sleep(options.continuation_settle_delay).await;
                 continue;
             }
 
+            checkpoint.counters = counters.clone();
             self.clock.sleep(options.poll_interval).await;
         }
+    }
+
+    fn record_checkpoint(&self, event: RunEvent, checkpoint: &RunCheckpoint) -> Result<()> {
+        if let Some(journal) = self.journal {
+            journal.record_with_checkpoint(&event, checkpoint)?;
+        }
+        Ok(())
     }
 
     fn record(&self, event: RunEvent) -> Result<()> {
@@ -432,6 +745,7 @@ fn report_from(
     state: RunState,
     conversation_url: Option<String>,
     assistant_text: String,
+    visible_progress_messages: Vec<String>,
     counters: &RunCounters,
     message: &str,
 ) -> RunReport {
@@ -439,6 +753,7 @@ fn report_from(
         state,
         conversation_url,
         assistant_text,
+        visible_progress_messages,
         approvals_clicked: counters.approvals_clicked,
         recoveries: counters.recoveries,
         rate_limit_pauses: counters.rate_limit_pauses,
@@ -448,8 +763,13 @@ fn report_from(
     }
 }
 
-fn elapsed(now: Duration, earlier: Duration) -> Duration {
-    now.saturating_sub(earlier)
+fn add_duration_ms(now_ms: i64, duration: Duration) -> i64 {
+    now_ms.saturating_add(duration.as_millis().min(i64::MAX as u128) as i64)
+}
+
+fn wait_slice(now_ms: i64, deadline_ms: i64, poll: Duration) -> Duration {
+    let remaining = deadline_ms.saturating_sub(now_ms).max(1) as u64;
+    Duration::from_millis(remaining).min(poll)
 }
 
 #[cfg(test)]
@@ -474,6 +794,14 @@ mod tests {
     impl Clock for FakeClock {
         fn now(&self) -> Duration {
             *self.now.lock().expect("clock poisoned")
+        }
+
+        fn unix_time_ms(&self) -> i64 {
+            self.now
+                .lock()
+                .expect("clock poisoned")
+                .as_millis()
+                .min(i64::MAX as u128) as i64
         }
 
         async fn sleep(&self, duration: Duration) {
@@ -623,7 +951,9 @@ mod tests {
             copy_available_on_last_assistant: true,
             response_actions_complete: true,
             response_action_turn_bound_to_last: true,
+            assistant_message_settled: true,
             assistant_text: "done".into(),
+            visible_assistant_messages: vec!["done".into()],
             ..Default::default()
         }
     }
