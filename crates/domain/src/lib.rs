@@ -501,6 +501,8 @@ pub struct RecoveryEnvelope {
     pub last_committed_outbound_message: Option<String>,
     #[serde(default)]
     pub outbound_delivery_confirmed: bool,
+    #[serde(default)]
+    pub checkpoint: Option<RunCheckpoint>,
     pub continuation_instruction: String,
 }
 
