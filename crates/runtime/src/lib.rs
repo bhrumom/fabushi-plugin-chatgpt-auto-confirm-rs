@@ -273,28 +273,28 @@ impl RunWorker {
                 if let Some(wait) = parse_task_wait(&run_report.assistant_text)?
                     && wait.task_id == task.id
                 {
-                        let recovery = RecoveryEnvelope {
-                            version: 1,
-                            task_id: task.id.clone(),
-                            run_id: run_id.into(),
-                            exact_commit: None,
-                            conversation_url: run_report.conversation_url.clone(),
-                            original_goal: task.original_prompt.clone(),
-                            acceptance_prompt: task.acceptance_prompt.clone(),
-                            progress_messages: vec![run_report.assistant_text.clone()],
-                            completed: vec![],
-                            remaining: vec![wait.reason.clone()],
-                            blockers: vec![],
-                            continuation_instruction: "等待条件结束后继续原任务".into(),
-                        };
-                        self.store.settle_task(
-                            task,
-                            None,
-                            Some(&recovery),
-                            Some(now_ms() + wait.wait_seconds as i64 * 1000),
-                            None,
-                        )?;
-                        return Ok(());
+                    let recovery = RecoveryEnvelope {
+                        version: 1,
+                        task_id: task.id.clone(),
+                        run_id: run_id.into(),
+                        exact_commit: None,
+                        conversation_url: run_report.conversation_url.clone(),
+                        original_goal: task.original_prompt.clone(),
+                        acceptance_prompt: task.acceptance_prompt.clone(),
+                        progress_messages: vec![run_report.assistant_text.clone()],
+                        completed: vec![],
+                        remaining: vec![wait.reason.clone()],
+                        blockers: vec![],
+                        continuation_instruction: "等待条件结束后继续原任务".into(),
+                    };
+                    self.store.settle_task(
+                        task,
+                        None,
+                        Some(&recovery),
+                        Some(now_ms() + wait.wait_seconds as i64 * 1000),
+                        None,
+                    )?;
+                    return Ok(());
                 }
                 self.store.settle_task(
                     task,
