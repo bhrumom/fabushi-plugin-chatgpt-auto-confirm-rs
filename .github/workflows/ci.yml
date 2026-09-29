@@ -75,3 +75,7 @@ jobs:
         env:
           CHROMIUM_CDP_ENDPOINT: http://127.0.0.1:9222
         run: cargo test -p fabushi-chatgpt-cdp --test chromium_fixture -- --ignored
+      - name: Managed Chromium crash recovery contract
+        env:
+          FABUSHI_CHROMIUM_BIN: ${{ steps.chrome.outputs.binary }}
+        run: cargo test -p fabushi-chatgpt-runtime managed_browser_restart_recreates_target -- --ignored

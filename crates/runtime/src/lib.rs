@@ -270,6 +270,22 @@ impl AccountBrowserActor {
         self.store.release_target(target_id, worker_owner_id)
     }
 
+    pub async fn force_terminate_managed_browser(&self) -> Result<bool> {
+        let mut slot = self.managed_browser.lock().await;
+        let Some(browser) = slot.take() else {
+            return Ok(false);
+        };
+        browser.force_terminate()?;
+        self.store.record_browser_lifecycle(
+            &self.account_id,
+            &self.owner_id,
+            "browser_forced_termination",
+            "{}",
+            now_ms(),
+        )?;
+        Ok(true)
+    }
+
     pub async fn lease_target(
         &self,
         run_id: &str,
@@ -1056,5 +1072,62 @@ mod tests {
         let path = std::env::temp_dir().join(format!("fabushi-supervisor-{}.sqlite", now_ms()));
         let result = Supervisor::open(path, vec![], 1);
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires FABUSHI_CHROMIUM_BIN on a Linux runner"]
+    async fn managed_browser_restart_recreates_target() {
+        let browser_binary = std::env::var("FABUSHI_CHROMIUM_BIN")
+            .expect("FABUSHI_CHROMIUM_BIN is required");
+        let root = std::env::temp_dir().join(format!("fabushi-managed-browser-{}", now_ms()));
+        let profile_dir = root.join("profile");
+        let log_dir = root.join("logs");
+        let fixture = root.join("fixture.html");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            &fixture,
+            "<!doctype html><html><head><title>managed-recovery</title></head><body>ok</body></html>",
+        )
+        .unwrap();
+        let fixture_url = format!("file://{}", fixture.display());
+
+        let store = SqliteStore::open_in_memory().unwrap();
+        let actor = AccountBrowserActor::new_managed(
+            "account-a",
+            ManagedBrowserConfig {
+                browser_binary: browser_binary.into(),
+                profile_dir,
+                port: 9333,
+                headed: false,
+                initial_url: "about:blank".into(),
+                log_dir,
+            },
+            store.clone(),
+            "actor-a",
+        );
+
+        let (lease, browser) = actor
+            .lease_target("run-a", "worker-a", Some(&fixture_url))
+            .await
+            .unwrap();
+        let original_target = lease.target_id.clone();
+        let title = browser.evaluate("document.title").await.unwrap();
+        assert_eq!(title.as_str(), Some("managed-recovery"));
+
+        assert!(actor.force_terminate_managed_browser().await.unwrap());
+        let (replacement_lease, replacement_browser) =
+            actor.recover_target(&lease, &fixture_url).await.unwrap();
+        assert_ne!(replacement_lease.target_id, original_target);
+        let recovered_title = replacement_browser
+            .evaluate("document.title")
+            .await
+            .unwrap();
+        assert_eq!(recovered_title.as_str(), Some("managed-recovery"));
+
+        actor
+            .release_target_ownership(&replacement_lease.target_id, "worker-a")
+            .unwrap();
+        replacement_browser.close_owned_target().await.unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 }
