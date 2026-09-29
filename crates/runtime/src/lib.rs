@@ -122,11 +122,7 @@ impl AccountBrowserActor {
         &self.account_id
     }
 
-    fn acquire_browser_ownership(
-        &self,
-        process_identity: &str,
-        profile_dir: &str,
-    ) -> Result<()> {
+    fn acquire_browser_ownership(&self, process_identity: &str, profile_dir: &str) -> Result<()> {
         let acquired = self.store.acquire_account_browser(
             &self.account_id,
             &self.owner_id,
