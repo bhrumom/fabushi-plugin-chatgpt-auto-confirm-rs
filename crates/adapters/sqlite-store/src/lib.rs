@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, anyhow, bail};
 use fabushi_chatgpt_application::{QueueClaim, QueueSnapshot, QueueStore, RunJournal};
 use fabushi_chatgpt_domain::{
-    ApprovalFingerprint, AutomationTaskReport, QueueTask, RecoveryEnvelope, RunCheckpoint, RunEvent,
-    RunEventKind, RunRecord, RunState, TaskState,
+    ApprovalFingerprint, AutomationTaskReport, QueueTask, RecoveryEnvelope, RunCheckpoint,
+    RunEvent, RunEventKind, RunRecord, RunState, TaskState,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{HashMap, HashSet};
