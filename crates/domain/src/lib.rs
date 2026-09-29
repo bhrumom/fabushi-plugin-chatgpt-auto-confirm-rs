@@ -480,6 +480,8 @@ pub struct RunRecord {
     pub latest_assistant_text: Option<String>,
     #[serde(default)]
     pub visible_progress_messages: Vec<String>,
+    #[serde(default)]
+    pub queue_phase: Option<QueuePhase>,
     pub counters: RunCounters,
     #[serde(default)]
     pub checkpoint: RunCheckpoint,
@@ -563,6 +565,7 @@ impl RunEvent {
             activity_fingerprint: None,
             latest_assistant_text: None,
             visible_progress_messages: Vec::new(),
+            queue_phase: None,
             counters,
             payload_json: "{}".into(),
         }

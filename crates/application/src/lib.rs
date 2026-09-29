@@ -1,9 +1,9 @@
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use fabushi_chatgpt_domain::{
-    ApprovalFingerprint, ExecutionProfile, ObservedExecutionProfile, PageSnapshot, QueueTask,
-    RecoveryEnvelope, RunCheckpoint, RunCounters, RunEvent, RunEventKind, RunRecord, RunReport,
-    RunState,
+    ApprovalFingerprint, ExecutionProfile, ObservedExecutionProfile, PageSnapshot, QueuePhase,
+    QueueTask, RecoveryEnvelope, RunCheckpoint, RunCounters, RunEvent, RunEventKind, RunRecord,
+    RunReport, RunState,
 };
 use serde_json::json;
 use std::time::Duration;
@@ -731,6 +731,28 @@ fn event(
         }
         event.visible_progress_messages = snapshot.visible_assistant_messages.clone();
     }
+    event.queue_phase = match event.kind {
+        RunEventKind::PromptDispatchRequested => Some(QueuePhase::Submitting),
+        RunEventKind::PromptDispatchConfirmed => Some(QueuePhase::Submitted),
+        RunEventKind::OutboundDeliveryConfirmed
+        | RunEventKind::SnapshotProgressed
+        | RunEventKind::RateLimitBackoffFinished
+        | RunEventKind::TerminalEvidenceObserved => Some(QueuePhase::AwaitingResponse),
+        RunEventKind::RateLimitObserved | RunEventKind::RateLimitBackoffStarted => {
+            Some(QueuePhase::RateLimited)
+        }
+        RunEventKind::ConnectionInterrupted => Some(QueuePhase::Interrupted),
+        RunEventKind::RecoveryReloadRequested
+        | RunEventKind::RecoveryReloadApplied
+        | RunEventKind::FreshConversationRequested
+        | RunEventKind::TargetLost
+        | RunEventKind::BrowserLost
+        | RunEventKind::TargetReattached => Some(QueuePhase::Recovering),
+        RunEventKind::ContinuationRequested => Some(QueuePhase::Continuing),
+        RunEventKind::RunCompleted => Some(QueuePhase::Completed),
+        RunEventKind::RunFailed => Some(QueuePhase::FailedRetryable),
+        _ => None,
+    };
     event
 }
 
