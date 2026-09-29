@@ -754,12 +754,26 @@ impl RunWorker {
                 .into_iter()
                 .find(|run| run.run_id == run_id);
             let current_checkpoint = current_run.as_ref().map(|run| run.checkpoint.clone());
+            let fresh_conversation = current_checkpoint
+                .as_ref()
+                .is_some_and(recovery_requires_fresh_conversation);
+            let recovery_checkpoint = current_checkpoint.as_ref().map(|checkpoint| {
+                if fresh_conversation {
+                    fresh_conversation_checkpoint(checkpoint, task.conversation_kind.clone())
+                } else {
+                    checkpoint.clone()
+                }
+            });
             let recovery = RecoveryEnvelope {
                 version: 2,
                 task_id: task.id.clone(),
                 run_id: run_id.clone(),
                 exact_commit: task.known_exact_head.clone(),
-                conversation_url: report.conversation_url.clone(),
+                conversation_url: if fresh_conversation {
+                    None
+                } else {
+                    report.conversation_url.clone()
+                },
                 conversation_kind: task.conversation_kind.clone(),
                 original_goal: task.original_prompt.clone(),
                 acceptance_prompt: task.acceptance_prompt.clone(),
@@ -786,7 +800,7 @@ impl RunWorker {
                 outbound_delivery_confirmed: current_checkpoint
                     .as_ref()
                     .is_some_and(|checkpoint| checkpoint.outbound_delivery_confirmed),
-                checkpoint: current_checkpoint.clone(),
+                checkpoint: recovery_checkpoint,
                 continuation_instruction:
                     "在新会话中按 RecoveryEnvelope 继续，不要重复已经完成的步骤。".into(),
             };
@@ -1078,6 +1092,30 @@ impl Supervisor {
             "tasks": snapshot.tasks,
             "runs": snapshot.runs,
         }))
+    }
+}
+
+fn recovery_requires_fresh_conversation(checkpoint: &fabushi_chatgpt_domain::RunCheckpoint) -> bool {
+    matches!(
+        checkpoint.pending_recovery.as_deref(),
+        Some(
+            "dispatch_confirmation_retry_limit"
+                | "conversation_too_long"
+                | "rate_limit_threshold_exceeded"
+                | "refresh_attempt_limit_exceeded"
+                | "continuation_attempt_limit_exceeded"
+        )
+    )
+}
+
+fn fresh_conversation_checkpoint(
+    previous: &fabushi_chatgpt_domain::RunCheckpoint,
+    conversation_kind: ConversationKind,
+) -> fabushi_chatgpt_domain::RunCheckpoint {
+    fabushi_chatgpt_domain::RunCheckpoint {
+        conversation_kind,
+        counters: previous.counters.clone(),
+        ..Default::default()
     }
 }
 
