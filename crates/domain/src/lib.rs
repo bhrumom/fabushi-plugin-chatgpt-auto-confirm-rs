@@ -358,6 +358,7 @@ pub struct RecoveryEnvelope {
     pub task_id: String,
     pub run_id: String,
     pub exact_commit: Option<String>,
+    pub conversation_url: Option<String>,
     pub original_goal: String,
     pub acceptance_prompt: Option<String>,
     #[serde(default)]
@@ -395,6 +396,9 @@ impl RecoveryEnvelope {
         ];
         if let Some(commit) = &self.exact_commit {
             parts.push(format!("exact_commit: {commit}"));
+        }
+        if let Some(url) = &self.conversation_url {
+            parts.push(format!("canonical_conversation_url: {url}"));
         }
         parts.push(format!("## 原始目标\n{}", self.original_goal));
         if let Some(prompt) = &self.acceptance_prompt {
@@ -634,6 +638,7 @@ mod tests {
             task_id: "task-1".into(),
             run_id: "run-1".into(),
             exact_commit: Some("abc".into()),
+            conversation_url: Some("https://chatgpt.com/c/abc".into()),
             original_goal: "完成所有".into(),
             acceptance_prompt: Some("下一轮先读 exact HEAD".into()),
             progress_messages: vec!["正在检查 CI".into(), "已修复第一个根因".into()],

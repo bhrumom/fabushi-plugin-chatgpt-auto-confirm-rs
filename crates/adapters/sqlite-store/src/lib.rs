@@ -421,6 +421,7 @@ WHERE l.expires_at_ms <= ?1
                     task_id: task.id.clone(),
                     run_id: run.run_id.clone(),
                     exact_commit: None,
+                    conversation_url: run.canonical_conversation_url.clone(),
                     original_goal: task.original_prompt.clone(),
                     acceptance_prompt: task.acceptance_prompt.clone(),
                     progress_messages: run

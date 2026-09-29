@@ -8,7 +8,7 @@ use fabushi_chatgpt_domain::{
     RunReport, RunState, TaskReportStatus, TaskState,
 };
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, Semaphore};
 
@@ -132,6 +132,7 @@ impl RunWorker {
         run_id: String,
         recovery_url: Option<String>,
     ) -> Result<RunReport> {
+        let recovery_url = recovery_url.or_else(|| task.recovery_context.as_ref().and_then(|envelope| envelope.conversation_url.clone()));
         let recovery_prompt = task
             .recovery_context
             .as_ref()
@@ -143,6 +144,26 @@ impl RunWorker {
             .await?;
 
         let journal = self.store.journal(&run_id, &self.owner_id);
+        let heartbeat_stop = Arc::new(AtomicBool::new(false));
+        let heartbeat_flag = heartbeat_stop.clone();
+        let heartbeat_store = self.store.clone();
+        let heartbeat_run_id = run_id.clone();
+        let heartbeat_owner_id = self.owner_id.clone();
+        let heartbeat_lease_ms = self.lease_duration_ms;
+        let heartbeat = tokio::spawn(async move {
+            while !heartbeat_flag.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_secs(20)).await;
+                if heartbeat_flag.load(Ordering::Relaxed) {
+                    break;
+                }
+                let _ = heartbeat_store.renew_lease(
+                    &heartbeat_run_id,
+                    &heartbeat_owner_id,
+                    now_ms(),
+                    heartbeat_lease_ms,
+                );
+            }
+        });
         let mut target_event = RunEvent::new(
             RunEventKind::TargetReattached,
             RunState::Dispatching,
@@ -171,6 +192,8 @@ impl RunWorker {
                     None,
                     Some(&error.to_string()),
                 )?;
+                heartbeat_stop.store(true, Ordering::Relaxed);
+                let _ = heartbeat.await;
                 self.store.release_lease(&run_id, &self.owner_id)?;
                 let _ = browser.close_owned_target().await;
                 return Err(error);
@@ -190,6 +213,8 @@ impl RunWorker {
             )?;
         }
 
+        heartbeat_stop.store(true, Ordering::Relaxed);
+        let _ = heartbeat.await;
         self.store.release_lease(&run_id, &self.owner_id)?;
         let _ = browser.close_owned_target().await;
         Ok(report)
@@ -218,6 +243,7 @@ impl RunWorker {
                     task_id: task.id.clone(),
                     run_id: run_id.into(),
                     exact_commit: None,
+                    conversation_url: run_report.conversation_url.clone(),
                     original_goal: task.original_prompt.clone(),
                     acceptance_prompt: task.acceptance_prompt.clone(),
                     progress_messages: vec![run_report.assistant_text.clone()],
@@ -246,7 +272,8 @@ impl RunWorker {
                             task_id: task.id.clone(),
                             run_id: run_id.into(),
                             exact_commit: None,
-                            original_goal: task.original_prompt.clone(),
+                    conversation_url: run_report.conversation_url.clone(),
+                    original_goal: task.original_prompt.clone(),
                             acceptance_prompt: task.acceptance_prompt.clone(),
                             progress_messages: vec![run_report.assistant_text.clone()],
                             completed: vec![],
@@ -381,6 +408,7 @@ mod tests {
             task_id: "task-1".into(),
             run_id: "run-1".into(),
             exact_commit: Some("abc".into()),
+            conversation_url: Some("https://chatgpt.com/c/abc".into()),
             original_goal: "original".into(),
             acceptance_prompt: Some("验收提示".into()),
             progress_messages: vec!["已跑 CI".into()],
