@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use fabushi_chatgpt_runtime::{
-    ChatGptCdp, ExecutionProfile, QueueTask, RunOptions, SqliteStore, Supervisor,
-    find_chromium_binary, launch_chromium, run_prompt,
+    ChatGptCdp, ExecutionProfile, ManagedBrowserConfig, QueueTask, RunOptions, SqliteStore,
+    Supervisor, find_chromium_binary, launch_chromium, run_prompt,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -83,6 +83,16 @@ enum Commands {
     QueueRunOnce {
         #[arg(long, default_value = "default")]
         account_id: String,
+        #[arg(long, default_value_t = false)]
+        manage_browser: bool,
+        #[arg(long)]
+        browser_binary: Option<PathBuf>,
+        #[arg(long)]
+        profile: Option<PathBuf>,
+        #[arg(long, default_value_t = 9222)]
+        port: u16,
+        #[arg(long, default_value_t = true)]
+        headed: bool,
     },
     QueueRecover,
     QueueStatus,
@@ -195,8 +205,37 @@ async fn main() -> Result<()> {
             fabushi_chatgpt_runtime::QueueStore::enqueue_task(&store, &task)?;
             println!("{}", serde_json::to_string_pretty(&task)?);
         }
-        Commands::QueueRunOnce { account_id } => {
-            let supervisor = Supervisor::open(queue_db(cli.db), vec![(account_id, cli.cdp)], 1)?;
+        Commands::QueueRunOnce {
+            account_id,
+            manage_browser,
+            browser_binary,
+            profile,
+            port,
+            headed,
+        } => {
+            let db = queue_db(cli.db);
+            let supervisor = if manage_browser {
+                let binary = find_chromium_binary(browser_binary.as_deref())?;
+                let profile = profile.unwrap_or_else(default_profile_dir);
+                let log_dir = profile.join("logs");
+                Supervisor::open_managed(
+                    db,
+                    vec![(
+                        account_id,
+                        ManagedBrowserConfig {
+                            browser_binary: binary,
+                            profile_dir: profile,
+                            port,
+                            headed,
+                            initial_url: "https://chatgpt.com/".into(),
+                            log_dir,
+                        },
+                    )],
+                    1,
+                )?
+            } else {
+                Supervisor::open(db, vec![(account_id, cli.cdp)], 1)?
+            };
             supervisor.recover_startup()?;
             let report = supervisor.run_one().await?;
             println!("{}", serde_json::to_string_pretty(&report)?);

@@ -19,7 +19,9 @@ pub use fabushi_chatgpt_cdp::ChatGptCdp;
 pub use fabushi_chatgpt_domain::{
     ExecutionProfile, ObservedExecutionProfile, QueueTask, RunRecord,
 };
-pub use fabushi_chatgpt_linux_browser::{BrowserLaunch, find_chromium_binary, launch_chromium};
+pub use fabushi_chatgpt_linux_browser::{
+    BrowserLaunch, ManagedBrowserConfig, ManagedChromium, find_chromium_binary, launch_chromium,
+};
 pub use fabushi_chatgpt_sqlite_store::SqliteStore;
 
 pub struct TokioClock {
@@ -70,6 +72,8 @@ pub struct TargetLease {
 pub struct AccountBrowserActor {
     account_id: String,
     endpoint: String,
+    managed_config: Option<ManagedBrowserConfig>,
+    managed_browser: Mutex<Option<ManagedChromium>>,
     store: SqliteStore,
     owner_id: String,
     lease_duration_ms: i64,
@@ -86,6 +90,27 @@ impl AccountBrowserActor {
         Self {
             account_id: account_id.into(),
             endpoint: endpoint.into(),
+            managed_config: None,
+            managed_browser: Mutex::new(None),
+            store,
+            owner_id: owner_id.into(),
+            lease_duration_ms: 60_000,
+            target_mutation: Mutex::new(()),
+        }
+    }
+
+    pub fn new_managed(
+        account_id: impl Into<String>,
+        config: ManagedBrowserConfig,
+        store: SqliteStore,
+        owner_id: impl Into<String>,
+    ) -> Self {
+        let endpoint = format!("http://127.0.0.1:{}", config.port);
+        Self {
+            account_id: account_id.into(),
+            endpoint,
+            managed_config: Some(config),
+            managed_browser: Mutex::new(None),
             store,
             owner_id: owner_id.into(),
             lease_duration_ms: 60_000,
@@ -97,12 +122,16 @@ impl AccountBrowserActor {
         &self.account_id
     }
 
-    fn acquire_browser_ownership(&self) -> Result<()> {
+    fn acquire_browser_ownership(
+        &self,
+        process_identity: &str,
+        profile_dir: &str,
+    ) -> Result<()> {
         let acquired = self.store.acquire_account_browser(
             &self.account_id,
             &self.owner_id,
-            &format!("attached-cdp:{}", self.endpoint),
-            &format!("user-owned-profile:{}", self.account_id),
+            process_identity,
+            profile_dir,
             now_ms(),
             self.lease_duration_ms,
         )?;
@@ -112,14 +141,119 @@ impl AccountBrowserActor {
                 self.account_id
             );
         }
+        Ok(())
+    }
+
+    async fn ensure_browser_endpoint(&self, force_restart: bool) -> Result<String> {
+        let Some(config) = self.managed_config.as_ref() else {
+            self.acquire_browser_ownership(
+                &format!("attached-cdp:{}", self.endpoint),
+                &format!("user-owned-profile:{}", self.account_id),
+            )?;
+            self.store.record_browser_lifecycle(
+                &self.account_id,
+                &self.owner_id,
+                "attached",
+                &serde_json::json!({"endpoint": self.endpoint}).to_string(),
+                now_ms(),
+            )?;
+            return Ok(self.endpoint.clone());
+        };
+
+        let mut slot = self.managed_browser.lock().await;
+        let alive = match slot.as_ref() {
+            Some(browser) => browser.is_alive()?,
+            None => false,
+        };
+        if alive && !force_restart {
+            let browser = slot
+                .as_ref()
+                .ok_or_else(|| anyhow!("managed Chromium disappeared while checking liveness"))?;
+            let info = browser.launch_info();
+            let renewed = self.store.renew_account_browser(
+                &self.account_id,
+                &self.owner_id,
+                now_ms(),
+                self.lease_duration_ms,
+            )?;
+            if !renewed {
+                self.acquire_browser_ownership(
+                    &format!("managed-chromium:{}", info.pid),
+                    &info.profile_dir.display().to_string(),
+                )?;
+                self.store.bind_account_browser_process(
+                    &self.account_id,
+                    &self.owner_id,
+                    info.pid,
+                    &info.endpoint,
+                    now_ms(),
+                )?;
+            }
+            return Ok(info.endpoint.clone());
+        }
+
+        if let Some(browser) = slot.take() {
+            let _ = browser.force_terminate();
+            let _ = self.store.record_browser_lifecycle(
+                &self.account_id,
+                &self.owner_id,
+                "browser_terminated_for_recovery",
+                "{}",
+                now_ms(),
+            );
+        }
+
+        self.acquire_browser_ownership(
+            &format!("managed-starting:{}", config.browser_binary.display()),
+            &config.profile_dir.display().to_string(),
+        )?;
+        let browser = match ManagedChromium::launch(config.clone()) {
+            Ok(browser) => browser,
+            Err(error) => {
+                let _ = self
+                    .store
+                    .release_account_browser(&self.account_id, &self.owner_id);
+                return Err(error).context("launch managed Chromium");
+            }
+        };
+        let info = browser.launch_info().clone();
+        self.store.bind_account_browser_process(
+            &self.account_id,
+            &self.owner_id,
+            info.pid,
+            &info.endpoint,
+            now_ms(),
+        )?;
         self.store.record_browser_lifecycle(
             &self.account_id,
             &self.owner_id,
-            "attached",
-            &serde_json::json!({"endpoint": self.endpoint}).to_string(),
+            if force_restart {
+                "browser_restarted"
+            } else {
+                "browser_started"
+            },
+            &serde_json::json!({
+                "pid": info.pid,
+                "endpoint": info.endpoint,
+                "profile_dir": info.profile_dir,
+                "stdout_log": browser.stdout_log(),
+                "stderr_log": browser.stderr_log()
+            })
+            .to_string(),
             now_ms(),
         )?;
-        Ok(())
+        let endpoint = info.endpoint.clone();
+        *slot = Some(browser);
+        drop(slot);
+
+        let started = Instant::now();
+        while !ChatGptCdp::endpoint_available(&endpoint).await {
+            if started.elapsed() >= Duration::from_secs(15) {
+                bail!("managed Chromium CDP endpoint did not become ready: {endpoint}");
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Ok(endpoint)
     }
 
     fn renew_worker_ownership(&self, target_id: &str, worker_owner_id: &str) -> Result<bool> {
@@ -147,9 +281,9 @@ impl AccountBrowserActor {
         recovery_url: Option<&str>,
     ) -> Result<(TargetLease, ChatGptCdp)> {
         let _guard = self.target_mutation.lock().await;
-        self.acquire_browser_ownership()?;
+        let endpoint = self.ensure_browser_endpoint(false).await?;
         let url = recovery_url.unwrap_or("https://chatgpt.com/");
-        let browser = ChatGptCdp::create_target(&self.endpoint, url)
+        let browser = ChatGptCdp::create_target(&endpoint, url)
             .await
             .with_context(|| format!("account {} failed to create target", self.account_id))?;
         let target_id = browser.target_id().to_owned();
@@ -189,16 +323,24 @@ impl AccountBrowserActor {
         lease: &TargetLease,
         canonical_url: &str,
     ) -> Result<(TargetLease, ChatGptCdp)> {
+        let mut endpoint = self.ensure_browser_endpoint(false).await?;
         if let Some(durable) = self.store.target_lease_for_run(&lease.run_id)?
             && durable.target_id == lease.target_id
             && durable.owner_id == lease.owner_id
             && durable.expires_at_ms > now_ms()
-            && let Ok(browser) =
-                ChatGptCdp::connect_target_id(&self.endpoint, &lease.target_id).await
+            && let Ok(browser) = ChatGptCdp::connect_target_id(&endpoint, &lease.target_id).await
         {
             browser.navigate(canonical_url).await?;
             return Ok((lease.clone(), browser));
         }
+
+        if !ChatGptCdp::endpoint_available(&endpoint).await && self.managed_config.is_some() {
+            endpoint = self.ensure_browser_endpoint(true).await?;
+            if !ChatGptCdp::endpoint_available(&endpoint).await {
+                bail!("managed Chromium restart did not restore CDP endpoint");
+            }
+        }
+
         let _ = self.store.release_target(&lease.target_id, &lease.owner_id);
         self.lease_target(&lease.run_id, &lease.owner_id, Some(canonical_url))
             .await
@@ -445,36 +587,75 @@ impl RunWorker {
                                 .snapshot()?
                                 .runs
                                 .into_iter()
-                                .find(|run| run.run_id == run_id);
-                            if let Some(current_run) = current_run {
-                                let mut checkpoint = current_run.checkpoint;
-                                checkpoint.counters.browser_recoveries += 1;
-                                checkpoint.pending_recovery = Some("browser_lost".into());
-                                let mut lost = RunEvent::new(
-                                    RunEventKind::BrowserLost,
-                                    RunState::Recovering,
-                                    checkpoint.counters.clone(),
-                                );
-                                lost.target_id = Some(target_lease.target_id.clone());
-                                lost.canonical_conversation_url =
-                                    checkpoint.last_conversation_url.clone();
-                                lost.latest_assistant_text =
-                                    current_run.latest_assistant_text.clone();
-                                lost.visible_progress_messages =
-                                    current_run.visible_progress_messages.clone();
-                                lost.payload_json = serde_json::json!({
-                                    "probe_error": probe_error.to_string()
-                                })
-                                .to_string();
-                                fabushi_chatgpt_application::RunJournal::record_with_checkpoint(
-                                    &journal,
-                                    &lost,
-                                    &checkpoint,
-                                )?;
+                                .find(|run| run.run_id == run_id)
+                                .ok_or_else(|| {
+                                    anyhow!("run {run_id} disappeared during browser recovery")
+                                })?;
+                            let mut checkpoint = current_run.checkpoint;
+                            if checkpoint.counters.browser_recoveries >= 3 {
+                                checkpoint.pending_recovery =
+                                    Some("browser_recovery_limit_exceeded".into());
+                                return Err(anyhow!(
+                                    "browser recovery limit exceeded; probe error: {probe_error}; original error: {error}"
+                                ));
                             }
-                            return Err(anyhow!(
-                                "browser/CDP endpoint lost while running target: {probe_error}; original error: {error}"
-                            ));
+                            let canonical_url = checkpoint
+                                .last_conversation_url
+                                .clone()
+                                .or(current_run.canonical_conversation_url.clone())
+                                .ok_or_else(|| {
+                                    anyhow!(
+                                        "browser lost before a canonical conversation URL was durable: {probe_error}"
+                                    )
+                                })?;
+                            checkpoint.counters.browser_recoveries += 1;
+                            checkpoint.pending_recovery = Some("browser_lost".into());
+                            let mut lost = RunEvent::new(
+                                RunEventKind::BrowserLost,
+                                RunState::Recovering,
+                                checkpoint.counters.clone(),
+                            );
+                            lost.target_id = Some(target_lease.target_id.clone());
+                            lost.canonical_conversation_url = Some(canonical_url.clone());
+                            lost.latest_assistant_text = current_run.latest_assistant_text.clone();
+                            lost.visible_progress_messages =
+                                current_run.visible_progress_messages.clone();
+                            lost.payload_json = serde_json::json!({
+                                "probe_error": probe_error.to_string(),
+                                "recovery_attempt": checkpoint.counters.browser_recoveries
+                            })
+                            .to_string();
+                            fabushi_chatgpt_application::RunJournal::record_with_checkpoint(
+                                &journal,
+                                &lost,
+                                &checkpoint,
+                            )?;
+
+                            let (replacement_lease, replacement_browser) = self
+                                .account
+                                .recover_target(&target_lease, &canonical_url)
+                                .await
+                                .context("recover browser and target through account actor")?;
+                            target_lease = replacement_lease;
+                            browser = replacement_browser;
+                            checkpoint.pending_recovery = None;
+                            let mut reattached = RunEvent::new(
+                                RunEventKind::TargetReattached,
+                                RunState::Running,
+                                checkpoint.counters.clone(),
+                            );
+                            reattached.target_id = Some(target_lease.target_id.clone());
+                            reattached.canonical_conversation_url = Some(canonical_url);
+                            reattached.payload_json = serde_json::json!({
+                                "browser_recovery_attempt": checkpoint.counters.browser_recoveries
+                            })
+                            .to_string();
+                            fabushi_chatgpt_application::RunJournal::record_with_checkpoint(
+                                &journal,
+                                &reattached,
+                                &checkpoint,
+                            )?;
+                            continue;
                         }
                         Ok(true) => return Err(error),
                     }
@@ -748,6 +929,36 @@ impl Supervisor {
                 Arc::new(AccountBrowserActor::new(
                     id,
                     endpoint,
+                    store.clone(),
+                    actor_owner_id,
+                ))
+            })
+            .collect();
+        Ok(Self {
+            store,
+            accounts: actors,
+            semaphore: Arc::new(Semaphore::new(max_concurrent.max(1))),
+            owner_prefix,
+        })
+    }
+
+    pub fn open_managed(
+        sqlite_path: impl AsRef<Path>,
+        accounts: Vec<(String, ManagedBrowserConfig)>,
+        max_concurrent: usize,
+    ) -> Result<Self> {
+        if accounts.is_empty() {
+            return Err(anyhow!("at least one managed account browser is required"));
+        }
+        let store = SqliteStore::open(sqlite_path)?;
+        let owner_prefix = format!("supervisor-{}", now_ms());
+        let actors = accounts
+            .into_iter()
+            .map(|(id, config)| {
+                let actor_owner_id = format!("{owner_prefix}-account-{id}");
+                Arc::new(AccountBrowserActor::new_managed(
+                    id,
+                    config,
                     store.clone(),
                     actor_owner_id,
                 ))

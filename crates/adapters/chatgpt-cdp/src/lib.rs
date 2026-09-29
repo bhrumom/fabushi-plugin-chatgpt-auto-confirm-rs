@@ -93,6 +93,10 @@ impl ChatGptCdp {
             .any(|target| target.id == self.target_id))
     }
 
+    pub async fn endpoint_available(endpoint: &str) -> bool {
+        fetch_targets(endpoint).await.is_ok()
+    }
+
     async fn command(&self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let payload = json!({"id": id, "method": method, "params": params});
