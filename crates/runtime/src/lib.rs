@@ -38,6 +38,10 @@ impl Clock for TokioClock {
         self.origin.elapsed()
     }
 
+    fn unix_time_ms(&self) -> i64 {
+        now_ms()
+    }
+
     async fn sleep(&self, duration: Duration) {
         tokio::time::sleep(duration).await;
     }
@@ -214,6 +218,52 @@ impl RunWorker {
         task.recovery_context = None;
         if report.state == RunState::Complete {
             self.settle_terminal_response(&task, &run_id, &report)?;
+        } else if report.state == RunState::Recovering {
+            let current_run = self
+                .store
+                .snapshot()?
+                .runs
+                .into_iter()
+                .find(|run| run.run_id == run_id);
+            let current_checkpoint = current_run.as_ref().map(|run| run.checkpoint.clone());
+            let recovery = RecoveryEnvelope {
+                version: 2,
+                task_id: task.id.clone(),
+                run_id: run_id.clone(),
+                exact_commit: task.known_exact_head.clone(),
+                conversation_url: None,
+                conversation_kind: task.conversation_kind.clone(),
+                original_goal: task.original_prompt.clone(),
+                acceptance_prompt: task.acceptance_prompt.clone(),
+                interrupted_turn_visible_content: report.visible_progress_messages.clone(),
+                progress_messages: report.visible_progress_messages.clone(),
+                completed: task
+                    .last_report
+                    .as_ref()
+                    .map(|previous| previous.completed.clone())
+                    .unwrap_or_default(),
+                remaining: if task.pending_work.is_empty() {
+                    vec![report.message.clone()]
+                } else {
+                    task.pending_work.clone()
+                },
+                blockers: vec![report.message.clone()],
+                known_ci_evidence: task.known_ci_evidence.clone(),
+                current_stage: task.current_stage.clone(),
+                pending_work: task.pending_work.clone(),
+                context_references: task.context_references.clone(),
+                last_committed_outbound_message: current_checkpoint
+                    .as_ref()
+                    .and_then(|checkpoint| checkpoint.last_committed_outbound_message.clone()),
+                outbound_delivery_confirmed: current_checkpoint
+                    .as_ref()
+                    .is_some_and(|checkpoint| checkpoint.outbound_delivery_confirmed),
+                checkpoint: None,
+                continuation_instruction:
+                    "在新会话中按 RecoveryEnvelope 继续，不要重复已经完成的步骤。".into(),
+            };
+            self.store
+                .settle_task(&task, None, Some(&recovery), None, None)?;
         } else {
             self.store
                 .settle_task(&task, None, None, None, Some(&report.message))?;
@@ -252,14 +302,23 @@ impl RunWorker {
                     version: 1,
                     task_id: task.id.clone(),
                     run_id: run_id.into(),
-                    exact_commit: None,
+                    exact_commit: task.known_exact_head.clone(),
                     conversation_url: run_report.conversation_url.clone(),
+                    conversation_kind: task.conversation_kind.clone(),
                     original_goal: task.original_prompt.clone(),
                     acceptance_prompt: task.acceptance_prompt.clone(),
-                    progress_messages: vec![run_report.assistant_text.clone()],
+                    interrupted_turn_visible_content: run_report.visible_progress_messages.clone(),
+                    progress_messages: run_report.visible_progress_messages.clone(),
                     completed: report.completed.clone(),
                     remaining: report.remaining.clone(),
                     blockers: report.blockers.clone(),
+                    known_ci_evidence: task.known_ci_evidence.clone(),
+                    current_stage: task.current_stage.clone(),
+                    pending_work: task.pending_work.clone(),
+                    context_references: task.context_references.clone(),
+                    last_committed_outbound_message: None,
+                    outbound_delivery_confirmed: true,
+                    checkpoint: None,
                     continuation_instruction: report.next_task.clone(),
                 };
                 let wait_until = report
@@ -277,14 +336,23 @@ impl RunWorker {
                         version: 1,
                         task_id: task.id.clone(),
                         run_id: run_id.into(),
-                        exact_commit: None,
+                        exact_commit: task.known_exact_head.clone(),
                         conversation_url: run_report.conversation_url.clone(),
+                        conversation_kind: task.conversation_kind.clone(),
                         original_goal: task.original_prompt.clone(),
                         acceptance_prompt: task.acceptance_prompt.clone(),
-                        progress_messages: vec![run_report.assistant_text.clone()],
+                        interrupted_turn_visible_content: run_report.visible_progress_messages.clone(),
+                        progress_messages: run_report.visible_progress_messages.clone(),
                         completed: vec![],
                         remaining: vec![wait.reason.clone()],
                         blockers: vec![],
+                        known_ci_evidence: task.known_ci_evidence.clone(),
+                        current_stage: task.current_stage.clone(),
+                        pending_work: task.pending_work.clone(),
+                        context_references: task.context_references.clone(),
+                        last_committed_outbound_message: None,
+                        outbound_delivery_confirmed: true,
+                        checkpoint: None,
                         continuation_instruction: "等待条件结束后继续原任务".into(),
                     };
                     self.store.settle_task(
@@ -421,6 +489,7 @@ mod tests {
             remaining: vec!["B".into()],
             blockers: vec![],
             continuation_instruction: "继续 B".into(),
+            ..Default::default()
         });
         let prompt = task.recovery_context.as_ref().unwrap().render_prompt();
         assert!(prompt.contains("已跑 CI"));
