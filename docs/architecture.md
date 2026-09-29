@@ -55,7 +55,7 @@ Use cases and ports:
 - recovery policy;
 - BrowserPort;
 - Clock;
-- future RunStore, EventJournal, ProfileManager and EvidenceSink ports.
+- RunJournal and QueueStore ports; future ProfileManager and EvidenceSink ports.
 
 Application decides what effect should happen. It never knows selectors, PIDs, SQLite schemas or profile paths.
 
@@ -67,7 +67,7 @@ Owns:
 - prompt composer interaction;
 - exact Allow once action;
 - rate-limit notice dismissal;
-- future verified model/thinking selection;
+- verified model/thinking selection with fail-closed observation;
 - sanitized DOM fixture contract tests.
 
 The adapter reports facts and executes requested effects; it does not choose recovery policy.
@@ -83,7 +83,7 @@ Owns:
 
 It never inspects ChatGPT DOM.
 
-### future crates/adapters/sqlite-store
+### crates/adapters/sqlite-store
 
 Use SQLite WAL for durable state:
 - tasks;
