@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use fabushi_chatgpt_runtime::{
-    ChatGptCdp, ExecutionProfile, ManagedBrowserConfig, QueueTask, RunOptions, SqliteStore,
-    Supervisor, find_chromium_binary, launch_chromium, run_prompt,
+    ChatGptCdp, ConversationKind, ExecutionProfile, ManagedBrowserConfig, QueueTask, RunOptions,
+    SqliteStore, Supervisor, find_chromium_binary, launch_chromium, run_prompt,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -79,6 +79,18 @@ enum Commands {
         thinking: String,
         #[arg(long)]
         acceptance_prompt: Option<String>,
+        #[arg(long, default_value = "work")]
+        conversation_kind: String,
+        #[arg(long)]
+        known_exact_head: Option<String>,
+        #[arg(long = "ci-evidence")]
+        known_ci_evidence: Vec<String>,
+        #[arg(long)]
+        current_stage: Option<String>,
+        #[arg(long = "pending-work")]
+        pending_work: Vec<String>,
+        #[arg(long = "context-reference")]
+        context_references: Vec<String>,
     },
     QueueRunOnce {
         #[arg(long, default_value = "default")]
@@ -93,6 +105,22 @@ enum Commands {
         port: u16,
         #[arg(long, default_value_t = true)]
         headed: bool,
+    },
+    QueueRun {
+        #[arg(long, default_value = "default")]
+        account_id: String,
+        #[arg(long, default_value_t = false)]
+        manage_browser: bool,
+        #[arg(long)]
+        browser_binary: Option<PathBuf>,
+        #[arg(long)]
+        profile: Option<PathBuf>,
+        #[arg(long, default_value_t = 9222)]
+        port: u16,
+        #[arg(long, default_value_t = true)]
+        headed: bool,
+        #[arg(long, default_value_t = 16)]
+        max_runs: usize,
     },
     QueueRecover,
     QueueStatus,
@@ -190,12 +218,24 @@ async fn main() -> Result<()> {
             model,
             thinking,
             acceptance_prompt,
+            conversation_kind,
+            known_exact_head,
+            known_ci_evidence,
+            current_stage,
+            pending_work,
+            context_references,
         } => {
             let store = SqliteStore::open(queue_db(cli.db))?;
             let mut task = QueueTask::new(task_id, account_id, prompt);
             task.current_revision = revision;
             task.priority = priority;
             task.acceptance_prompt = acceptance_prompt;
+            task.conversation_kind = parse_conversation_kind(&conversation_kind)?;
+            task.known_exact_head = known_exact_head;
+            task.known_ci_evidence = known_ci_evidence;
+            task.current_stage = current_stage;
+            task.pending_work = pending_work;
+            task.context_references = context_references;
             task.execution_profile = ExecutionProfile {
                 model,
                 thinking_effort: thinking,
@@ -240,6 +280,48 @@ async fn main() -> Result<()> {
             let report = supervisor.run_one().await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+        Commands::QueueRun {
+            account_id,
+            manage_browser,
+            browser_binary,
+            profile,
+            port,
+            headed,
+            max_runs,
+        } => {
+            let db = queue_db(cli.db);
+            let supervisor = if manage_browser {
+                let binary = find_chromium_binary(browser_binary.as_deref())?;
+                let profile = profile.unwrap_or_else(default_profile_dir);
+                let log_dir = profile.join("logs");
+                Supervisor::open_managed(
+                    db,
+                    vec![(
+                        account_id,
+                        ManagedBrowserConfig {
+                            browser_binary: binary,
+                            profile_dir: profile,
+                            port,
+                            headed,
+                            initial_url: "https://chatgpt.com/".into(),
+                            log_dir,
+                        },
+                    )],
+                    1,
+                )?
+            } else {
+                Supervisor::open(db, vec![(account_id, cli.cdp)], 1)?
+            };
+            supervisor.recover_startup()?;
+            let reports = supervisor.run_until_idle(max_runs).await?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "reports": reports,
+                    "snapshot": supervisor.snapshot_json()?
+                })
+            );
+        }
         Commands::QueueRecover => {
             let store = SqliteStore::open(queue_db(cli.db))?;
             let recovered = fabushi_chatgpt_runtime::QueueStore::recover_expired_leases(
@@ -259,6 +341,14 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn parse_conversation_kind(value: &str) -> Result<ConversationKind> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "work" => Ok(ConversationKind::Work),
+        "acceptance" | "planning" => Ok(ConversationKind::Acceptance),
+        other => anyhow::bail!("unsupported conversation kind: {other}"),
+    }
 }
 
 fn default_profile_dir() -> PathBuf {
