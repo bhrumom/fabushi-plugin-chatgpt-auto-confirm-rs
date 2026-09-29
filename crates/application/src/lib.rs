@@ -162,6 +162,12 @@ pub trait QueueStore: Send + Sync {
         waiting_until_ms: Option<i64>,
         error: Option<&str>,
     ) -> Result<()>;
+    fn requeue_conversation(
+        &self,
+        task: &QueueTask,
+        report: &AutomationTaskReport,
+        reason: &str,
+    ) -> Result<()>;
     fn recover_expired_leases(&self, now_ms: i64) -> Result<u32>;
     fn snapshot(&self) -> Result<QueueSnapshot>;
 }
@@ -824,7 +830,9 @@ fn event(
         | RunEventKind::BrowserLost
         | RunEventKind::TargetReattached => Some(QueuePhase::Recovering),
         RunEventKind::ContinuationRequested => Some(QueuePhase::Continuing),
-        RunEventKind::RunCompleted => Some(QueuePhase::Completed),
+        // A terminal assistant response is not the same thing as terminal task settlement.
+        // Runtime parses the task report and owns the durable QueuePhase transition.
+        RunEventKind::RunCompleted => None,
         RunEventKind::RunFailed => Some(QueuePhase::FailedRetryable),
         _ => None,
     };
