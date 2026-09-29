@@ -1324,7 +1324,9 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fabushi_chatgpt_domain::{ExecutionProfile, RunCounters};
+    use fabushi_chatgpt_domain::{
+        ConversationKind, ExecutionProfile, RunCounters, TaskReportStatus,
+    };
 
     fn task(id: &str) -> QueueTask {
         let mut task = QueueTask::new(id, "account-a", format!("prompt-{id}"));
@@ -1490,6 +1492,112 @@ mod tests {
         assert!(journal.begin_approval_attempt(&fingerprint, 3).unwrap());
         journal.settle_approval(&fingerprint).unwrap();
         assert!(!journal.begin_approval_attempt(&fingerprint, 3).unwrap());
+    }
+
+    fn incomplete_report(task_id: &str) -> AutomationTaskReport {
+        AutomationTaskReport {
+            protocol_name: "mahayana.task-report.v1".into(),
+            task_id: task_id.into(),
+            applied_task_revision: 1,
+            applied_spec_digest: String::new(),
+            status: TaskReportStatus::Incomplete,
+            all_tasks_complete: false,
+            summary: "needs more work".into(),
+            completed: vec!["step-a".into()],
+            remaining: vec!["step-b".into()],
+            blockers: Vec::new(),
+            verification: Vec::new(),
+            next_task: "continue step-b".into(),
+            wait_seconds: None,
+            wait_reason: None,
+            next_connector: None,
+        }
+    }
+
+    #[test]
+    fn incomplete_settlement_preserves_journaled_phase_and_is_reclaimable() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let task = task("a");
+        store.enqueue_task(&task).unwrap();
+        let claim = store
+            .claim_next_runnable("worker-1", 1_000, 60_000)
+            .unwrap()
+            .unwrap();
+        let journal = store.journal(&claim.run.run_id, "worker-1");
+        journal
+            .record(&RunEvent::new(
+                RunEventKind::PromptDispatchConfirmed,
+                RunState::Running,
+                RunCounters::default(),
+            ))
+            .unwrap();
+        journal
+            .record(&RunEvent::new(
+                RunEventKind::SnapshotProgressed,
+                RunState::Running,
+                RunCounters::default(),
+            ))
+            .unwrap();
+
+        let report = incomplete_report("a");
+        store
+            .settle_task(&claim.task, Some(&report), None, None, None)
+            .unwrap();
+        store
+            .release_lease(&claim.run.run_id, "worker-1")
+            .unwrap();
+
+        let snapshot = store.snapshot().unwrap();
+        assert_eq!(snapshot.tasks[0].status, TaskState::Queued);
+        assert_eq!(snapshot.tasks[0].phase, QueuePhase::Recovering);
+        assert!(store
+            .claim_next_runnable("worker-2", 2_000, 60_000)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn conversation_requeue_switches_kind_and_uses_fresh_prompt() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let task = task("a");
+        store.enqueue_task(&task).unwrap();
+        let claim = store
+            .claim_next_runnable("worker-1", 1_000, 60_000)
+            .unwrap()
+            .unwrap();
+
+        let mut acceptance = claim.task.clone();
+        acceptance.conversation_kind = ConversationKind::Acceptance;
+        acceptance.prompt = "independent acceptance prompt".into();
+        let mut report = incomplete_report("a");
+        report.status = TaskReportStatus::Complete;
+        report.all_tasks_complete = true;
+        report.remaining.clear();
+        report.next_task.clear();
+
+        store
+            .requeue_conversation(&acceptance, &report, "work_completed_start_acceptance")
+            .unwrap();
+        store
+            .release_lease(&claim.run.run_id, "worker-1")
+            .unwrap();
+
+        let snapshot = store.snapshot().unwrap();
+        assert_eq!(snapshot.tasks[0].status, TaskState::Queued);
+        assert_eq!(snapshot.tasks[0].phase, QueuePhase::Recovering);
+        assert_eq!(
+            snapshot.tasks[0].conversation_kind,
+            ConversationKind::Acceptance
+        );
+        assert_eq!(snapshot.tasks[0].prompt, "independent acceptance prompt");
+        assert!(snapshot.tasks[0].recovery_context.is_none());
+
+        let next = store
+            .claim_next_runnable("worker-2", 2_000, 60_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.task.conversation_kind, ConversationKind::Acceptance);
+        assert_eq!(next.task.prompt, "independent acceptance prompt");
     }
 
     #[test]
