@@ -1,8 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
-use fabushi_chatgpt_application::{
-    Clock, RunPrompt, parse_task_report, parse_task_wait,
-};
+use fabushi_chatgpt_application::{Clock, RunPrompt, parse_task_report, parse_task_wait};
 use fabushi_chatgpt_domain::{
     RecoveryEnvelope, RunEvent, RunEventKind, RunReport, RunState, TaskReportStatus,
 };
