@@ -481,6 +481,7 @@ impl RunWorker {
                 }
             }
         }
+        }
         .await;
 
         let report = match result {
