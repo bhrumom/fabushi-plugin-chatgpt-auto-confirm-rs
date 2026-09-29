@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, anyhow, bail};
 use fabushi_chatgpt_application::{QueueClaim, QueueSnapshot, QueueStore, RunJournal};
 use fabushi_chatgpt_domain::{
-    ApprovalFingerprint, AutomationTaskReport, QueueTask, RecoveryEnvelope, RunCheckpoint,
-    RunEvent, RunEventKind, RunRecord, RunState, TaskState,
+    ApprovalFingerprint, AutomationTaskReport, QueuePhase, QueueTask, RecoveryEnvelope,
+    RunCheckpoint, RunEvent, RunEventKind, RunRecord, RunState, TaskState,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{HashMap, HashSet};
@@ -101,6 +101,56 @@ CREATE TABLE IF NOT EXISTS worker_leases (
     FOREIGN KEY(run_id) REFERENCES runs(run_id)
 );
 
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    applied_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS queue_events (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    run_id TEXT,
+    from_phase TEXT NOT NULL,
+    to_phase TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    FOREIGN KEY(task_id) REFERENCES tasks(task_id)
+);
+
+CREATE TABLE IF NOT EXISTS account_browser_leases (
+    account_id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    process_identity TEXT NOT NULL,
+    browser_pid INTEGER,
+    endpoint TEXT,
+    profile_dir TEXT NOT NULL,
+    state TEXT NOT NULL,
+    lease_revision INTEGER NOT NULL,
+    expires_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS target_leases (
+    target_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL UNIQUE,
+    account_id TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    lease_revision INTEGER NOT NULL,
+    expires_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS browser_lifecycle_events (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    details_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_status_priority
     ON tasks(status, priority DESC, updated_at_ms ASC);
 CREATE INDEX IF NOT EXISTS idx_runs_task
@@ -109,6 +159,20 @@ CREATE INDEX IF NOT EXISTS idx_run_events_run
     ON run_events(run_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_worker_leases_expiry
     ON worker_leases(expires_at_ms);
+CREATE INDEX IF NOT EXISTS idx_queue_events_task
+    ON queue_events(task_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_account_browser_lease_expiry
+    ON account_browser_leases(expires_at_ms);
+CREATE INDEX IF NOT EXISTS idx_target_lease_expiry
+    ON target_leases(expires_at_ms);
+
+INSERT OR IGNORE INTO schema_migrations(version,name,applied_at_ms)
+VALUES
+    (1,'base_queue_and_run_journal',strftime('%s','now') * 1000),
+    (2,'queue_phase_journal',strftime('%s','now') * 1000),
+    (3,'browser_and_target_ownership',strftime('%s','now') * 1000);
+
+PRAGMA user_version=3;
 "#,
         )?;
         Ok(())
@@ -302,6 +366,8 @@ ON CONFLICT(task_id) DO UPDATE SET
             return Ok(None);
         };
 
+        let from_phase = task.phase.clone();
+        task.transition_phase(QueuePhase::Dispatched)?;
         task.status = TaskState::Running;
         task.waiting_until_ms = None;
         task.attempts += 1;
@@ -352,6 +418,19 @@ INSERT INTO run_events(run_id, event_type, payload_json, created_at_ms)
 VALUES (?1, 'run_started', '{}', ?2)
 "#,
             params![run.run_id, now_ms],
+        )?;
+        tx.execute(
+            r#"
+INSERT INTO queue_events(task_id,run_id,from_phase,to_phase,reason,created_at_ms)
+VALUES (?1,?2,?3,?4,'worker_claimed',?5)
+"#,
+            params![
+                task.id,
+                run.run_id,
+                phase_name(&from_phase),
+                phase_name(&task.phase),
+                now_ms
+            ],
         )?;
         tx.commit()?;
 
@@ -666,6 +745,40 @@ impl SqliteRunJournal {
             run.finished_at_ms = Some(now_ms());
         }
 
+        if let Some(next_phase) = event.queue_phase.as_ref() {
+            let task_body: String = tx.query_row(
+                "SELECT body_json FROM tasks WHERE task_id=?1",
+                params![run.task_id],
+                |row| row.get(0),
+            )?;
+            let mut task: QueueTask = serde_json::from_str(&task_body)?;
+            let from_phase = task.phase.clone();
+            task.transition_phase(next_phase.clone())?;
+            if task.phase != from_phase {
+                task.updated_at_ms = now_ms();
+                tx.execute(
+                    "UPDATE tasks SET body_json=?2, updated_at_ms=?3 WHERE task_id=?1",
+                    params![task.id, serde_json::to_string(&task)?, task.updated_at_ms],
+                )?;
+                tx.execute(
+                    r#"
+INSERT INTO queue_events(task_id,run_id,from_phase,to_phase,reason,created_at_ms)
+VALUES (?1,?2,?3,?4,?5,?6)
+"#,
+                    params![
+                        task.id,
+                        run.run_id,
+                        phase_name(&from_phase),
+                        phase_name(&task.phase),
+                        serde_json::to_value(&event.kind)?
+                            .as_str()
+                            .unwrap_or("run_event"),
+                        now_ms()
+                    ],
+                )?;
+            }
+        }
+
         tx.execute(
             r#"
 INSERT INTO run_events(run_id,event_type,payload_json,created_at_ms)
@@ -774,6 +887,24 @@ ON CONFLICT(fingerprint) DO UPDATE SET
             params![fingerprint.0, now_ms()],
         )?;
         Ok(())
+    }
+}
+
+fn phase_name(phase: &QueuePhase) -> &'static str {
+    match phase {
+        QueuePhase::Queued => "queued",
+        QueuePhase::Dispatched => "dispatched",
+        QueuePhase::Submitting => "submitting",
+        QueuePhase::Submitted => "submitted",
+        QueuePhase::AwaitingAcknowledgement => "awaiting_acknowledgement",
+        QueuePhase::AwaitingResponse => "awaiting_response",
+        QueuePhase::Interrupted => "interrupted",
+        QueuePhase::RateLimited => "rate_limited",
+        QueuePhase::Recovering => "recovering",
+        QueuePhase::Continuing => "continuing",
+        QueuePhase::Completed => "completed",
+        QueuePhase::FailedRetryable => "failed_retryable",
+        QueuePhase::PermanentlyFailed => "permanently_failed",
     }
 }
 
