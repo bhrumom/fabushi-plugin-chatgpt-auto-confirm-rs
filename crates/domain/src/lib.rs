@@ -148,6 +148,92 @@ pub enum QueuePhase {
     PermanentlyFailed,
 }
 
+impl QueuePhase {
+    pub fn can_transition_to(&self, next: &Self) -> bool {
+        use QueuePhase::*;
+        self == next
+            || matches!(
+                (self, next),
+                (Queued, Dispatched)
+                    | (Queued, PermanentlyFailed)
+                    | (Dispatched, Submitting)
+                    | (Dispatched, Recovering)
+                    | (Dispatched, FailedRetryable)
+                    | (Dispatched, PermanentlyFailed)
+                    | (Submitting, Submitted)
+                    | (Submitting, AwaitingAcknowledgement)
+                    | (Submitting, AwaitingResponse)
+                    | (Submitting, Recovering)
+                    | (Submitting, FailedRetryable)
+                    | (Submitting, PermanentlyFailed)
+                    | (Submitted, AwaitingAcknowledgement)
+                    | (Submitted, AwaitingResponse)
+                    | (Submitted, Interrupted)
+                    | (Submitted, RateLimited)
+                    | (Submitted, Recovering)
+                    | (Submitted, Completed)
+                    | (Submitted, FailedRetryable)
+                    | (AwaitingAcknowledgement, AwaitingResponse)
+                    | (AwaitingAcknowledgement, Interrupted)
+                    | (AwaitingAcknowledgement, RateLimited)
+                    | (AwaitingAcknowledgement, Recovering)
+                    | (AwaitingAcknowledgement, Completed)
+                    | (AwaitingResponse, Interrupted)
+                    | (AwaitingResponse, RateLimited)
+                    | (AwaitingResponse, Recovering)
+                    | (AwaitingResponse, Continuing)
+                    | (AwaitingResponse, Completed)
+                    | (AwaitingResponse, FailedRetryable)
+                    | (Interrupted, Recovering)
+                    | (Interrupted, AwaitingResponse)
+                    | (Interrupted, Completed)
+                    | (Interrupted, FailedRetryable)
+                    | (RateLimited, Recovering)
+                    | (RateLimited, AwaitingResponse)
+                    | (RateLimited, PermanentlyFailed)
+                    | (Recovering, Queued)
+                    | (Recovering, Dispatched)
+                    | (Recovering, Submitting)
+                    | (Recovering, AwaitingAcknowledgement)
+                    | (Recovering, AwaitingResponse)
+                    | (Recovering, Continuing)
+                    | (Recovering, Completed)
+                    | (Recovering, FailedRetryable)
+                    | (Recovering, PermanentlyFailed)
+                    | (Continuing, Submitting)
+                    | (Continuing, Submitted)
+                    | (Continuing, AwaitingAcknowledgement)
+                    | (Continuing, AwaitingResponse)
+                    | (Continuing, Interrupted)
+                    | (Continuing, RateLimited)
+                    | (Continuing, Recovering)
+                    | (Continuing, Completed)
+                    | (Continuing, FailedRetryable)
+                    | (FailedRetryable, Queued)
+                    | (FailedRetryable, Recovering)
+                    | (FailedRetryable, PermanentlyFailed)
+            )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueTransitionError {
+    pub from: QueuePhase,
+    pub to: QueuePhase,
+}
+
+impl std::fmt::Display for QueueTransitionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "illegal queue phase transition: {:?} -> {:?}",
+            self.from, self.to
+        )
+    }
+}
+
+impl std::error::Error for QueueTransitionError {}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct RunCheckpoint {
@@ -323,6 +409,20 @@ pub struct QueueTask {
 }
 
 impl QueueTask {
+    pub fn transition_phase(
+        &mut self,
+        next: QueuePhase,
+    ) -> Result<(), QueueTransitionError> {
+        if !self.phase.can_transition_to(&next) {
+            return Err(QueueTransitionError {
+                from: self.phase.clone(),
+                to: next,
+            });
+        }
+        self.phase = next;
+        Ok(())
+    }
+
     pub fn new(
         id: impl Into<String>,
         account_id: impl Into<String>,
@@ -737,6 +837,28 @@ mod tests {
             ..Default::default()
         };
         assert!(snapshot.is_terminal());
+    }
+
+    #[test]
+    fn queue_phase_rejects_illegal_terminal_revival() {
+        let mut task = QueueTask::new("t", "a", "p");
+        task.transition_phase(QueuePhase::Dispatched).unwrap();
+        task.transition_phase(QueuePhase::Submitting).unwrap();
+        task.transition_phase(QueuePhase::AwaitingResponse).unwrap();
+        task.transition_phase(QueuePhase::Completed).unwrap();
+        let error = task.transition_phase(QueuePhase::Queued).unwrap_err();
+        assert_eq!(error.from, QueuePhase::Completed);
+        assert_eq!(error.to, QueuePhase::Queued);
+    }
+
+    #[test]
+    fn queue_phase_allows_recoverable_retry_path() {
+        let mut task = QueueTask::new("t", "a", "p");
+        task.transition_phase(QueuePhase::Dispatched).unwrap();
+        task.transition_phase(QueuePhase::Recovering).unwrap();
+        task.transition_phase(QueuePhase::FailedRetryable).unwrap();
+        task.transition_phase(QueuePhase::Queued).unwrap();
+        assert_eq!(task.phase, QueuePhase::Queued);
     }
 
     #[test]
