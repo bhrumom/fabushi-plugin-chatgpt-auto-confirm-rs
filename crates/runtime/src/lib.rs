@@ -1053,6 +1053,26 @@ impl Supervisor {
         Ok(Some(report))
     }
 
+    pub async fn run_until_idle(&self, max_runs: usize) -> Result<Vec<RunReport>> {
+        let mut reports = Vec::new();
+        for _ in 0..max_runs.max(1) {
+            let Some(report) = self.run_one().await? else {
+                return Ok(reports);
+            };
+            reports.push(report);
+        }
+        if self
+            .store
+            .snapshot()?
+            .tasks
+            .iter()
+            .any(|task| matches!(task.status, fabushi_chatgpt_domain::TaskState::Queued))
+        {
+            bail!("run_until_idle reached max_runs while runnable tasks remain");
+        }
+        Ok(reports)
+    }
+
     pub fn snapshot_json(&self) -> Result<serde_json::Value> {
         let snapshot = self.store.snapshot()?;
         Ok(serde_json::json!({
