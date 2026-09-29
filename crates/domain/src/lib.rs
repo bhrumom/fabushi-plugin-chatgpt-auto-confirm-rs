@@ -11,7 +11,16 @@ pub struct PageSnapshot {
     pub stop_available: bool,
     pub waiting_for_approval: bool,
     pub rate_limit_notice: bool,
+    pub rate_limit_dialog_visible: bool,
+    pub rate_limit_ack_available: bool,
     pub connection_interrupted: bool,
+    pub conversation_too_long: bool,
+    pub conversation_loaded: bool,
+    pub authentication_required: bool,
+    pub composer_ready: bool,
+    pub send_unavailable: bool,
+    pub assistant_streaming: bool,
+    pub assistant_message_settled: bool,
     pub copy_available_on_last_assistant: bool,
     pub response_actions_complete: bool,
     pub response_action_turn_bound_to_last: bool,
@@ -27,12 +36,16 @@ impl PageSnapshot {
     pub fn terminal_evidence(&self) -> bool {
         self.response_actions_complete
             && self.response_action_turn_bound_to_last
+            && self.assistant_message_settled
             && !self.awaiting_assistant
             && self.copy_available_on_last_assistant
     }
 
     pub fn response_in_flight(&self) -> bool {
-        self.stop_available || self.waiting_for_approval || self.awaiting_assistant
+        self.stop_available
+            || self.assistant_streaming
+            || self.waiting_for_approval
+            || self.awaiting_assistant
     }
 
     pub fn is_terminal(&self) -> bool {
@@ -99,6 +112,57 @@ pub struct RunCounters {
     pub dispatch_retries: u32,
     pub continuations: u32,
     pub connection_interruptions: u32,
+    pub refresh_attempts: u32,
+    pub fresh_conversation_recoveries: u32,
+    pub target_recoveries: u32,
+    pub browser_recoveries: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationKind {
+    #[default]
+    Work,
+    Acceptance,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuePhase {
+    #[default]
+    Queued,
+    Dispatched,
+    Submitting,
+    Submitted,
+    AwaitingAcknowledgement,
+    AwaitingResponse,
+    Interrupted,
+    RateLimited,
+    Recovering,
+    Continuing,
+    Completed,
+    FailedRetryable,
+    PermanentlyFailed,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunCheckpoint {
+    pub conversation_kind: ConversationKind,
+    pub baseline_user_turns: usize,
+    pub outbound_baseline_user_turns: usize,
+    pub dispatch_attempts: u32,
+    pub outbound_delivery_confirmed: bool,
+    pub dispatch_deadline_ms: i64,
+    pub stale_deadline_ms: i64,
+    pub connection_recovery_deadline_ms: Option<i64>,
+    pub rate_limit_resume_at_ms: Option<i64>,
+    pub continuation_deadline_ms: i64,
+    pub refresh_attempts: u32,
+    pub last_activity_fingerprint: Option<String>,
+    pub last_committed_outbound_message: Option<String>,
+    pub last_conversation_url: Option<String>,
+    pub pending_recovery: Option<String>,
+    pub last_observed_at_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +187,10 @@ impl RunReport {
             dispatch_retries: self.dispatch_retries,
             continuations: self.continuations,
             connection_interruptions: 0,
+            refresh_attempts: 0,
+            fresh_conversation_recoveries: 0,
+            target_recoveries: 0,
+            browser_recoveries: 0,
         }
     }
 }
@@ -206,6 +274,19 @@ pub struct QueueTask {
     pub prompt: String,
     pub original_prompt: String,
     pub acceptance_prompt: Option<String>,
+    pub conversation_kind: ConversationKind,
+    #[serde(default)]
+    pub known_exact_head: Option<String>,
+    #[serde(default)]
+    pub known_ci_evidence: Vec<String>,
+    #[serde(default)]
+    pub current_stage: Option<String>,
+    #[serde(default)]
+    pub pending_work: Vec<String>,
+    #[serde(default)]
+    pub context_references: Vec<String>,
+    #[serde(default)]
+    pub phase: QueuePhase,
     pub current_revision: u64,
     pub applied_revision: Option<u64>,
     pub spec_digest: Option<String>,
@@ -245,6 +326,13 @@ impl QueueTask {
             prompt: prompt.clone(),
             original_prompt: prompt,
             acceptance_prompt: None,
+            conversation_kind: ConversationKind::Work,
+            known_exact_head: None,
+            known_ci_evidence: Vec::new(),
+            current_stage: None,
+            pending_work: Vec::new(),
+            context_references: Vec::new(),
+            phase: QueuePhase::Queued,
             current_revision: 1,
             applied_revision: None,
             spec_digest: None,
@@ -281,6 +369,8 @@ pub struct RunRecord {
     pub last_activity_fingerprint: Option<String>,
     pub latest_assistant_text: Option<String>,
     pub counters: RunCounters,
+    #[serde(default)]
+    pub checkpoint: RunCheckpoint,
     pub started_at_ms: i64,
     pub finished_at_ms: Option<i64>,
 }
@@ -297,6 +387,7 @@ impl RunRecord {
             last_activity_fingerprint: None,
             latest_assistant_text: None,
             counters: RunCounters::default(),
+            checkpoint: RunCheckpoint::default(),
             started_at_ms,
             finished_at_ms: None,
         }
@@ -315,10 +406,19 @@ pub enum RunEventKind {
     ApprovalApplied,
     RateLimitObserved,
     RateLimitDismissed,
+    RateLimitBackoffStarted,
+    RateLimitBackoffFinished,
+    ConnectionInterrupted,
+    ConversationTooLongObserved,
     RecoveryReloadRequested,
     RecoveryReloadApplied,
     ContinuationRequested,
+    OutboundDeliveryConfirmed,
+    FreshConversationRequested,
+    FreshConversationStarted,
     CanonicalConversationBound,
+    TargetLost,
+    BrowserLost,
     TargetReattached,
     TerminalEvidenceObserved,
     RunCompleted,
@@ -353,15 +453,18 @@ impl RunEvent {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RecoveryEnvelope {
     pub version: u32,
     pub task_id: String,
     pub run_id: String,
     pub exact_commit: Option<String>,
     pub conversation_url: Option<String>,
+    pub conversation_kind: ConversationKind,
     pub original_goal: String,
     pub acceptance_prompt: Option<String>,
+    #[serde(default)]
+    pub interrupted_turn_visible_content: Vec<String>,
     #[serde(default)]
     pub progress_messages: Vec<String>,
     #[serde(default)]
@@ -370,6 +473,15 @@ pub struct RecoveryEnvelope {
     pub remaining: Vec<String>,
     #[serde(default)]
     pub blockers: Vec<String>,
+    #[serde(default)]
+    pub known_ci_evidence: Vec<String>,
+    pub current_stage: Option<String>,
+    #[serde(default)]
+    pub pending_work: Vec<String>,
+    #[serde(default)]
+    pub context_references: Vec<String>,
+    pub last_committed_outbound_message: Option<String>,
+    pub outbound_delivery_confirmed: bool,
     pub continuation_instruction: String,
 }
 
@@ -401,14 +513,25 @@ impl RecoveryEnvelope {
         if let Some(url) = &self.conversation_url {
             parts.push(format!("canonical_conversation_url: {url}"));
         }
+        parts.push(format!("conversation_kind: {:?}", self.conversation_kind));
         parts.push(format!("## 原始目标\n{}", self.original_goal));
         if let Some(prompt) = &self.acceptance_prompt {
             parts.push(format!("## 验收/规划会话最终提示词\n{prompt}"));
         }
+        parts.push(section("上一轮异常中断前的实时回复内容", &self.interrupted_turn_visible_content));
         parts.push(section("异常前实时工作进展", &self.progress_messages));
         parts.push(section("已完成", &self.completed));
+        parts.push(section("当前待继续事项", &self.pending_work));
         parts.push(section("剩余", &self.remaining));
+        parts.push(section("已知 CI evidence", &self.known_ci_evidence));
         parts.push(section("阻塞", &self.blockers));
+        parts.push(section("附件/上下文引用", &self.context_references));
+        if let Some(stage) = &self.current_stage {
+            parts.push(format!("## 当前阶段\n{stage}"));
+        }
+        if let Some(message) = &self.last_committed_outbound_message {
+            parts.push(format!("## 最近一次已提交 outbound\n{message}\nconfirmed={}", self.outbound_delivery_confirmed));
+        }
         parts.push(format!("## 接力要求\n{}", self.continuation_instruction));
         parts.join("\n\n")
     }
