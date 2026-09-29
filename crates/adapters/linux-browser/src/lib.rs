@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
-use std::path::{Path, PathBuf};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 
@@ -91,7 +91,6 @@ pub fn launch_chromium(
         headed,
     })
 }
-
 
 #[derive(Debug, Clone)]
 pub struct ManagedBrowserConfig {

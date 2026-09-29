@@ -688,15 +688,27 @@ WHERE l.expires_at_ms <= ?1
     }
 }
 
-
 impl OwnershipStore for SqliteStore {
-    fn acquire_account_browser(&self, account_id: &str, owner_id: &str, process_identity: &str, profile_dir: &str, now_ms: i64, lease_duration_ms: i64) -> Result<bool> {
-        let connection = self.connection.lock().map_err(|_| anyhow!("sqlite mutex poisoned"))?;
-        let existing: Option<(String, i64)> = connection.query_row(
-            "SELECT owner_id, expires_at_ms FROM account_browser_leases WHERE account_id=?1",
-            params![account_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        ).optional()?;
+    fn acquire_account_browser(
+        &self,
+        account_id: &str,
+        owner_id: &str,
+        process_identity: &str,
+        profile_dir: &str,
+        now_ms: i64,
+        lease_duration_ms: i64,
+    ) -> Result<bool> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("sqlite mutex poisoned"))?;
+        let existing: Option<(String, i64)> = connection
+            .query_row(
+                "SELECT owner_id, expires_at_ms FROM account_browser_leases WHERE account_id=?1",
+                params![account_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
         if let Some((existing_owner, expires_at)) = existing
             && existing_owner != owner_id
             && expires_at > now_ms
@@ -721,13 +733,30 @@ ON CONFLICT(account_id) DO UPDATE SET
     expires_at_ms=excluded.expires_at_ms,
     updated_at_ms=excluded.updated_at_ms
 "#,
-            params![account_id, owner_id, process_identity, profile_dir, now_ms + lease_duration_ms, now_ms],
+            params![
+                account_id,
+                owner_id,
+                process_identity,
+                profile_dir,
+                now_ms + lease_duration_ms,
+                now_ms
+            ],
         )?;
         Ok(true)
     }
 
-    fn bind_account_browser_process(&self, account_id: &str, owner_id: &str, browser_pid: u32, endpoint: &str, now_ms: i64) -> Result<()> {
-        let connection = self.connection.lock().map_err(|_| anyhow!("sqlite mutex poisoned"))?;
+    fn bind_account_browser_process(
+        &self,
+        account_id: &str,
+        owner_id: &str,
+        browser_pid: u32,
+        endpoint: &str,
+        now_ms: i64,
+    ) -> Result<()> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("sqlite mutex poisoned"))?;
         let changed = connection.execute(
             r#"
 UPDATE account_browser_leases
@@ -736,12 +765,23 @@ WHERE account_id=?1 AND owner_id=?2 AND expires_at_ms>?5
 "#,
             params![account_id, owner_id, browser_pid, endpoint, now_ms],
         )?;
-        if changed != 1 { bail!("account browser lease lost before process bind"); }
+        if changed != 1 {
+            bail!("account browser lease lost before process bind");
+        }
         Ok(())
     }
 
-    fn renew_account_browser(&self, account_id: &str, owner_id: &str, now_ms: i64, lease_duration_ms: i64) -> Result<bool> {
-        let connection = self.connection.lock().map_err(|_| anyhow!("sqlite mutex poisoned"))?;
+    fn renew_account_browser(
+        &self,
+        account_id: &str,
+        owner_id: &str,
+        now_ms: i64,
+        lease_duration_ms: i64,
+    ) -> Result<bool> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("sqlite mutex poisoned"))?;
         Ok(connection.execute(
             r#"
 UPDATE account_browser_leases
@@ -753,7 +793,10 @@ WHERE account_id=?1 AND owner_id=?4 AND expires_at_ms>?2
     }
 
     fn release_account_browser(&self, account_id: &str, owner_id: &str) -> Result<()> {
-        let connection = self.connection.lock().map_err(|_| anyhow!("sqlite mutex poisoned"))?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("sqlite mutex poisoned"))?;
         connection.execute(
             "DELETE FROM account_browser_leases WHERE account_id=?1 AND owner_id=?2",
             params![account_id, owner_id],
@@ -762,7 +805,10 @@ WHERE account_id=?1 AND owner_id=?4 AND expires_at_ms>?2
     }
 
     fn account_browser_lease(&self, account_id: &str) -> Result<Option<AccountBrowserLease>> {
-        let connection = self.connection.lock().map_err(|_| anyhow!("sqlite mutex poisoned"))?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("sqlite mutex poisoned"))?;
         connection.query_row(
             r#"SELECT account_id,owner_id,process_identity,browser_pid,endpoint,profile_dir,expires_at_ms
 FROM account_browser_leases WHERE account_id=?1"#,
@@ -779,14 +825,27 @@ FROM account_browser_leases WHERE account_id=?1"#,
         ).optional().map_err(Into::into)
     }
 
-    fn acquire_target(&self, target_id: &str, run_id: &str, account_id: &str, owner_id: &str, now_ms: i64, lease_duration_ms: i64) -> Result<bool> {
-        let mut connection = self.connection.lock().map_err(|_| anyhow!("sqlite mutex poisoned"))?;
+    fn acquire_target(
+        &self,
+        target_id: &str,
+        run_id: &str,
+        account_id: &str,
+        owner_id: &str,
+        now_ms: i64,
+        lease_duration_ms: i64,
+    ) -> Result<bool> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("sqlite mutex poisoned"))?;
         let tx = connection.transaction()?;
-        let conflicting: Option<(String, String, i64)> = tx.query_row(
-            "SELECT target_id, owner_id, expires_at_ms FROM target_leases WHERE run_id=?1",
-            params![run_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        ).optional()?;
+        let conflicting: Option<(String, String, i64)> = tx
+            .query_row(
+                "SELECT target_id, owner_id, expires_at_ms FROM target_leases WHERE run_id=?1",
+                params![run_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
         if let Some((existing_target, existing_owner, expires_at)) = conflicting
             && expires_at > now_ms
             && (existing_target != target_id || existing_owner != owner_id)
@@ -794,19 +853,38 @@ FROM account_browser_leases WHERE account_id=?1"#,
             tx.commit()?;
             return Ok(false);
         }
-        tx.execute("DELETE FROM target_leases WHERE expires_at_ms<=?1 OR run_id=?2", params![now_ms, run_id])?;
+        tx.execute(
+            "DELETE FROM target_leases WHERE expires_at_ms<=?1 OR run_id=?2",
+            params![now_ms, run_id],
+        )?;
         let inserted = tx.execute(
             r#"INSERT OR IGNORE INTO target_leases(
 target_id,run_id,account_id,owner_id,state,lease_revision,expires_at_ms,updated_at_ms)
 VALUES (?1,?2,?3,?4,'leased',1,?5,?6)"#,
-            params![target_id, run_id, account_id, owner_id, now_ms + lease_duration_ms, now_ms],
+            params![
+                target_id,
+                run_id,
+                account_id,
+                owner_id,
+                now_ms + lease_duration_ms,
+                now_ms
+            ],
         )?;
         tx.commit()?;
         Ok(inserted == 1)
     }
 
-    fn renew_target(&self, target_id: &str, owner_id: &str, now_ms: i64, lease_duration_ms: i64) -> Result<bool> {
-        let connection = self.connection.lock().map_err(|_| anyhow!("sqlite mutex poisoned"))?;
+    fn renew_target(
+        &self,
+        target_id: &str,
+        owner_id: &str,
+        now_ms: i64,
+        lease_duration_ms: i64,
+    ) -> Result<bool> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("sqlite mutex poisoned"))?;
         Ok(connection.execute(
             r#"UPDATE target_leases
 SET lease_revision=lease_revision+1, expires_at_ms=?3, updated_at_ms=?2
@@ -816,13 +894,22 @@ WHERE target_id=?1 AND owner_id=?4 AND expires_at_ms>?2"#,
     }
 
     fn release_target(&self, target_id: &str, owner_id: &str) -> Result<()> {
-        let connection = self.connection.lock().map_err(|_| anyhow!("sqlite mutex poisoned"))?;
-        connection.execute("DELETE FROM target_leases WHERE target_id=?1 AND owner_id=?2", params![target_id, owner_id])?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("sqlite mutex poisoned"))?;
+        connection.execute(
+            "DELETE FROM target_leases WHERE target_id=?1 AND owner_id=?2",
+            params![target_id, owner_id],
+        )?;
         Ok(())
     }
 
     fn target_lease_for_run(&self, run_id: &str) -> Result<Option<DurableTargetLease>> {
-        let connection = self.connection.lock().map_err(|_| anyhow!("sqlite mutex poisoned"))?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("sqlite mutex poisoned"))?;
         connection.query_row(
             "SELECT target_id,run_id,account_id,owner_id,expires_at_ms FROM target_leases WHERE run_id=?1",
             params![run_id],
@@ -836,8 +923,18 @@ WHERE target_id=?1 AND owner_id=?4 AND expires_at_ms>?2"#,
         ).optional().map_err(Into::into)
     }
 
-    fn record_browser_lifecycle(&self, account_id: &str, owner_id: &str, event_type: &str, details_json: &str, now_ms: i64) -> Result<()> {
-        let connection = self.connection.lock().map_err(|_| anyhow!("sqlite mutex poisoned"))?;
+    fn record_browser_lifecycle(
+        &self,
+        account_id: &str,
+        owner_id: &str,
+        event_type: &str,
+        details_json: &str,
+        now_ms: i64,
+    ) -> Result<()> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("sqlite mutex poisoned"))?;
         connection.execute(
             "INSERT INTO browser_lifecycle_events(account_id,owner_id,event_type,details_json,created_at_ms) VALUES (?1,?2,?3,?4,?5)",
             params![account_id, owner_id, event_type, details_json, now_ms],
