@@ -198,11 +198,11 @@ impl ManagedChromium {
             .child
             .lock()
             .map_err(|_| anyhow::anyhow!("chromium child mutex poisoned"))?;
-        if let Some(child) = child.as_mut() {
-            if child.try_wait()?.is_none() {
-                child.kill().context("force terminate Chromium")?;
-                let _ = child.wait();
-            }
+        if let Some(child) = child.as_mut()
+            && child.try_wait()?.is_none()
+        {
+            child.kill().context("force terminate Chromium")?;
+            let _ = child.wait();
         }
         *child = None;
         let _ = std::fs::remove_file(&self.profile_lock_path);
