@@ -1,17 +1,19 @@
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use fabushi_chatgpt_application::BrowserPort;
-use fabushi_chatgpt_domain::PageSnapshot;
+use fabushi_chatgpt_domain::{ExecutionProfile, ObservedExecutionProfile, PageSnapshot};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
 #[derive(Debug, Clone, Deserialize)]
 struct TargetInfo {
+    id: String,
     #[serde(rename = "type")]
     kind: String,
     title: String,
@@ -20,36 +22,63 @@ struct TargetInfo {
     websocket_debugger_url: Option<String>,
 }
 
+const PAGE_READY_TIMEOUT: Duration = Duration::from_secs(15);
+const PAGE_READY_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
 pub struct ChatGptCdp {
     endpoint: String,
+    target_id: String,
     socket: Mutex<WebSocketStream<MaybeTlsStream<TcpStream>>>,
     next_id: AtomicU64,
 }
 
 impl ChatGptCdp {
     pub async fn connect(endpoint: &str) -> Result<Self> {
-        let endpoint = endpoint.trim_end_matches('/').to_owned();
-        let targets: Vec<TargetInfo> = reqwest::get(format!("{endpoint}/json/list"))
-            .await
-            .context("failed to reach Chromium remote debugging endpoint")?
-            .error_for_status()?
-            .json()
-            .await
-            .context("invalid /json/list response")?;
-
+        let targets = fetch_targets(endpoint).await?;
         let target = select_chatgpt_target(&targets).ok_or_else(|| {
             anyhow!("no ChatGPT page target found; open https://chatgpt.com first")
         })?;
+        Self::connect_target(endpoint, target).await
+    }
+
+    pub async fn create_target(endpoint: &str, initial_url: &str) -> Result<Self> {
+        let endpoint = endpoint.trim_end_matches('/');
+        let url = format!("{endpoint}/json/new?{}", urlencoding::encode(initial_url));
+        let response = reqwest::Client::new()
+            .put(url)
+            .send()
+            .await
+            .context("failed to create CDP page target")?
+            .error_for_status()?;
+        let target: TargetInfo = response
+            .json()
+            .await
+            .context("invalid /json/new target response")?;
+        let browser = Self::connect_target(endpoint, &target).await?;
+        browser.wait_for_navigation_target(initial_url).await?;
+        Ok(browser)
+    }
+
+    pub async fn connect_target_id(endpoint: &str, target_id: &str) -> Result<Self> {
+        let targets = fetch_targets(endpoint).await?;
+        let target = targets
+            .iter()
+            .find(|target| target.id == target_id)
+            .ok_or_else(|| anyhow!("CDP target {target_id} not found"))?;
+        Self::connect_target(endpoint, target).await
+    }
+
+    async fn connect_target(endpoint: &str, target: &TargetInfo) -> Result<Self> {
         let ws_url = target
             .websocket_debugger_url
             .clone()
-            .ok_or_else(|| anyhow!("selected ChatGPT target has no websocket debugger URL"))?;
+            .ok_or_else(|| anyhow!("selected target has no websocket debugger URL"))?;
         let (socket, _) = connect_async(&ws_url)
             .await
             .with_context(|| format!("failed to connect CDP websocket {ws_url}"))?;
-
         Ok(Self {
-            endpoint,
+            endpoint: endpoint.trim_end_matches('/').to_owned(),
+            target_id: target.id.clone(),
             socket: Mutex::new(socket),
             next_id: AtomicU64::new(1),
         })
@@ -59,14 +88,24 @@ impl ChatGptCdp {
         &self.endpoint
     }
 
+    pub fn target_id(&self) -> &str {
+        &self.target_id
+    }
+
+    pub async fn target_exists(&self) -> Result<bool> {
+        Ok(fetch_targets(&self.endpoint)
+            .await?
+            .iter()
+            .any(|target| target.id == self.target_id))
+    }
+
+    pub async fn endpoint_available(endpoint: &str) -> bool {
+        fetch_targets(endpoint).await.is_ok()
+    }
+
     async fn command(&self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let payload = json!({
-            "id": id,
-            "method": method,
-            "params": params,
-        });
-
+        let payload = json!({"id": id, "method": method, "params": params});
         let mut socket = self.socket.lock().await;
         socket
             .send(Message::Text(payload.to_string().into()))
@@ -94,7 +133,6 @@ impl ChatGptCdp {
             }
             return Ok(value["result"].clone());
         }
-
         bail!("CDP websocket ended before response to {method}")
     }
 
@@ -106,11 +144,10 @@ impl ChatGptCdp {
                     "expression": expression,
                     "awaitPromise": true,
                     "returnByValue": true,
-                    "userGesture": true,
+                    "userGesture": true
                 }),
             )
             .await?;
-
         if let Some(exception) = result.get("exceptionDetails") {
             bail!("JavaScript evaluation failed: {exception}");
         }
@@ -118,6 +155,62 @@ impl ChatGptCdp {
             .pointer("/result/value")
             .cloned()
             .unwrap_or(Value::Null))
+    }
+
+    async fn wait_for_navigation_target(&self, expected_url: &str) -> Result<()> {
+        let expected_url_json = serde_json::to_string(expected_url)?;
+        let script = format!(
+            r#"(() => {{
+                const expected = new URL({expected_url_json});
+                const current = new URL(window.location.href);
+                const targetReached =
+                    current.href === expected.href ||
+                    (
+                        current.protocol === expected.protocol &&
+                        current.host === expected.host &&
+                        current.pathname === expected.pathname
+                    );
+                return document.readyState === "complete" && targetReached;
+            }})()"#
+        );
+        let started = Instant::now();
+        loop {
+            let ready = self
+                .evaluate(&script)
+                .await
+                .ok()
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            if ready {
+                return Ok(());
+            }
+            if started.elapsed() >= PAGE_READY_TIMEOUT {
+                bail!("CDP page did not become ready after navigation to {expected_url}");
+            }
+            tokio::time::sleep(PAGE_READY_POLL_INTERVAL).await;
+        }
+    }
+
+    async fn wait_for_reload_complete(&self, previous_time_origin: f64) -> Result<()> {
+        let script = format!(
+            r#"document.readyState === "complete" && performance.timeOrigin !== {previous_time_origin}"#
+        );
+        let started = Instant::now();
+        loop {
+            let ready = self
+                .evaluate(&script)
+                .await
+                .ok()
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            if ready {
+                return Ok(());
+            }
+            if started.elapsed() >= PAGE_READY_TIMEOUT {
+                bail!("CDP page did not become ready after reload");
+            }
+            tokio::time::sleep(PAGE_READY_POLL_INTERVAL).await;
+        }
     }
 
     pub async fn snapshot(&self) -> Result<PageSnapshot> {
@@ -151,14 +244,47 @@ impl ChatGptCdp {
             .unwrap_or(false))
     }
 
+    pub async fn ensure_profile(
+        &self,
+        requested: &ExecutionProfile,
+    ) -> Result<ObservedExecutionProfile> {
+        let requested_model = serde_json::to_string(&requested.model)?;
+        let requested_thinking = serde_json::to_string(&requested.thinking_effort)?;
+        let script = ENSURE_EXECUTION_PROFILE_SCRIPT
+            .replace("__MODEL_JSON__", &requested_model)
+            .replace("__THINKING_JSON__", &requested_thinking);
+        let value = self.evaluate(&script).await?;
+        serde_json::from_value(value).context("failed to decode execution profile observation")
+    }
+
     pub async fn reload(&self) -> Result<()> {
+        let previous_time_origin = self
+            .evaluate("performance.timeOrigin")
+            .await?
+            .as_f64()
+            .ok_or_else(|| anyhow!("performance.timeOrigin was not numeric before reload"))?;
         self.command("Page.reload", json!({"ignoreCache": false}))
             .await?;
-        Ok(())
+        self.wait_for_reload_complete(previous_time_origin).await
     }
 
     pub async fn navigate(&self, url: &str) -> Result<()> {
         self.command("Page.navigate", json!({"url": url})).await?;
+        self.wait_for_navigation_target(url).await
+    }
+
+    pub async fn close_owned_target(&self) -> Result<()> {
+        let url = format!(
+            "{}/json/close/{}",
+            self.endpoint.trim_end_matches('/'),
+            self.target_id
+        );
+        reqwest::Client::new()
+            .get(url)
+            .send()
+            .await
+            .context("failed to close CDP target")?
+            .error_for_status()?;
         Ok(())
     }
 }
@@ -188,6 +314,27 @@ impl BrowserPort for ChatGptCdp {
     async fn navigate(&self, url: &str) -> Result<()> {
         ChatGptCdp::navigate(self, url).await
     }
+
+    async fn ensure_execution_profile(
+        &self,
+        requested: &ExecutionProfile,
+    ) -> Result<ObservedExecutionProfile> {
+        self.ensure_profile(requested).await
+    }
+
+    async fn target_identity(&self) -> Result<Option<String>> {
+        Ok(Some(self.target_id.clone()))
+    }
+}
+
+async fn fetch_targets(endpoint: &str) -> Result<Vec<TargetInfo>> {
+    reqwest::get(format!("{}/json/list", endpoint.trim_end_matches('/')))
+        .await
+        .context("failed to reach Chromium remote debugging endpoint")?
+        .error_for_status()?
+        .json()
+        .await
+        .context("invalid /json/list response")
 }
 
 fn select_chatgpt_target(targets: &[TargetInfo]) -> Option<&TargetInfo> {
@@ -212,43 +359,123 @@ const SNAPSHOT_SCRIPT: &str = r#"
   const textOf = (el) => norm(el?.innerText || el?.textContent || '');
   const aria = (el) => norm(el?.getAttribute?.('aria-label') || '');
   const testid = (el) => norm(el?.getAttribute?.('data-testid') || '');
-  const buttons = [...document.querySelectorAll('button')];
-  const pageText = norm(document.body?.innerText || '');
+  const visible = (el) => !!el && el.getClientRects().length > 0 &&
+    getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+  const buttons = [...document.querySelectorAll('button')].filter(visible);
   const isStop = (b) => /(^|\b)(stop|停止|停止生成|停止回答)(\b|$)/i.test([textOf(b), aria(b), testid(b)].join(' '));
-  const isCopy = (b) => /(copy|复制)/i.test([textOf(b), aria(b), testid(b)].join(' '));
-  const isApproval = (b) => /(allow once|允许一次|approve once|仅允许本次|允许本次)/i.test([textOf(b), aria(b)].join(' '));
+  const isCopy = (b) => /^(copy|复制)(\b|$)/i.test(norm(textOf(b) || aria(b) || testid(b)));
+  const isApproval = (b) => /^(allow once|允许一次|approve once|仅允许本次|允许本次)$/i.test(norm(textOf(b) || aria(b)));
+  const isRateLimitText = (text) => /(too many requests|request(?:s)?\s+(?:are\s+)?too frequent|请求过于频繁|请求太频繁)/i.test(text);
+  const isConnectionText = (text) => /(connection interrupted|connection lost|network error|连接中断|网络错误|网络连接中断)/i.test(text);
+  const isTooLongText = (text) => /(conversation (?:is )?too long|maximum conversation length|start a new chat|对话过长|会话过长|新建(?:一个)?对话)/i.test(text);
+  const statusCandidates = [...document.querySelectorAll(
+    '[role="dialog"],[role="alert"],[role="status"],[aria-live="assertive"],[aria-live="polite"],[data-testid*="toast"],[data-testid*="modal"],[data-testid*="error"]'
+  )].filter(visible);
+  const rateLimitContainer = statusCandidates.find((el) => isRateLimitText(textOf(el))) || null;
+  const connectionContainer = statusCandidates.find((el) => isConnectionText(textOf(el))) || null;
+  const tooLongContainer = statusCandidates.find((el) => isTooLongText(textOf(el))) || null;
+  const ackButton = rateLimitContainer
+    ? [...rateLimitContainer.querySelectorAll('button')].filter(visible)
+        .find((b) => /^(got it|ok|okay|明白了|知道了)$/i.test(norm(textOf(b) || aria(b))) ) || null
+    : null;
 
   const userTurns = [...document.querySelectorAll('[data-message-author-role="user"]')];
   const assistantTurns = [...document.querySelectorAll('[data-message-author-role="assistant"]')];
   const lastAssistant = assistantTurns.at(-1) || null;
-  const lastAssistantButtons = lastAssistant ? [...lastAssistant.querySelectorAll('button')] : [];
+  const lastUser = userTurns.at(-1) || null;
+  const lastAssistantButtons = lastAssistant
+    ? [...lastAssistant.querySelectorAll('button')].filter(visible)
+    : [];
   const copyAvailable = lastAssistantButtons.some(isCopy);
   const actionButtons = lastAssistantButtons.filter((b) => {
-    const s = [textOf(b), aria(b), testid(b)].join(' ');
-    return /(copy|复制|good|bad|like|dislike|regenerate|retry|branch|read aloud|朗读|分享|share)/i.test(s);
+    const value = [textOf(b), aria(b), testid(b)].join(' ');
+    return /(copy|复制|good|bad|like|dislike|regenerate|retry|branch|read aloud|朗读|分享|share)/i.test(value);
   });
-
-  const lastUser = userTurns.at(-1);
   const lastAssistantAfterLastUser = !!lastAssistant && !!lastUser &&
     (lastUser.compareDocumentPosition(lastAssistant) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
 
-  const composer = document.querySelector('#prompt-textarea, textarea, [contenteditable="true"][data-lexical-editor="true"], [contenteditable="true"]');
+  const composerCandidates = [
+    document.querySelector('#prompt-textarea'),
+    document.querySelector('textarea'),
+    document.querySelector('[contenteditable="true"][data-lexical-editor="true"]'),
+    document.querySelector('[contenteditable="true"]')
+  ].filter(Boolean);
+  const composer = composerCandidates.find(visible) || composerCandidates[0] || null;
   const composerText = norm(composer?.value ?? composer?.innerText ?? composer?.textContent ?? '');
+  const composerReady = visible(composer) &&
+    composer?.getAttribute?.('aria-disabled') !== 'true' &&
+    !composer?.hasAttribute?.('disabled');
+  const enabledSend = buttons.find((b) => {
+    const value = [textOf(b), aria(b), testid(b)].join(' ');
+    return /(send|发送)/i.test(value) && !b.disabled && b.getAttribute('aria-disabled') !== 'true';
+  }) || null;
+
+  const approvalButton = buttons.find(isApproval) || null;
+  const approvalCard = approvalButton?.closest('[role="dialog"], [data-testid], article, section, div') || null;
+  const approvalKey = approvalButton
+    ? norm([
+        approvalCard?.getAttribute?.('data-testid'),
+        approvalCard?.getAttribute?.('data-message-id'),
+        textOf(approvalCard).slice(0, 500),
+        textOf(approvalButton)
+      ].join('|'))
+    : null;
+
+  const stopAvailable = buttons.some(isStop);
+  const explicitStreaming = !!lastAssistant && !!lastAssistant.querySelector(
+    '[aria-busy="true"],[data-testid*="streaming"],.result-streaming'
+  );
+  const assistantStreaming = stopAvailable || explicitStreaming;
+  const awaitingAssistant = userTurns.length > assistantTurns.length;
+  const waitingForApproval = !!approvalButton;
+  const assistantSettled = lastAssistantAfterLastUser && copyAvailable &&
+    !assistantStreaming && !waitingForApproval && !awaitingAssistant;
+
+  const visibleAssistantMessages = assistantTurns
+    .filter(visible)
+    .map((el) => textOf(el))
+    .filter(Boolean);
+
+  const visibleLabels = [...document.querySelectorAll('button,[role="button"]')]
+    .filter(visible)
+    .map((el) => textOf(el) || aria(el));
+  const activeModel = visibleLabels.find((text) => /gpt[- ]?5(?:\.6)?(?:\s+sol)?|gpt[- ]?4|o[134]/i.test(text)) || null;
+  const activeThinking = visibleLabels.find((text) => /extra high|极高|high|高|medium|中|low|低/i.test(text)) || null;
+
+  const authControl = buttons.find((b) =>
+    /^(log in|login|sign in|登录|登入)$/i.test(norm(textOf(b) || aria(b)))
+  ) || null;
+  const hostIsChatGpt = /(^|\.)chatgpt\.com$|(^|\.)chat\.openai\.com$/i.test(location.hostname);
+  const conversationLoaded = hostIsChatGpt && (!!composer || userTurns.length > 0 || assistantTurns.length > 0);
 
   return {
     url: location.href,
     title: document.title,
     user_turns: userTurns.length,
     assistant_turns: assistantTurns.length,
-    stop_available: buttons.some(isStop),
-    waiting_for_approval: buttons.some(isApproval),
-    rate_limit_notice: /(too many requests|request.*frequent|请求过于频繁|请求太频繁)/i.test(pageText),
+    stop_available: stopAvailable,
+    waiting_for_approval: waitingForApproval,
+    rate_limit_notice: !!rateLimitContainer,
+    rate_limit_dialog_visible: !!rateLimitContainer,
+    rate_limit_ack_available: !!ackButton,
+    connection_interrupted: !!connectionContainer,
+    conversation_too_long: !!tooLongContainer,
+    conversation_loaded: conversationLoaded,
+    authentication_required: !!authControl && !composerReady,
+    composer_ready: composerReady,
+    send_unavailable: !enabledSend,
+    assistant_streaming: assistantStreaming,
+    assistant_message_settled: assistantSettled,
     copy_available_on_last_assistant: copyAvailable,
-    response_actions_complete: copyAvailable && actionButtons.length >= 1,
+    response_actions_complete: assistantSettled && actionButtons.length >= 1,
     response_action_turn_bound_to_last: lastAssistantAfterLastUser && assistantTurns.length >= userTurns.length,
-    awaiting_assistant: userTurns.length > assistantTurns.length,
+    awaiting_assistant: awaitingAssistant,
     assistant_text: norm(lastAssistant?.innerText || lastAssistant?.textContent || ''),
+    visible_assistant_messages: visibleAssistantMessages,
     composer_text: composerText,
+    approval_card_key: approvalKey,
+    observed_model: activeModel,
+    observed_thinking_effort: activeThinking,
   };
 })()
 "#;
@@ -259,7 +486,6 @@ const SEND_PROMPT_SCRIPT: &str = r#"
   const norm = (v) => String(v ?? '').replace(/\s+/g, ' ').trim();
   const composer = document.querySelector('#prompt-textarea, textarea, [contenteditable="true"][data-lexical-editor="true"], [contenteditable="true"]');
   if (!composer) return {ok:false, reason:'composer-not-found'};
-
   composer.focus();
   if ('value' in composer) {
     const proto = Object.getPrototypeOf(composer);
@@ -275,13 +501,11 @@ const SEND_PROMPT_SCRIPT: &str = r#"
     composer.appendChild(p);
     composer.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:prompt}));
   }
-
   const buttons = [...document.querySelectorAll('button')];
   const send = buttons.find((b) => {
     const s = [b.getAttribute('aria-label'), b.getAttribute('data-testid'), b.innerText].map(norm).join(' ');
     return /(send|发送)/i.test(s) && !b.disabled;
   }) || document.querySelector('button[data-testid="send-button"]:not(:disabled)');
-
   if (!send) return {ok:false, reason:'send-button-not-found'};
   send.click();
   return {ok:true};
@@ -291,8 +515,13 @@ const SEND_PROMPT_SCRIPT: &str = r#"
 const APPROVE_ONCE_SCRIPT: &str = r#"
 (() => {
   const norm = (v) => String(v ?? '').replace(/\s+/g, ' ').trim();
-  const buttons = [...document.querySelectorAll('button')];
-  const exact = buttons.find((b) => /^(allow once|允许一次|approve once|仅允许本次|允许本次)$/i.test(norm(b.innerText || b.textContent || b.getAttribute('aria-label'))));
+  const visible = (el) => !!el && el.getClientRects().length > 0 &&
+    getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+  const exact = [...document.querySelectorAll('button')]
+    .filter(visible)
+    .find((b) => /^(allow once|允许一次|approve once|仅允许本次|允许本次)$/i.test(
+      norm(b.innerText || b.textContent || b.getAttribute('aria-label'))
+    ));
   if (!exact) return {clicked:false};
   exact.click();
   return {clicked:true, label:norm(exact.innerText || exact.getAttribute('aria-label'))};
@@ -302,12 +531,73 @@ const APPROVE_ONCE_SCRIPT: &str = r#"
 const DISMISS_RATE_LIMIT_SCRIPT: &str = r#"
 (() => {
   const norm = (v) => String(v ?? '').replace(/\s+/g, ' ').trim();
-  const pageText = norm(document.body?.innerText || '');
-  if (!/(too many requests|request.*frequent|请求过于频繁|请求太频繁)/i.test(pageText)) return {clicked:false};
-  const button = [...document.querySelectorAll('button')].find((b) => /^(got it|ok|明白了|知道了)$/i.test(norm(b.innerText || b.textContent || b.getAttribute('aria-label'))));
+  const visible = (el) => !!el && el.getClientRects().length > 0 &&
+    getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+  const isRateLimitText = (text) => /(too many requests|request(?:s)?\s+(?:are\s+)?too frequent|请求过于频繁|请求太频繁)/i.test(text);
+  const containers = [...document.querySelectorAll(
+    '[role="dialog"],[role="alert"],[role="status"],[aria-live="assertive"],[aria-live="polite"],[data-testid*="toast"],[data-testid*="modal"],[data-testid*="error"]'
+  )].filter(visible);
+  const current = containers.find((el) => isRateLimitText(norm(el.innerText || el.textContent || '')));
+  if (!current) return {clicked:false};
+  const button = [...current.querySelectorAll('button')]
+    .filter(visible)
+    .find((b) => /^(got it|ok|okay|明白了|知道了)$/i.test(
+      norm(b.innerText || b.textContent || b.getAttribute('aria-label'))
+    ));
   if (!button) return {clicked:false};
   button.click();
   return {clicked:true};
+})()
+"#;
+
+const ENSURE_EXECUTION_PROFILE_SCRIPT: &str = r#"
+(async () => {
+  const requestedModel = __MODEL_JSON__;
+  const requestedThinking = __THINKING_JSON__;
+  const norm = (v) => String(v ?? '').replace(/\s+/g, ' ').trim();
+  const compact = (v) => norm(v).toLowerCase().replace(/\s+/g, ' ');
+  const all = () => [...document.querySelectorAll('button,[role="button"],[role="menuitem"],[role="option"]')];
+  const label = (el) => norm(el?.innerText || el?.textContent || el?.getAttribute?.('aria-label') || el?.getAttribute?.('data-testid') || '');
+  const exactish = (observed, requested) => {
+    const o = compact(observed);
+    const r = compact(requested);
+    return !!o && (o === r || o.includes(r));
+  };
+  const visible = (el) => !!el && el.getClientRects().length > 0;
+  const findVisible = (predicate) => all().find((el) => visible(el) && predicate(label(el)));
+  const observed = () => {
+    const labels = all().filter(visible).map(label);
+    return {
+      model: labels.find((text) => /gpt[- ]?5|gpt[- ]?4|o[134]/i.test(text)) || null,
+      thinking_effort: labels.find((text) => /extra high|极高|high|高|medium|中|low|低/i.test(text)) || null,
+    };
+  };
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 180));
+
+  let state = observed();
+  if (!exactish(state.model, requestedModel)) {
+    const opener = findVisible((text) => /model|模型|gpt[- ]?5|gpt[- ]?4|o[134]/i.test(text));
+    if (!opener) return state;
+    opener.click();
+    await settle();
+    const option = findVisible((text) => exactish(text, requestedModel));
+    if (!option) return observed();
+    option.click();
+    await settle();
+  }
+
+  state = observed();
+  if (!exactish(state.thinking_effort, requestedThinking)) {
+    const opener = findVisible((text) => /thinking|reasoning|思考|推理|extra high|极高|high|高|medium|中|low|低/i.test(text));
+    if (!opener) return state;
+    opener.click();
+    await settle();
+    const option = findVisible((text) => exactish(text, requestedThinking));
+    if (!option) return observed();
+    option.click();
+    await settle();
+  }
+  return observed();
 })()
 "#;
 
@@ -315,25 +605,40 @@ const DISMISS_RATE_LIMIT_SCRIPT: &str = r#"
 mod tests {
     use super::*;
 
+    fn target(id: &str, title: &str, url: &str) -> TargetInfo {
+        TargetInfo {
+            id: id.into(),
+            kind: "page".into(),
+            title: title.into(),
+            url: url.into(),
+            websocket_debugger_url: Some(format!("ws://localhost/{id}")),
+        }
+    }
+
     #[test]
     fn target_prefers_chatgpt_page() {
         let targets = vec![
-            TargetInfo {
-                kind: "page".into(),
-                title: "Other".into(),
-                url: "https://example.com".into(),
-                websocket_debugger_url: Some("ws://localhost/1".into()),
-            },
-            TargetInfo {
-                kind: "page".into(),
-                title: "ChatGPT".into(),
-                url: "https://chatgpt.com/c/abc".into(),
-                websocket_debugger_url: Some("ws://localhost/2".into()),
-            },
+            target("1", "Other", "https://example.com"),
+            target("2", "ChatGPT", "https://chatgpt.com/c/abc"),
         ];
-        assert_eq!(
-            select_chatgpt_target(&targets).unwrap().url,
-            "https://chatgpt.com/c/abc"
+        assert_eq!(select_chatgpt_target(&targets).unwrap().id, "2");
+    }
+
+    #[test]
+    fn approval_script_is_exact_and_never_mentions_always_allow() {
+        assert!(
+            APPROVE_ONCE_SCRIPT
+                .contains("^(allow once|允许一次|approve once|仅允许本次|允许本次)$")
         );
+        assert!(
+            !APPROVE_ONCE_SCRIPT
+                .to_ascii_lowercase()
+                .contains("always allow")
+        );
+    }
+
+    #[test]
+    fn profile_script_is_fail_closed_when_picker_option_is_missing() {
+        assert!(ENSURE_EXECUTION_PROFILE_SCRIPT.contains("if (!option) return observed()"));
     }
 }

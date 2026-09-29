@@ -55,7 +55,7 @@ Use cases and ports:
 - recovery policy;
 - BrowserPort;
 - Clock;
-- future RunStore, EventJournal, ProfileManager and EvidenceSink ports.
+- RunJournal and QueueStore ports; future ProfileManager and EvidenceSink ports.
 
 Application decides what effect should happen. It never knows selectors, PIDs, SQLite schemas or profile paths.
 
@@ -67,7 +67,7 @@ Owns:
 - prompt composer interaction;
 - exact Allow once action;
 - rate-limit notice dismissal;
-- future verified model/thinking selection;
+- verified model/thinking selection with fail-closed observation;
 - sanitized DOM fixture contract tests.
 
 The adapter reports facts and executes requested effects; it does not choose recovery policy.
@@ -83,7 +83,7 @@ Owns:
 
 It never inspects ChatGPT DOM.
 
-### future crates/adapters/sqlite-store
+### crates/adapters/sqlite-store
 
 Use SQLite WAL for durable state:
 - tasks;
@@ -436,3 +436,12 @@ Architecture is a release gate, not documentation advice.
 10. run real authenticated Linux acceptance.
 
 Do not split into distributed services unless profiling or isolation evidence proves the modular monolith insufficient.
+
+
+## 18. Authenticated acceptance evidence
+
+Gate D is an evidence layer over the shipping composition root, not a second automation implementation. The repository-owned matrix calls the real CLI/runtime and records one status for each required live scenario. Normal send, cross-process RecoveryEnvelope resume, multi-turn continuity, and Work/Acceptance switching are exercised directly. Rare/destructive conditions are driven by the versioned repository-owned scripts/real-environment-scenario-driver.py, which invokes the shipping binary and uses real CDP target close, opt-in host browser-process termination/restart, or opt-in host network-interface interruption. The workflow may accept an explicit external driver override, but the default and certification-ready implementation is owned by the repository at the exact tested commit.
+
+Neither the repository driver nor an override may fabricate ChatGPT semantic state by injecting synthetic dialogs or assistant turns. Real rate-limit and conversation-too-long certification requires a naturally observed condition; if it is absent the repository driver records not-configured. Passed real-environment evidence is bound to exact commit, workflow run ID, real_chatgpt=true, synthetic_ui=false, canonical conversation URL, concrete observations, scenario artifact hashes, and the selected driver SHA-256. Missing host permissions or natural preconditions remain not-configured and cannot be promoted to passed by documentation or lower-layer tests.
+
+Every new queue run copies the authoritative QueueTask conversation_kind into its durable RunCheckpoint. This keeps crash/restart evidence aligned with the shipping Work/Acceptance owner even when the new run did not originate from a RecoveryEnvelope checkpoint.

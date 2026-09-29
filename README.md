@@ -11,10 +11,11 @@ The authoritative migration contract is `docs/specs/rust-linux-chatgpt-auto-conf
 This is a modular monolith with strict Hexagonal Architecture boundaries:
 
 - `crates/domain` — pure invariants and durable value types;
-- `crates/application` — use cases, recovery policy, Browser/Clock ports;
+- `crates/application` — use cases, recovery policy, Browser/Clock/RunJournal/QueueStore ports;
 - `crates/adapters/chatgpt-cdp` — ChatGPT/CDP implementation;
 - `crates/adapters/linux-browser` — Linux Chromium process implementation;
-- `crates/runtime` — composition root and future actor supervisor;
+- `crates/adapters/sqlite-store` — SQLite WAL durable queue, event journal, approval fingerprints and worker leases;
+- `crates/runtime` — composition root plus Supervisor/AccountBrowserActor/RunWorker ownership;
 - `crates/cli` — thin operator surface.
 
 Run the architecture gate with `./scripts/check-architecture.sh`.
@@ -40,10 +41,43 @@ A dedicated browser profile is created under the local data directory. Log in to
 Default recovery policy:
 - unconfirmed send after 90s -> resend original prompt;
 - no progress for 15m -> reload current conversation;
-- rate limit -> dismiss notice, wait 5m, at most 3 times;
+- rate limit -> require a currently visible semantic rate-limit surface, dismiss it, wait 5m, at most 3 pauses; if it remains beyond the threshold, open a fresh conversation through RecoveryEnvelope rather than failing the task;
 - no terminal answer after 30m -> send 继续完成所有;
 - completion -> latest assistant turn has stable Copy action evidence.
 
 ## Security
 
 This runtime does not request or export your ChatGPT password, OTP, cookies, or API tokens. Authentication remains in the user-owned Chromium profile.
+
+
+## Durable queue
+
+```bash
+./target/release/fabushi-chatgpt-auto-confirm --db ./queue.sqlite3 queue-enqueue \
+  --task-id task-1 \
+  --prompt "完成这个任务" \
+  --model "GPT-5.6 Sol" \
+  --thinking "Extra High"
+
+./target/release/fabushi-chatgpt-auto-confirm --db ./queue.sqlite3 queue-status
+
+./target/release/fabushi-chatgpt-auto-confirm \
+  --db ./queue.sqlite3 \
+  --cdp http://127.0.0.1:9222 \
+  queue-run-once --account-id default
+```
+
+The durable runtime uses append-only run events, materialized run state, worker leases with heartbeat, approval fingerprints, dependency/resource-lock scheduling, task-report validation and RecoveryEnvelope crash handoff.
+
+## Acceptance
+
+The normal `ci` workflow runs architecture, fmt, workspace tests, clippy, release build, and a real headless Chromium fixture. Production ChatGPT acceptance is deliberately separate in `authenticated-linux-e2e.yml` because it requires a user-owned authenticated Linux browser session. A fixture or mock is never reported as production ChatGPT evidence.
+
+
+### Authenticated Gate D matrix
+
+The self-hosted authenticated workflow now has two modes. A normal dispatch runs the built-in live scenarios that can be exercised safely from the repository itself: normal send, same-conversation multi-turn recovery, Work completion, independent Acceptance completion, a cross-process SQLite rehydration boundary, Work -> Acceptance -> Work switching, RecoveryEnvelope replay, and proof that a terminal Acceptance is not claimed again.
+
+The seven rare or destructive scenarios (target crash, browser crash, dispatch-confirmation timeout, continuation, disconnection, real rate limit, and real conversation-too-long) now use the versioned repository-owned driver scripts/real-environment-scenario-driver.py by default. It drives the shipping binary against the already authenticated real ChatGPT session and uses only real CDP target close, opt-in Chromium process kill/restart, and opt-in Linux network-interface faults. It never injects fake dialogs, assistant text, or synthetic ChatGPT UI. The workflow still accepts scenario_driver as an explicit override, but final certification no longer depends on an unknown runner-installed executable.
+
+Every passed real-environment scenario binds the exact commit and workflow run ID, real_chatgpt=true, synthetic_ui=false, a canonical conversation URL, concrete observations, and at least one hashed scenario artifact. Rate-limit and conversation-too-long may only pass when the current real ChatGPT page naturally exposes the condition; if it does not, the repository driver reports not-configured. Run certify=false for a preflight artifact and certify=true only for final certification. Destructive browser/network faults require the corresponding workflow opt-in inputs. See docs/operations/authenticated-linux-e2e.md for the runbook and evidence schema.

@@ -35,13 +35,13 @@ Concrete infrastructure implements application ports and points inward:
 
 - `crates/adapters/chatgpt-cdp` -> application/domain
 - `crates/adapters/linux-browser` -> OS/process only
-- future `crates/adapters/sqlite-store` -> application/domain
+- `crates/adapters/sqlite-store` -> application/domain
 
 `runtime` is the composition root. Recovery policy belongs in `application`, terminal/canonical-URL invariants belong in `domain`, and browser selectors/CDP details belong only in adapters.
 
 CI runs `scripts/check-architecture.sh` to reject dependency inversion and selector leakage.
 
-Production topology is one authenticated browser process per account profile, one leased page target per active run, with Supervisor -> AccountBrowserActor -> RunWorker ownership. Durable recovery will use SQLite WAL, append-only run events, materialized run state, approval fingerprints, and worker leases.
+Production topology is one authenticated browser process per account profile, one leased page target per active run, with Supervisor -> AccountBrowserActor -> RunWorker ownership. Durable recovery uses SQLite WAL, append-only run events, materialized run state, approval fingerprints, and worker leases.
 
 ## 4. Linux browser model
 
@@ -96,7 +96,7 @@ This ports the source QueueTerminalDecision.swift rule that Stop disappeared is 
 - Detect exact Allow once, 允许一次, Approve once, 仅允许本次, or 允许本次.
 - Click only that exact current-card action.
 - Never click persistent/global authorization.
-- Persisted fingerprint deduplication from the Swift queue is required before full replacement is declared.
+- Persisted fingerprint deduplication is implemented in the SQLite run journal with bounded attempts and durable settlement.
 
 ### 5.4 URL provenance
 
@@ -104,18 +104,18 @@ A conversation URL becomes durable only after ChatGPT exposes a stable canonical
 
 Do not persist transient local or startup URLs as recovery URLs. The final report records the URL only from a terminal snapshot.
 
-Canonical URL validation is now implemented in `crates/domain`; the durable state store remains required for full source parity.
+Canonical URL validation is implemented in `crates/domain`, and the SQLite materialized run state plus RecoveryEnvelope persist the canonical URL for crash recovery.
 
 ### 5.5 Recovery timers
 
 Default policy:
 - 90 seconds: dispatch not confirmed -> resend original prompt.
 - 15 minutes with no observable progress -> reload the current conversation.
-- Too many requests / 请求过于频繁 -> click Got it / 明白了 when present, pause 5 minutes, maximum 3 rate-limit pauses before failing the run.
+- Too many requests / 请求过于频繁 -> require a currently visible semantic dialog/notice, click Got it / 明白了 when present, pause 5 minutes, maximum 3 rate-limit pauses; if the condition is still present after the threshold, emit FreshConversationRequested and resume through a fresh-conversation RecoveryEnvelope instead of simply failing the run.
 - 30 minutes without terminal completion, when not actively streaming -> send 继续完成所有.
 - Continue until stable Copy-button terminal evidence or the configured global run timeout.
 
-Future parity work must also implement the source policy for repeated connection interruptions and fresh-chat handoff with recovery context.
+Connection-interruption evidence is projected into snapshots and durable run progress. Crash/lease recovery reconstructs a versioned RecoveryEnvelope containing the original goal, acceptance prompt, live assistant progress, completed/remaining/blocker state, and canonical conversation URL.
 
 ### 5.6 Model and thinking effort
 
@@ -129,27 +129,27 @@ Target contract:
 - verify the selected UI value before sending;
 - fail closed if the requested setting cannot be verified.
 
-This is specified but not yet implemented in the initial Rust cut because it requires a live current ChatGPT DOM acceptance fixture.
+The CDP adapter now attempts model/thinking selection against the live UI, re-observes the selected values, and application dispatch fails closed unless they match the requested ExecutionProfile. The local Chromium fixture verifies the observation path; current production ChatGPT UI behavior is reserved for Gate D.
 
 ## 6. Source migration ledger
 
 | Source responsibility | Rust destination | Initial state |
 |---|---|---|
-| Models.swift pure run/report state | crates/domain | partial |
+| Models.swift pure run/report state | crates/domain | implemented for queue/run/report/recovery state |
 | QueueTerminalDecision.swift | crates/domain | implemented |
 | IPCAndCDP.swift CDP portion | crates/adapters/chatgpt-cdp | implemented for Chromium CDP |
 | macOS Unix IPC to ChatGPT.app | crates/adapters/linux-browser + CDP path | not applicable to browser runtime |
 | ApprovalAccessibility.swift | crates/adapters/chatgpt-cdp | AX path intentionally removed on Linux |
-| ApprovalWatcher.swift | application use case + CDP adapter | partial |
-| QueueMonitoring.swift | crates/application recovery state machine | partial |
-| QueueWorker.swift hidden worker lifecycle | runtime Supervisor/RunWorker | pending |
-| QueueState.swift durable queue | future sqlite-store adapter | pending |
-| ChatScripts.swift | crates/adapters/chatgpt-cdp evaluated JS | partial |
-| TaskReportParsing.swift | domain/report parser | pending |
-| Node Actions controller scripts | future Rust orchestration | pending |
-| account/session export scripts | secure browser-profile boundary | redesign required |
+| ApprovalWatcher.swift | application use case + CDP adapter | implemented for exact current-card approval + durable dedupe |
+| QueueMonitoring.swift | crates/application recovery state machine | implemented for dispatch/reload/rate-limit/continuation/terminal policy |
+| QueueWorker.swift hidden worker lifecycle | runtime Supervisor/AccountBrowserActor/RunWorker | implemented for leased target worker lifecycle and crash requeue |
+| QueueState.swift durable queue | crates/adapters/sqlite-store | implemented for task/run journal, revisions, dependencies, resource locks, waiting, retries and worker leases |
+| ChatScripts.swift | crates/adapters/chatgpt-cdp evaluated JS | implemented for Linux-required prompt/approval/notice/snapshot/profile behavior |
+| TaskReportParsing.swift | domain/report parser | implemented with V1 report/wait validation |
+| Node Actions controller scripts | GitHub CI + runtime queue CLI | redesigned: CI/fixture/evidence orchestration is native GitHub Actions; durable task orchestration is Rust CLI/runtime |
+| account/session export scripts | secure user-owned Chromium profile boundary | redesigned: credential/cookie export intentionally removed; profile reuse and local CDP only |
 
-Partial means the Linux automation path exists, not that source parity is complete.
+The remaining replacement certification boundary is production evidence: lower-layer tests cannot substitute for Gate D.
 
 ## 7. CLI contract
 
@@ -159,8 +159,17 @@ cargo run -p fabushi-chatgpt-auto-confirm -- browser --headed true
 Inspect current page:
 cargo run -p fabushi-chatgpt-auto-confirm -- status
 
-Send and monitor:
-cargo run -p fabushi-chatgpt-auto-confirm -- send --prompt "完成这个任务" --auto-confirm true
+Send and monitor with fail-closed execution profile verification:
+cargo run -p fabushi-chatgpt-auto-confirm -- send --prompt "完成这个任务" --model "GPT-5.6 Sol" --thinking "Extra High" --auto-confirm true
+
+Enqueue a durable task:
+cargo run -p fabushi-chatgpt-auto-confirm -- --db ./queue.sqlite3 queue-enqueue --task-id task-1 --prompt "完成这个任务"
+
+Run one durable queue claim:
+cargo run -p fabushi-chatgpt-auto-confirm -- --db ./queue.sqlite3 --cdp http://127.0.0.1:9222 queue-run-once --account-id default
+
+Inspect durable state:
+cargo run -p fabushi-chatgpt-auto-confirm -- --db ./queue.sqlite3 queue-status
 
 One-shot approval:
 cargo run -p fabushi-chatgpt-auto-confirm -- approve-once
@@ -193,16 +202,43 @@ A Chromium fixture must prove:
 
 ### Gate D — real authenticated Linux ChatGPT
 
-Human-owned login, no credential injection. Evidence must record:
-- exact commit SHA;
+Human-owned login, no credential injection. The repository-owned workflow is a scenario matrix, not a single send. It must bind the exact commit and distinguish repository-owned live scenarios from external real-environment fault/precondition scenarios.
+
+Required scenario matrix:
+1. normal send and final reply;
+2. multi-turn continuation in the same canonical conversation;
+3. Work completion;
+4. Acceptance/planning completion;
+5. target crash recovery;
+6. browser crash recovery;
+7. process restart recovery;
+8. message-confirmation timeout recovery;
+9. continuation;
+10. disconnection;
+11. real rate-limit handling;
+12. real conversation-too-long recovery;
+13. Work -> Acceptance -> Work switching;
+14. RecoveryEnvelope handoff/replay;
+15. final completion does not create another Acceptance conversation.
+
+The built-in workflow exercises the safely reproducible live subset directly through the shipping CLI/runtime/SQLite path. Gate D also ships a repository-owned, versioned real-environment scenario driver at scripts/real-environment-scenario-driver.py and uses it by default for target crash, browser crash, message-confirmation timeout, continuation, disconnection, rate-limit, and conversation-too-long. The driver operates the shipping binary plus real authenticated ChatGPT and only uses allowed CDP target close, host process SIGKILL, or opt-in Linux network-interface fault controls; it never fabricates dialogs, assistant turns, or other ChatGPT UI state. An external driver path is retained only as an explicit override and is never required for final certification. If a required host permission or real precondition is unavailable, the repository-owned driver reports not-configured. Rate-limit and conversation-too-long only count when the condition was naturally observed on real ChatGPT and synthetic_ui=false.
+
+Evidence must record:
+- exact commit SHA and GitHub Actions run;
 - Linux distro and arch;
 - Chromium version;
-- CLI command;
-- starting conversation URL;
-- canonical final /c/... URL;
-- prompt dispatch proof;
-- stable terminal Copy proof;
+- redacted command metadata;
+- starting/canonical conversation URLs where applicable;
+- stable terminal completion evidence;
+- Work/Acceptance conversation-kind sequence;
+- RecoveryEnvelope persistence across a new process;
+- per-scenario passed/failed/not-configured status;
+- repository-owned scenario-driver SHA-256, or the explicit override SHA-256 when an override is used;
+- per-scenario artifact SHA-256 values, workflow run ID, real_chatgpt=true, synthetic_ui=false, canonical conversation URL and concrete observations for every passed real-environment scenario;
+- SHA-256 of the final matrix artifact;
 - auto-confirm proof when an actual Allow once card appears.
+
+A preview run may succeed with certification_complete=false so missing external conditions can be diagnosed. A certification run must set certify=true and fail unless all 15 scenarios are passed.
 
 ### Gate E — full source replacement
 
@@ -230,9 +266,9 @@ A real acceptance record must bind:
 
 Mocks prove code behavior only. They do not prove ChatGPT production behavior.
 
-## 10. Initial implementation status
+## 10. Current implementation status
 
-Implemented in the first Rust cut:
+Implemented on the migration branch after the initial Rust cut:
 - Rust workspace and Linux CLI;
 - canonical modular-monolith/hexagonal architecture with ADRs;
 - compile-time crate boundaries plus CI architecture gate;
@@ -249,12 +285,19 @@ Implemented in the first Rust cut:
 - 5-minute rate-limit pause, max 3;
 - 30-minute 继续完成所有 continuation;
 - deterministic application tests for 90-second resend, 15-minute reload, 5-minute rate-limit handling and 30-minute continuation;
-- source-aligned domain tests for terminal semantics.
+- source-aligned domain tests for terminal semantics;
+- SQLite WAL durable queue, materialized run records, append-only events, revision checks and worker leases;
+- durable approval fingerprint attempts/settlement;
+- dependency/resource-lock scheduling, waiting state, retry and continuation limits;
+- Supervisor -> AccountBrowserActor -> RunWorker target ownership with lease heartbeat and crash requeue;
+- source-compatible task-report and wait-marker parsing;
+- versioned RecoveryEnvelope preserving original goal, acceptance prompt, live progress, completed/remaining/blockers and canonical URL;
+- fail-closed ExecutionProfile verification for model and thinking effort;
+- Linux profile directory mode 0700;
+- real headless Chromium fixture job in GitHub Actions;
+- separate self-hosted authenticated Linux ChatGPT 15-scenario evidence workflow with exact-commit matrix, cross-process RecoveryEnvelope/Work-Acceptance coverage, repository-owned real-environment scenario driver by default, optional explicit driver override, and per-scenario/final artifact hash binding.
 
 Not yet claimed complete:
-- live authenticated ChatGPT Linux E2E;
-- deterministic model/thinking picker;
-- full durable queue parity;
-- source account/session/Actions orchestration parity.
+- Gate D live authenticated ChatGPT Linux E2E evidence: the full matrix harness is implemented, but this repository still lacks a retained certify=true run where all 15 real-environment scenarios passed on a user-owned logged-in Linux browser session.
 
-Until Gates D and E pass, this repository is a working Linux Rust automation implementation and migration base, not a certified complete replacement of the Swift/Node source.
+The source account/session export path is intentionally not reproduced because the security contract forbids credential/cookie export. GitHub-hosted CI proves Gates A-C plus the Gate D harness contract only. Full replacement certification remains blocked until Gate D is executed with certify=true on an authenticated self-hosted Linux runner, all 15 matrix scenarios are passed without synthetic UI substitution, and the exact-SHA evidence artifact is retained.

@@ -1,0 +1,119 @@
+name: authenticated-linux-e2e
+
+on:
+  workflow_dispatch:
+    inputs:
+      cdp_endpoint:
+        description: "CDP endpoint reachable from a user-owned authenticated Linux runner"
+        required: true
+        default: "http://127.0.0.1:9222"
+      prompt:
+        description: "Baseline live ChatGPT acceptance prompt"
+        required: true
+        default: "回复：Linux E2E PASS"
+      model:
+        description: "Required model"
+        required: true
+        default: "GPT-5.6 Sol"
+      thinking:
+        description: "Required thinking effort"
+        required: true
+        default: "Extra High"
+      scenario_driver:
+        description: "Optional override path for the scenario driver; empty uses the repository-owned driver from this exact commit"
+        required: false
+        default: ""
+      allow_browser_crash:
+        description: "Allow the repository driver to SIGKILL and recover the authenticated Chromium process for the browser-crash scenario"
+        required: true
+        type: boolean
+        default: false
+      allow_network_faults:
+        description: "Allow the repository driver to temporarily bring the default Linux network interface down/up for real fault scenarios"
+        required: true
+        type: boolean
+        default: false
+      network_interface:
+        description: "Optional Linux interface for network faults; empty auto-detects the default route interface"
+        required: false
+        default: ""
+      fault_window_seconds:
+        description: "Real host/network fault observation window"
+        required: true
+        type: number
+        default: 12
+      certify:
+        description: "Fail the workflow unless all 15 required real ChatGPT scenarios pass"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  authenticated-chatgpt:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 720
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
+
+      - name: Build exact-HEAD acceptance binary
+        run: cargo build --release -p fabushi-chatgpt-auto-confirm
+
+      - name: Run authenticated Gate D matrix
+        id: gate-d
+        shell: bash
+        env:
+          CDP_ENDPOINT: "${{ inputs.cdp_endpoint }}"
+          ACCEPTANCE_PROMPT: "${{ inputs.prompt }}"
+          REQUIRED_MODEL: "${{ inputs.model }}"
+          REQUIRED_THINKING: "${{ inputs.thinking }}"
+          SCENARIO_DRIVER: "${{ inputs.scenario_driver }}"
+          ALLOW_BROWSER_CRASH: "${{ inputs.allow_browser_crash }}"
+          ALLOW_NETWORK_FAULTS: "${{ inputs.allow_network_faults }}"
+          NETWORK_INTERFACE: "${{ inputs.network_interface }}"
+          FAULT_WINDOW_SECONDS: "${{ inputs.fault_window_seconds }}"
+          CERTIFY: "${{ inputs.certify }}"
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          args=(
+            --binary "$GITHUB_WORKSPACE/target/release/fabushi-chatgpt-auto-confirm"
+            --cdp "$CDP_ENDPOINT"
+            --evidence-dir "$GITHUB_WORKSPACE/evidence"
+            --commit "$GITHUB_SHA"
+            --workflow-run-id "$GITHUB_RUN_ID"
+            --prompt "$ACCEPTANCE_PROMPT"
+            --model "$REQUIRED_MODEL"
+            --thinking "$REQUIRED_THINKING"
+            --fault-window-seconds "$FAULT_WINDOW_SECONDS"
+          )
+          if [[ -n "$SCENARIO_DRIVER" ]]; then
+            args+=(--external-driver "$SCENARIO_DRIVER")
+          fi
+          if [[ "$ALLOW_BROWSER_CRASH" == "true" ]]; then
+            args+=(--allow-browser-crash)
+          fi
+          if [[ "$ALLOW_NETWORK_FAULTS" == "true" ]]; then
+            args+=(--allow-network-faults)
+          fi
+          if [[ -n "$NETWORK_INTERFACE" ]]; then
+            args+=(--network-interface "$NETWORK_INTERFACE")
+          fi
+          if [[ "$CERTIFY" == "true" ]]; then
+            args+=(--certify)
+          fi
+          python3 scripts/authenticated-e2e-matrix.py "${args[@]}" | tee evidence/matrix-console.json
+
+      - name: Upload exact-HEAD Gate D evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: authenticated-linux-e2e-${{ github.sha }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 30
