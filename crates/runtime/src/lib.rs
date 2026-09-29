@@ -4,7 +4,8 @@ use fabushi_chatgpt_application::{
     Clock, OwnershipStore, RunPrompt, parse_task_report, parse_task_wait,
 };
 use fabushi_chatgpt_domain::{
-    RecoveryEnvelope, RunEvent, RunEventKind, RunReport, RunState, TaskReportStatus,
+    ConversationKind, RecoveryEnvelope, RunEvent, RunEventKind, RunReport, RunState,
+    TaskReportStatus,
 };
 use std::path::Path;
 use std::sync::{
@@ -821,8 +822,38 @@ impl RunWorker {
                     return Ok(());
                 }
                 if report.status == TaskReportStatus::Complete && report.all_tasks_complete {
-                    self.store
-                        .settle_task(task, Some(&report), None, None, None)?;
+                    if task.conversation_kind == ConversationKind::Work
+                        && task
+                            .acceptance_prompt
+                            .as_deref()
+                            .is_some_and(|value| !value.trim().is_empty())
+                    {
+                        let mut acceptance_task = task.clone();
+                        acceptance_task.conversation_kind = ConversationKind::Acceptance;
+                        acceptance_task.prompt = acceptance_handoff_prompt(task, run_report);
+                        acceptance_task.recovery_context = None;
+                        self.store.requeue_conversation(
+                            &acceptance_task,
+                            &report,
+                            "work_completed_start_acceptance",
+                        )?;
+                    } else {
+                        self.store
+                            .settle_task(task, Some(&report), None, None, None)?;
+                    }
+                    return Ok(());
+                }
+
+                if task.conversation_kind == ConversationKind::Acceptance {
+                    let mut work_task = task.clone();
+                    work_task.conversation_kind = ConversationKind::Work;
+                    work_task.prompt = work_handoff_prompt(task, run_report, &report);
+                    work_task.recovery_context = None;
+                    self.store.requeue_conversation(
+                        &work_task,
+                        &report,
+                        "acceptance_incomplete_return_to_work",
+                    )?;
                     return Ok(());
                 }
 
@@ -1029,6 +1060,80 @@ impl Supervisor {
             "runs": snapshot.runs,
         }))
     }
+}
+
+fn acceptance_handoff_prompt(task: &QueueTask, run_report: &RunReport) -> String {
+    let acceptance_prompt = task
+        .acceptance_prompt
+        .as_deref()
+        .unwrap_or("独立判断原始目标是否已经真正完成；不要代替 Work 执行。");
+    format!(
+        r#"请作为独立的规划与验收会话。你只负责验收和安排下一步，不要代替 Work 执行。
+
+## 原始目标
+{original_goal}
+
+## 本轮验收要求
+{acceptance_prompt}
+
+## 最新 Work 会话自然语言结果
+{work_result}
+
+## 验收输出协议
+完成判断后必须在自然语言结论末尾输出且只输出一个机器可读报告块：
+MAHAYANA_TASK_REPORT_V1_BEGIN
+{{"protocol":"mahayana.task-report.v1","task_id":"{task_id}","applied_task_revision":{revision},"applied_spec_digest":"","status":"complete|incomplete|blocked","all_tasks_complete":true|false,"summary":"验收结论","completed":["已有证据证明的完成项"],"remaining":["仍未完成项"],"blockers":["真实阻塞"],"verification":["验收证据"],"next_task":"未完成时给下一 Work 轮完整执行要求；完成时必须为空"}}
+MAHAYANA_TASK_REPORT_V1_END
+
+只有全部目标确有证据完成时才使用 status=complete 且 all_tasks_complete=true。未完成时 next_task 必须包含下一 Work 轮可直接执行的完整要求。"#,
+        original_goal = task.original_prompt,
+        acceptance_prompt = acceptance_prompt,
+        work_result = run_report.assistant_text,
+        task_id = task.id,
+        revision = task.current_revision,
+    )
+}
+
+fn work_handoff_prompt(
+    task: &QueueTask,
+    run_report: &RunReport,
+    report: &fabushi_chatgpt_application::AutomationTaskReport,
+) -> String {
+    format!(
+        r#"这是独立验收会话判定“尚未完成”后的下一 Work 轮。继续实际执行，不要只做方案或审查。
+
+## 原始目标
+{original_goal}
+
+## 验收会话自然语言结果
+{acceptance_result}
+
+## 验收摘要
+{summary}
+
+## 已确认完成
+{completed}
+
+## 仍未完成
+{remaining}
+
+## 阻塞
+{blockers}
+
+## 本轮必须继续执行
+{next_task}
+
+完成本轮实际工作后，在自然语言结果末尾输出 MAHAYANA_TASK_REPORT_V1_BEGIN / MAHAYANA_TASK_REPORT_V1_END 报告，task_id 必须为 "{task_id}"，applied_task_revision 必须为 {revision}。只有所有原始目标确实完成时才报告 complete。"#,
+        original_goal = task.original_prompt,
+        acceptance_result = run_report.assistant_text,
+        summary = report.summary,
+        completed = report.completed.join("\n"),
+        remaining = report.remaining.join("\n"),
+        blockers = report.blockers.join("\n"),
+        next_task = report.next_task,
+        task_id = task.id,
+        revision = task.current_revision,
+    )
 }
 
 fn now_ms() -> i64 {
