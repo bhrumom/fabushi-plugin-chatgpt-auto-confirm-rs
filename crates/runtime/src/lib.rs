@@ -278,8 +278,9 @@ impl RunWorker {
         };
         let clock = TokioClock::default();
 
-        let report = loop {
-            let heartbeat_stop = Arc::new(AtomicBool::new(false));
+        let result: Result<RunReport> = async {
+            loop {
+                let heartbeat_stop = Arc::new(AtomicBool::new(false));
             let heartbeat_flag = heartbeat_stop.clone();
             let heartbeat_store = self.store.clone();
             let heartbeat_account = self.account.clone();
@@ -330,8 +331,8 @@ impl RunWorker {
                 let _ = heartbeat.await;
             }
 
-            match result {
-                Ok(report) => break report,
+                match result {
+                    Ok(report) => break Ok(report),
                 Err(error) => {
                     let target_exists = browser.target_exists().await;
                     match target_exists {
@@ -478,6 +479,72 @@ impl RunWorker {
                         Ok(true) => return Err(error),
                     }
                 }
+            }
+        }
+        .await;
+
+        let report = match result {
+            Ok(report) => report,
+            Err(error) => {
+                let current_run = self
+                    .store
+                    .snapshot()?
+                    .runs
+                    .into_iter()
+                    .find(|run| run.run_id == run_id);
+                let recovery = current_run.as_ref().map(|run| {
+                    let checkpoint = run.checkpoint.clone();
+                    RecoveryEnvelope {
+                        version: 2,
+                        task_id: task.id.clone(),
+                        run_id: run_id.clone(),
+                        exact_commit: task.known_exact_head.clone(),
+                        conversation_url: checkpoint
+                            .last_conversation_url
+                            .clone()
+                            .or(run.canonical_conversation_url.clone()),
+                        conversation_kind: task.conversation_kind.clone(),
+                        original_goal: task.original_prompt.clone(),
+                        acceptance_prompt: task.acceptance_prompt.clone(),
+                        interrupted_turn_visible_content: run.visible_progress_messages.clone(),
+                        progress_messages: run.visible_progress_messages.clone(),
+                        completed: task
+                            .last_report
+                            .as_ref()
+                            .map(|previous| previous.completed.clone())
+                            .unwrap_or_default(),
+                        remaining: if task.pending_work.is_empty() {
+                            vec![error.to_string()]
+                        } else {
+                            task.pending_work.clone()
+                        },
+                        blockers: vec![error.to_string()],
+                        known_ci_evidence: task.known_ci_evidence.clone(),
+                        current_stage: task.current_stage.clone(),
+                        pending_work: task.pending_work.clone(),
+                        context_references: task.context_references.clone(),
+                        last_committed_outbound_message: checkpoint
+                            .last_committed_outbound_message
+                            .clone(),
+                        outbound_delivery_confirmed: checkpoint.outbound_delivery_confirmed,
+                        checkpoint: Some(checkpoint),
+                        continuation_instruction:
+                            "从 durable checkpoint 恢复；不要重复已确认提交或已经完成的步骤。".into(),
+                    }
+                });
+                self.store.settle_task(
+                    &task,
+                    None,
+                    recovery.as_ref(),
+                    None,
+                    Some(&error.to_string()),
+                )?;
+                let _ = self
+                    .account
+                    .release_target_ownership(&target_lease.target_id, &self.owner_id);
+                self.store.release_lease(&run_id, &self.owner_id)?;
+                let _ = browser.close_owned_target().await;
+                return Err(error);
             }
         };
 

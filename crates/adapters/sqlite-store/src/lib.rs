@@ -515,7 +515,16 @@ WHERE run_id = ?1 AND owner_id = ?2 AND expires_at_ms > ?4
         } else if waiting_until_ms.is_some() {
             task.status = TaskState::Waiting;
         } else if recovery.is_some() {
-            task.status = TaskState::Queued;
+            if error.is_some() {
+                task.runtime_retries += 1;
+                if task.runtime_retries > task.max_runtime_retries {
+                    task.status = TaskState::Failed;
+                } else {
+                    task.status = TaskState::Queued;
+                }
+            } else {
+                task.status = TaskState::Queued;
+            }
         } else if error.is_some() {
             task.runtime_retries += 1;
             if task.runtime_retries > task.max_runtime_retries {
