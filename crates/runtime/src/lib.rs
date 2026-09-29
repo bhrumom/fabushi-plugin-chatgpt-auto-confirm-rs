@@ -530,7 +530,8 @@ impl RunWorker {
                         outbound_delivery_confirmed: checkpoint.outbound_delivery_confirmed,
                         checkpoint: Some(checkpoint),
                         continuation_instruction:
-                            "从 durable checkpoint 恢复；不要重复已确认提交或已经完成的步骤。".into(),
+                            "从 durable checkpoint 恢复；不要重复已确认提交或已经完成的步骤。"
+                                .into(),
                     }
                 });
                 self.store.settle_task(
