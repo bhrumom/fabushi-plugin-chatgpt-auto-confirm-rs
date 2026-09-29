@@ -130,12 +130,9 @@ impl AccountBrowserActor {
             now,
             self.lease_duration_ms,
         )?;
-        let target_ok = self.store.renew_target(
-            target_id,
-            worker_owner_id,
-            now,
-            self.lease_duration_ms,
-        )?;
+        let target_ok =
+            self.store
+                .renew_target(target_id, worker_owner_id, now, self.lease_duration_ms)?;
         Ok(account_ok && target_ok)
     }
 
@@ -202,9 +199,7 @@ impl AccountBrowserActor {
             browser.navigate(canonical_url).await?;
             return Ok(browser);
         }
-        let _ = self
-            .store
-            .release_target(&lease.target_id, &lease.owner_id);
+        let _ = self.store.release_target(&lease.target_id, &lease.owner_id);
         let (_, browser) = self
             .lease_target(&lease.run_id, &lease.owner_id, Some(canonical_url))
             .await?;
@@ -214,15 +209,13 @@ impl AccountBrowserActor {
 
 impl Drop for AccountBrowserActor {
     fn drop(&mut self) {
-        let _ = self
-            .store
-            .record_browser_lifecycle(
-                &self.account_id,
-                &self.owner_id,
-                "actor_released",
-                "{}",
-                now_ms(),
-            );
+        let _ = self.store.record_browser_lifecycle(
+            &self.account_id,
+            &self.owner_id,
+            "actor_released",
+            "{}",
+            now_ms(),
+        );
         let _ = self
             .store
             .release_account_browser(&self.account_id, &self.owner_id);
