@@ -477,8 +477,6 @@ pub struct RunRecord {
     pub latest_assistant_text: Option<String>,
     #[serde(default)]
     pub visible_progress_messages: Vec<String>,
-    #[serde(default)]
-    pub queue_phase: Option<QueuePhase>,
     pub counters: RunCounters,
     #[serde(default)]
     pub checkpoint: RunCheckpoint,
@@ -548,6 +546,8 @@ pub struct RunEvent {
     pub latest_assistant_text: Option<String>,
     #[serde(default)]
     pub visible_progress_messages: Vec<String>,
+    #[serde(default)]
+    pub queue_phase: Option<QueuePhase>,
     pub counters: RunCounters,
     pub payload_json: String,
 }
