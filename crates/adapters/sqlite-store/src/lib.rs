@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use fabushi_chatgpt_domain::{RunId, TaskId};
+use fabushi_chatgpt_domain::{DispatchId, RunId, TaskId};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::Value;
 
@@ -17,6 +17,13 @@ pub struct TransitionRecord {
     pub effect_kind: String,
     pub effect_payload_json: String,
     pub idempotency_key: String,
+    pub prepared_dispatch: Option<PreparedDispatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedDispatch {
+    pub dispatch_id: DispatchId,
+    pub prepared_intent_json: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,6 +201,9 @@ impl SqliteStore {
         validate_json(&record.event_payload_json, "event payload")?;
         validate_json(&record.materialized_state_json, "materialized state")?;
         validate_json(&record.effect_payload_json, "effect payload")?;
+        if let Some(dispatch) = record.prepared_dispatch.as_ref() {
+            validate_json(&dispatch.prepared_intent_json, "prepared dispatch intent")?;
+        }
 
         if record.next_revision != record.expected_revision + 1 {
             bail!("next revision must be expected revision + 1");
@@ -222,6 +232,36 @@ impl SqliteStore {
 
         if changed != 1 {
             bail!("task revision conflict");
+        }
+
+        if let Some(dispatch) = record.prepared_dispatch.as_ref() {
+            transaction.execute(
+                "INSERT INTO dispatch_attempts(
+                     task_id, run_id, dispatch_id, prepared_intent_json, created_at_unix_ms
+                 ) VALUES(?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(task_id, run_id, dispatch_id) DO NOTHING",
+                params![
+                    record.task_id.as_str(),
+                    record.run_id.as_str(),
+                    dispatch.dispatch_id.as_str(),
+                    dispatch.prepared_intent_json,
+                    now_unix_ms
+                ],
+            )?;
+
+            let stored: String = transaction.query_row(
+                "SELECT prepared_intent_json FROM dispatch_attempts
+                 WHERE task_id=?1 AND run_id=?2 AND dispatch_id=?3",
+                params![
+                    record.task_id.as_str(),
+                    record.run_id.as_str(),
+                    dispatch.dispatch_id.as_str()
+                ],
+                |row| row.get(0),
+            )?;
+            if stored != dispatch.prepared_intent_json {
+                bail!("dispatch identity already exists with a different prepared intent");
+            }
         }
 
         transaction.execute(
@@ -326,6 +366,50 @@ impl SqliteStore {
             bail!("pending effect not found or already settled");
         }
         Ok(())
+    }
+
+    pub fn settle_dispatch_attempt(
+        &self,
+        task_id: &TaskId,
+        run_id: &RunId,
+        dispatch_id: &DispatchId,
+        settlement_json: &str,
+        now_unix_ms: i64,
+    ) -> Result<()> {
+        validate_json(settlement_json, "dispatch settlement")?;
+        let changed = self.connection.execute(
+            "UPDATE dispatch_attempts
+             SET settlement_json=?4, settled_at_unix_ms=?5
+             WHERE task_id=?1 AND run_id=?2 AND dispatch_id=?3",
+            params![
+                task_id.as_str(),
+                run_id.as_str(),
+                dispatch_id.as_str(),
+                settlement_json,
+                now_unix_ms
+            ],
+        )?;
+        if changed != 1 {
+            bail!("dispatch attempt not found");
+        }
+        Ok(())
+    }
+
+    pub fn dispatch_attempt_settlement(
+        &self,
+        task_id: &TaskId,
+        run_id: &RunId,
+        dispatch_id: &DispatchId,
+    ) -> Result<Option<String>> {
+        self.connection
+            .query_row(
+                "SELECT settlement_json FROM dispatch_attempts
+                 WHERE task_id=?1 AND run_id=?2 AND dispatch_id=?3",
+                params![task_id.as_str(), run_id.as_str(), dispatch_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("read dispatch attempt settlement")
     }
 
     pub fn task_revision(&self, task_id: &TaskId) -> Result<Option<i64>> {
@@ -501,6 +585,7 @@ mod tests {
             effect_kind: "send".into(),
             effect_payload_json: r#"{"prompt":"hello"}"#.into(),
             idempotency_key: key.into(),
+            prepared_dispatch: None,
         }
     }
 
@@ -529,6 +614,48 @@ mod tests {
         let effects = store.pending_effects(10).unwrap();
         assert_eq!(effects.len(), 1);
         assert_eq!(effects[0].idempotency_key, "effect-1");
+    }
+
+    #[test]
+    fn commits_prepared_dispatch_with_state_event_and_effect() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        let mut record = transition(0, "dispatch-effect");
+        record.prepared_dispatch = Some(PreparedDispatch {
+            dispatch_id: DispatchId::new("dispatch-1"),
+            prepared_intent_json: r#"{"prompt":"hello","dispatchId":"dispatch-1"}"#.into(),
+        });
+        store.record_transition(&record, 100).unwrap();
+
+        assert_eq!(
+            store
+                .dispatch_attempt_settlement(
+                    &TaskId::new("task-1"),
+                    &RunId::new("run-1"),
+                    &DispatchId::new("dispatch-1"),
+                )
+                .unwrap(),
+            None
+        );
+        store
+            .settle_dispatch_attempt(
+                &TaskId::new("task-1"),
+                &RunId::new("run-1"),
+                &DispatchId::new("dispatch-1"),
+                r#"{"confirmed":true}"#,
+                200,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .dispatch_attempt_settlement(
+                    &TaskId::new("task-1"),
+                    &RunId::new("run-1"),
+                    &DispatchId::new("dispatch-1"),
+                )
+                .unwrap()
+                .as_deref(),
+            Some(r#"{"confirmed":true}"#)
+        );
     }
 
     #[test]
