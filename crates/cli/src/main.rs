@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use fabushi_chatgpt_runtime::{
-    ChatGptCdp, RunOptions, find_chromium_binary, launch_chromium, run_prompt,
+    ChatGptCdp, DesktopRuntime, ReasoningPreset, RunOptions, find_chromium_binary, launch_chromium,
+    run_prompt,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -9,17 +10,29 @@ use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(name = "fabushi-chatgpt-auto-confirm")]
-#[command(about = "Rust/Linux ChatGPT browser automation and allow-once confirmer")]
+#[command(about = "Fabushi automation for the ChatGPT desktop application")]
 struct Cli {
-    #[arg(long, global = true, default_value = "http://127.0.0.1:9222")]
-    cdp: String,
     #[command(subcommand)]
     command: Commands,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    Browser {
+    Doctor,
+    Status,
+    Send {
+        #[arg(long)]
+        prompt: String,
+        #[arg(long, default_value_t = true)]
+        auto_confirm: bool,
+        #[arg(long, default_value_t = 3600)]
+        timeout_seconds: u64,
+        #[arg(long, default_value_t = 900)]
+        poll_ms: u64,
+        #[arg(long, default_value_t = 3)]
+        reasoning: u8,
+    },
+    LegacyBrowser {
         #[arg(long)]
         browser_binary: Option<PathBuf>,
         #[arg(long)]
@@ -31,29 +44,15 @@ enum Commands {
         #[arg(long, default_value = "https://chatgpt.com/")]
         url: String,
     },
-    Status,
-    ApproveOnce,
-    Send {
+    LegacyCdpStatus {
+        #[arg(long, default_value = "http://127.0.0.1:9222")]
+        cdp: String,
+    },
+    LegacyCdpSend {
+        #[arg(long, default_value = "http://127.0.0.1:9222")]
+        cdp: String,
         #[arg(long)]
         prompt: String,
-        #[arg(long, default_value_t = true)]
-        auto_confirm: bool,
-        #[arg(long, default_value_t = 3600)]
-        timeout_seconds: u64,
-        #[arg(long, default_value_t = 900)]
-        poll_ms: u64,
-        #[arg(long, default_value_t = 900)]
-        stale_reload_seconds: u64,
-        #[arg(long, default_value_t = 300)]
-        rate_limit_pause_seconds: u64,
-        #[arg(long, default_value_t = 90)]
-        dispatch_confirm_seconds: u64,
-        #[arg(long, default_value_t = 1800)]
-        continuation_seconds: u64,
-    },
-    Open {
-        #[arg(long, default_value = "https://chatgpt.com/")]
-        url: String,
     },
 }
 
@@ -66,9 +65,51 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-
     match cli.command {
-        Commands::Browser {
+        Commands::Doctor => {
+            let runtime = DesktopRuntime::default();
+            let snapshot = runtime.snapshot().await?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "runtime": "chatgpt-desktop-atspi",
+                    "appHealthy": snapshot.app_healthy,
+                    "composerReady": snapshot.composer_ready,
+                    "reasoningPickerAvailable": snapshot.reasoning_picker_available,
+                    "selectedReasoningPreset": snapshot.selected_reasoning_preset,
+                })
+            );
+        }
+        Commands::Status => {
+            let runtime = DesktopRuntime::default();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&runtime.snapshot().await?)?
+            );
+        }
+        Commands::Send {
+            prompt,
+            auto_confirm,
+            timeout_seconds,
+            poll_ms,
+            reasoning,
+        } => {
+            let runtime = DesktopRuntime::default();
+            let options = RunOptions {
+                timeout: Duration::from_secs(timeout_seconds),
+                poll_interval: Duration::from_millis(poll_ms),
+                auto_confirm,
+                ..RunOptions::default()
+            };
+            let requested_reasoning = ReasoningPreset::from_index(reasoning)
+                .ok_or_else(|| anyhow::anyhow!("reasoning must be one of 0,1,2,3,4"))?;
+            let report = runtime
+                .run_prompt(&prompt, requested_reasoning, options)
+                .await
+                .context("ChatGPT desktop automation run failed")?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Commands::LegacyBrowser {
             browser_binary,
             profile,
             port,
@@ -87,50 +128,18 @@ async fn main() -> Result<()> {
                     "cdp": launch.endpoint,
                     "headed": launch.headed,
                     "url": url,
+                    "legacy": true,
                 })
             );
         }
-        Commands::Status => {
-            let cdp = ChatGptCdp::connect(&cli.cdp).await?;
+        Commands::LegacyCdpStatus { cdp } => {
+            let cdp = ChatGptCdp::connect(&cdp).await?;
             println!("{}", serde_json::to_string_pretty(&cdp.snapshot().await?)?);
         }
-        Commands::ApproveOnce => {
-            let cdp = ChatGptCdp::connect(&cli.cdp).await?;
-            println!(
-                "{}",
-                serde_json::json!({"clicked": cdp.click_allow_once().await?})
-            );
-        }
-        Commands::Send {
-            prompt,
-            auto_confirm,
-            timeout_seconds,
-            poll_ms,
-            stale_reload_seconds,
-            rate_limit_pause_seconds,
-            dispatch_confirm_seconds,
-            continuation_seconds,
-        } => {
-            let cdp = ChatGptCdp::connect(&cli.cdp).await?;
-            let options = RunOptions {
-                timeout: Duration::from_secs(timeout_seconds),
-                poll_interval: Duration::from_millis(poll_ms),
-                auto_confirm,
-                stale_reload_after: Duration::from_secs(stale_reload_seconds),
-                rate_limit_pause: Duration::from_secs(rate_limit_pause_seconds),
-                dispatch_confirm_after: Duration::from_secs(dispatch_confirm_seconds),
-                continuation_after: Duration::from_secs(continuation_seconds),
-                ..RunOptions::default()
-            };
-            let report = run_prompt(&cdp, &prompt, options)
-                .await
-                .context("ChatGPT automation run failed")?;
+        Commands::LegacyCdpSend { cdp, prompt } => {
+            let cdp = ChatGptCdp::connect(&cdp).await?;
+            let report = run_prompt(&cdp, &prompt, RunOptions::default()).await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
-        }
-        Commands::Open { url } => {
-            let cdp = ChatGptCdp::connect(&cli.cdp).await?;
-            cdp.navigate(&url).await?;
-            println!("{}", serde_json::json!({"navigated": url}));
         }
     }
 

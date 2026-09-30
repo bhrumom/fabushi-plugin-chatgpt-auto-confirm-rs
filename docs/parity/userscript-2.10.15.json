@@ -25,10 +25,12 @@
       "status": "partial",
       "evidence": [
         "crates/domain/src/lib.rs",
-        "crates/application/src/lib.rs"
+        "crates/application/src/lib.rs",
+        "crates/adapters/chatgpt-desktop-atspi/src/lib.rs",
+        "crates/adapters/chatgpt-desktop-atspi/src/bridge.py"
       ],
       "missing": [
-        "desktop adapter production wiring",
+        "response-boundary/activity-trace hardening on live conversations",
         "real desktop acceptance"
       ]
     },
@@ -38,11 +40,13 @@
       "destination": "ReasoningPreset + desktop adapter",
       "status": "partial",
       "evidence": [
-        "crates/domain/src/lib.rs"
+        "crates/domain/src/lib.rs",
+        "crates/adapters/chatgpt-desktop-atspi/src/bridge.py",
+        "crates/runtime/src/lib.rs"
       ],
       "missing": [
-        "picker enforcement",
-        "60s unlimited recovery production wiring",
+        "active five-position selection effect",
+        "60s unlimited recovery production loop",
         "acceptance"
       ]
     },
@@ -166,14 +170,20 @@
       "id": "desktop-atspi",
       "source": "desktop replacement",
       "destination": "chatgpt-desktop-atspi",
-      "status": "pending",
-      "evidence": [],
+      "status": "partial",
+      "evidence": [
+        "crates/adapters/chatgpt-desktop-atspi/Cargo.toml",
+        "crates/adapters/chatgpt-desktop-atspi/src/lib.rs",
+        "crates/adapters/chatgpt-desktop-atspi/src/bridge.py",
+        "crates/runtime/src/lib.rs",
+        "crates/cli/src/main.rs"
+      ],
       "missing": [
-        "crate",
-        "semantic observation",
-        "effects",
-        "fixtures",
-        "real acceptance"
+        "deterministic semantic fixtures beyond source-contract tests",
+        "reasoning selection effect",
+        "native attachment effect/readiness",
+        "stream retry and review-report projection hardening",
+        "real authorization and terminal acceptance"
       ]
     },
     {
@@ -183,10 +193,10 @@
       "status": "partial",
       "evidence": [
         "crates/application/src/lib.rs",
-        "crates/adapters/chatgpt-desktop-process/src/lib.rs"
+        "crates/adapters/chatgpt-desktop-process/src/lib.rs",
+        "crates/runtime/src/lib.rs"
       ],
       "missing": [
-        "runtime composition",
         "reattach/crash lifecycle policy wiring",
         "htch-runtime lifecycle acceptance"
       ]
@@ -196,12 +206,15 @@
       "source": "multi-task workbench",
       "destination": "Supervisor/DesktopSessionActor/RunWorker",
       "status": "pending",
-      "evidence": [],
+      "evidence": [
+        "crates/runtime/src/lib.rs"
+      ],
       "missing": [
+        "Supervisor/DesktopSessionActor/RunWorker topology",
         "durable lease",
         "fair scheduling",
-        "single writer",
-        "wiring",
+        "single-writer queue",
+        "SQLite/outbox recovery wiring",
         "tests"
       ]
     },

@@ -948,12 +948,11 @@ Current PR #2 migration progress on 2026-09-30:
 - `docs/parity/userscript-2.10.15.json` freezes the source baseline and records machine-readable partial/pending responsibilities.
 - domain/application now use desktop-neutral `ChatSurfaceSnapshot`, opaque conversation/turn boundaries, five-position reasoning semantics, authorization presence/actionability/settlement identity and deterministic recovery policy.
 - deterministic application tests cover the currently extracted 12-second authorization latch, 8-second no-approval confirmation, explicit load-failure 30-second x7 policy, immediate connection-interruption handoff, fourth rate-limit-episode handoff and strict Review identity binding.
-- these rows remain `partial`, not `implemented`, because SQLite/outbox persistence, actor/runtime production wiring, desktop AT-SPI/process adapters and real-device evidence are still absent.
-- the production CLI/runtime remains legacy CDP at this point and therefore Gate D/G are not satisfied.
-- `htch-runtime` became unavailable during this implementation pass, so no device-side build or desktop acceptance result is claimed for the current head. GitHub Actions remains the available exact-head verification authority until that device is online again.
-
-Additional current evidence:
-
-- `chatgpt-desktop-process` now implements a semantic `ChatProcessPort` boundary with Linux `/proc` discovery and the known `/usr/bin/chatgpt` launcher. It remains partial until runtime composition and htch-runtime lifecycle acceptance are proven.
+- `chatgpt-desktop-process` implements the semantic `ChatProcessPort` boundary with Linux `/proc` discovery and the known `/usr/bin/chatgpt` launcher and is composed by the desktop runtime.
+- `chatgpt-desktop-atspi` now exists as the Linux desktop semantic adapter. Its Rust wrapper invokes the system AT-SPI2/D-Bus stack through installed `pyatspi`, projects the live ChatGPT accessibility tree into `ChatSurfaceSnapshot`, and owns semantic composer Send, fresh-conversation, reload, bounded rate-limit dismissal and fail-closed conversation-scoped authorization effects.
+- the default `doctor`, `status` and `send` CLI path now enters `DesktopRuntime`; Chromium/CDP is retained only behind explicitly named legacy commands. The desktop runtime adds a fresh Fabushi dispatch marker before Send and refuses to Send when the requested reasoning preset cannot be independently observed as already selected.
+- the live `htch-runtime` accessibility oracle confirms the application is exposed as AT-SPI application `Codex` with `ChatGPT` frame/document, `Ask ChatGPT` composer, `New chat`, and `Select ChatGPT model`. Adapter `snapshot` smoke currently observes a healthy ready composer from that real application.
+- reasoning remains `partial`: the adapter can discover the picker and fail closed on an unverifiable/mismatched preset, but active five-position selection plus the dedicated unlimited 60-second recovery loop are not yet production-wired. Attachments, durable SQLite/outbox actors, full response-boundary/activity projection and formal real authorization/terminal journeys also remain open.
+- therefore no affected row is promoted to `implemented`, and Gates D-G are not yet satisfied.
 
 Future implementation work must continue updating this section and the migration ledger from production wiring and evidence rather than changing status by assertion.
