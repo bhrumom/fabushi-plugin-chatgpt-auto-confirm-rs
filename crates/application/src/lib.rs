@@ -57,6 +57,12 @@ pub trait Clock: Send + Sync {
     async fn sleep(&self, duration: Duration);
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewRunIdentity {
+    pub task_id: TaskId,
+    pub round: Round,
+}
+
 #[derive(Debug, Clone)]
 pub struct RunOptions {
     pub timeout: Duration,
@@ -68,6 +74,7 @@ pub struct RunOptions {
     pub max_rate_limit_pauses: u32,
     pub dispatch_confirm_after: Duration,
     pub continuation_after: Duration,
+    pub review_identity: Option<ReviewRunIdentity>,
 }
 
 impl Default for RunOptions {
@@ -82,6 +89,7 @@ impl Default for RunOptions {
             max_rate_limit_pauses: RATE_LIMIT_PRESERVE_EPISODES,
             dispatch_confirm_after: DISPATCH_CONFIRM_WINDOW,
             continuation_after: Duration::from_secs(30 * 60),
+            review_identity: None,
         }
     }
 }
@@ -112,6 +120,10 @@ impl<'a> RunPrompt<'a> {
         let mut recoveries = 0;
         let mut rate_limits = 0;
         let mut dispatch_retries = 0;
+        let mut review_tracker = options
+            .review_identity
+            .as_ref()
+            .map(|_| ReviewSettlementTracker::default());
 
         loop {
             let now = self.clock.now();
@@ -173,7 +185,37 @@ impl<'a> RunPrompt<'a> {
                 continue;
             }
 
-            if snapshot.ordinary_terminal_evidence() {
+            if let (Some(identity), Some(tracker)) =
+                (options.review_identity.as_ref(), review_tracker.as_mut())
+            {
+                match tracker.observe(&snapshot, &identity.task_id, identity.round, now) {
+                    ReviewSettlementDecision::Final(_) => {
+                        return Ok(RunReport {
+                            state: RunState::Complete,
+                            conversation_ref: snapshot.conversation_ref,
+                            assistant_text: snapshot.assistant_visible_prose,
+                            approvals_clicked: approvals,
+                            recoveries,
+                            rate_limit_pauses: rate_limits,
+                            dispatch_retries,
+                            message: "strict current-review report final evidence".into(),
+                        });
+                    }
+                    ReviewSettlementDecision::RecoverReviewConversation => {
+                        self.surface.start_fresh_conversation().await?;
+                        self.surface.send_prompt(prompt).await?;
+                        recoveries += 1;
+                        dispatched = now;
+                        progress = now;
+                        fingerprint.clear();
+                        terminal_since = None;
+                        *tracker = ReviewSettlementTracker::default();
+                        continue;
+                    }
+                    ReviewSettlementDecision::Wait => {}
+                }
+                terminal_since = None;
+            } else if snapshot.ordinary_terminal_evidence() {
                 let since = *terminal_since.get_or_insert(now);
                 if now.saturating_sub(since) >= ORDINARY_TERMINAL_STABILITY {
                     return Ok(RunReport {
@@ -980,10 +1022,98 @@ impl ContinuousTaskState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fabushi_chatgpt_domain::{ConversationFingerprint, RunId};
+    use fabushi_chatgpt_domain::{ConversationFingerprint, RunId, UserTurnBoundary};
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
 
     fn task_id() -> TaskId {
         TaskId::new("task-1")
+    }
+
+    struct FakeClock {
+        now: Mutex<Duration>,
+    }
+
+    impl FakeClock {
+        fn new() -> Self {
+            Self {
+                now: Mutex::new(Duration::ZERO),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Clock for FakeClock {
+        fn now(&self) -> Duration {
+            *self.now.lock().unwrap()
+        }
+
+        async fn sleep(&self, duration: Duration) {
+            let mut now = self.now.lock().unwrap();
+            *now += duration;
+        }
+    }
+
+    struct ScriptedSurface {
+        snapshots: Mutex<VecDeque<ChatSurfaceSnapshot>>,
+        last_snapshot: Mutex<ChatSurfaceSnapshot>,
+        sends: Mutex<Vec<String>>,
+        fresh_conversations: Mutex<u32>,
+    }
+
+    impl ScriptedSurface {
+        fn new(snapshots: Vec<ChatSurfaceSnapshot>) -> Self {
+            let last_snapshot = snapshots.last().cloned().unwrap_or_default();
+            Self {
+                snapshots: Mutex::new(snapshots.into()),
+                last_snapshot: Mutex::new(last_snapshot),
+                sends: Mutex::new(Vec::new()),
+                fresh_conversations: Mutex::new(0),
+            }
+        }
+
+        fn send_count(&self) -> usize {
+            self.sends.lock().unwrap().len()
+        }
+
+        fn fresh_count(&self) -> u32 {
+            *self.fresh_conversations.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl ChatSurfacePort for ScriptedSurface {
+        async fn observe(&self) -> Result<ChatSurfaceSnapshot> {
+            let mut snapshots = self.snapshots.lock().unwrap();
+            if let Some(snapshot) = snapshots.pop_front() {
+                *self.last_snapshot.lock().unwrap() = snapshot.clone();
+                Ok(snapshot)
+            } else {
+                Ok(self.last_snapshot.lock().unwrap().clone())
+            }
+        }
+
+        async fn send_prompt(&self, prompt: &str) -> Result<()> {
+            self.sends.lock().unwrap().push(prompt.to_owned());
+            Ok(())
+        }
+
+        async fn approve_current_conversation(&self) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn dismiss_rate_limit_notice(&self) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn recover_current_surface(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn start_fresh_conversation(&self) -> Result<()> {
+            *self.fresh_conversations.lock().unwrap() += 1;
+            Ok(())
+        }
     }
 
     fn terminal() -> ChatSurfaceSnapshot {
@@ -994,6 +1124,100 @@ mod tests {
             response_local_copy: true,
             ..Default::default()
         }
+    }
+
+    fn owned_review_snapshot(prose: &str, boundary: &str) -> ChatSurfaceSnapshot {
+        ChatSurfaceSnapshot {
+            app_healthy: true,
+            user_turn_boundary: Some(UserTurnBoundary::new("u1")),
+            user_turn_ownership: OwnershipConfidence::Strong,
+            assistant_response_boundary: Some(AssistantResponseBoundary::new(boundary)),
+            assistant_response_ownership: OwnershipConfidence::Strong,
+            assistant_visible_prose: prose.into(),
+            response_local_copy: true,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn review_run_requires_strict_current_report_even_when_copy_is_present() {
+        let before = ChatSurfaceSnapshot {
+            user_turn_boundary: Some(UserTurnBoundary::new("u0")),
+            ..Default::default()
+        };
+        let ordinary_terminal = owned_review_snapshot("ordinary assistant answer", "a1");
+        let final_review = owned_review_snapshot(
+            r#"{"taskId":"task-1","round":2,"status":"complete","summary":"verified"}"#,
+            "a2",
+        );
+        let surface = ScriptedSurface::new(vec![before, ordinary_terminal, final_review.clone()]);
+        let clock = FakeClock::new();
+        let options = RunOptions {
+            poll_interval: Duration::from_secs(1),
+            timeout: Duration::from_secs(30),
+            review_identity: Some(ReviewRunIdentity {
+                task_id: task_id(),
+                round: Round::new(2),
+            }),
+            ..RunOptions::default()
+        };
+
+        let report = RunPrompt::new(&surface, &clock)
+            .execute("review prompt", options)
+            .await
+            .unwrap();
+
+        assert_eq!(report.state, RunState::Complete);
+        assert_eq!(report.assistant_text, final_review.assistant_visible_prose);
+        assert_eq!(
+            report.message,
+            "strict current-review report final evidence"
+        );
+        assert_eq!(surface.send_count(), 1);
+        assert_eq!(surface.fresh_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn review_run_reopens_after_two_minutes_without_final_or_progress() {
+        let before = ChatSurfaceSnapshot {
+            user_turn_boundary: Some(UserTurnBoundary::new("u0")),
+            ..Default::default()
+        };
+        let waiting = owned_review_snapshot("still waiting for strict report", "a1");
+        let mut final_review = owned_review_snapshot(
+            r#"{"taskId":"task-1","round":2,"status":"next","summary":"more remains","next":"continue safely"}"#,
+            "a2",
+        );
+        final_review.user_turn_boundary = Some(UserTurnBoundary::new("u2"));
+        let surface = ScriptedSurface::new(vec![
+            before,
+            waiting.clone(),
+            waiting.clone(),
+            waiting,
+            final_review,
+        ]);
+        let clock = FakeClock::new();
+        let options = RunOptions {
+            poll_interval: Duration::from_secs(60),
+            timeout: Duration::from_secs(300),
+            stale_reload_after: Duration::from_secs(1_000),
+            review_identity: Some(ReviewRunIdentity {
+                task_id: task_id(),
+                round: Round::new(2),
+            }),
+            ..RunOptions::default()
+        };
+
+        let report = RunPrompt::new(&surface, &clock)
+            .execute("review prompt", options)
+            .await
+            .unwrap();
+
+        assert_eq!(report.state, RunState::Complete);
+        assert_eq!(surface.fresh_count(), 1);
+        assert_eq!(surface.send_count(), 2);
+        assert_eq!(report.recoveries, 1);
+        assert_eq!(report.dispatch_retries, 0);
     }
 
     #[test]

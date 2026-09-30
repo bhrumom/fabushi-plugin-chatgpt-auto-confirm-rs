@@ -90,8 +90,8 @@
         "crates/application/src/lib.rs"
       ],
       "missing": [
+        "durable continuous Work -> Review orchestration",
         "continuous production orchestration",
-        "2-minute settlement wiring",
         "acceptance"
       ]
     },
