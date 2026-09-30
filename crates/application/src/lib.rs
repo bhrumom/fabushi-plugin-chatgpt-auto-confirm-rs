@@ -1430,7 +1430,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_prompt_waits_for_disabled_authorization_and_stable_absence() {
+    async fn disabled_authorization_blocks_but_terminal_uses_ordinary_stability_after_card_is_gone()
+    {
         let before = ChatSurfaceSnapshot {
             user_turn_boundary: Some(UserTurnBoundary::new("u0")),
             ..Default::default()
@@ -1466,7 +1467,10 @@ mod tests {
         assert_eq!(report.state, RunState::Complete);
         assert_eq!(report.recoveries, 0);
         assert_eq!(surface.fresh_count(), 0);
-        assert!(clock.now() >= NO_APPROVAL_RECHECK_WINDOW + ORDINARY_TERMINAL_STABILITY);
+        assert_eq!(
+            clock.now(),
+            Duration::from_secs(1) + ORDINARY_TERMINAL_STABILITY
+        );
     }
 
     #[tokio::test]
