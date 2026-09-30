@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
-use fabushi_chatgpt_application::{ChatProcessHealth, ChatProcessPort, Clock, RunPrompt};
+use fabushi_chatgpt_application::{
+    ChatProcessHealth, ChatProcessPort, ChatSurfacePort, Clock, RunPrompt,
+};
 use fabushi_chatgpt_desktop_atspi::ChatGptDesktopAtspi;
 use fabushi_chatgpt_desktop_process::ChatGptDesktopProcess;
 use std::io::Read;
