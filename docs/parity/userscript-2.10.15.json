@@ -206,17 +206,16 @@
       "id": "runtime-actors",
       "source": "multi-task workbench",
       "destination": "Supervisor/DesktopSessionActor/RunWorker",
-      "status": "pending",
+      "status": "partial",
       "evidence": [
         "crates/runtime/src/lib.rs"
       ],
       "missing": [
-        "Supervisor/DesktopSessionActor/RunWorker topology",
-        "durable lease",
-        "fair scheduling",
-        "single-writer queue",
-        "SQLite/outbox recovery wiring",
-        "tests"
+        "durable ui_session_leases ownership",
+        "fair multi-task next-wake scheduler",
+        "SQLite/outbox crash recovery wiring",
+        "pause/resume/cancel worker lifecycle",
+        "htch-runtime concurrent-task acceptance"
       ]
     },
     {
