@@ -700,7 +700,7 @@ The ledger must be updated as implementation proceeds. `partial` means useful Ru
 | Task/run/round/goal state | domain + sqlite-store | partial |
 | One-shot task mode | application | partial browser-era implementation only |
 | Continuous Work -> Review loop | application | partial: deterministic phase/round transition exists; durable runtime wiring pending |
-| Strict MAHAYANA_TASK_REPORT_V1 parser | application/domain | partial: exact taskId/round/status/summary/next validation has deterministic tests; production Review settlement wiring pending |
+| Strict MAHAYANA_TASK_REPORT_V1 parser | application/domain | partial: source-2.10.15-compatible fence/tolerant recovery, exact current taskId/round selection, strict valid-JSON type/status validation and status/summary/next rules have deterministic tests; production Review settlement wiring pending |
 | Userscript durable workbench state | sqlite-store | partial: WAL schema and atomic state/event/outbox transaction exist with rollback/idempotency tests; application/runtime wiring and full task CRUD pending |
 | Tab/workspace ownership | DesktopSessionActor + UI lease | pending |
 | Multi-task fair supervision | runtime Supervisor/RunWorker | pending |
@@ -948,6 +948,7 @@ Current PR #2 migration progress on 2026-09-30:
 - `docs/parity/userscript-2.10.15.json` freezes the source baseline and records machine-readable partial/pending responsibilities.
 - domain/application now use desktop-neutral `ChatSurfaceSnapshot`, opaque conversation/turn boundaries, five-position reasoning semantics, authorization presence/actionability/settlement identity and deterministic recovery policy.
 - deterministic application tests cover the currently extracted 12-second authorization latch, 8-second no-approval confirmation, explicit load-failure 30-second x7 policy, immediate connection-interruption handoff, fourth rate-limit-episode handoff and strict Review identity binding.
+- strict Review parsing now mirrors the source 2.10.15 split between valid-JSON schema validation and syntax-error-only tolerant recovery, including wrapped reports with unescaped human quotes and exact current task/round selection over stale quoted evidence; `htch-runtime` domain/application scratch-workspace verification passes 26/26 tests for the current source tree.
 - `chatgpt-desktop-process` implements the semantic `ChatProcessPort` boundary with Linux `/proc` discovery and the known `/usr/bin/chatgpt` launcher and is composed by the desktop runtime.
 - `chatgpt-desktop-atspi` now exists as the Linux desktop semantic adapter. Its Rust wrapper invokes the system AT-SPI2/D-Bus stack through installed `pyatspi`, projects the live ChatGPT accessibility tree into `ChatSurfaceSnapshot`, and owns semantic composer Send, fresh-conversation, reload, bounded rate-limit dismissal and fail-closed conversation-scoped authorization effects.
 - the default `doctor`, `status` and `send` CLI path now enters `DesktopRuntime`; Chromium/CDP is retained only behind explicitly named legacy commands. The desktop runtime adds a fresh Fabushi dispatch marker before Send and refuses to Send when the requested reasoning preset cannot be independently observed as already selected.

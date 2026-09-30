@@ -656,7 +656,7 @@ pub struct ReviewReport {
     pub next: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct RawReviewReport {
     #[serde(rename = "taskId")]
     task_id: String,
@@ -664,7 +664,7 @@ struct RawReviewReport {
     status: String,
     summary: String,
     #[serde(default)]
-    next: String,
+    next: Option<String>,
 }
 
 pub fn parse_strict_review_report(
@@ -672,10 +672,97 @@ pub fn parse_strict_review_report(
     task: &TaskId,
     round: Round,
 ) -> Result<ReviewReport> {
-    let raw: RawReviewReport = serde_json::from_str(value.trim())?;
+    let source = strip_review_fence(value);
+    let raw = match serde_json::from_str::<serde_json::Value>(source) {
+        Ok(value) => raw_review_report_from_json(&value)?,
+        Err(_) => recover_review_report(source, task, round)
+            .ok_or_else(|| anyhow::anyhow!("review report JSON cannot be parsed or recovered"))?,
+    };
 
+    validate_review_report(raw, task, round)
+}
+
+fn strip_review_fence(value: &str) -> &str {
+    let source = value.trim();
+    let Some(after_ticks) = source.strip_prefix("```") else {
+        return source;
+    };
+
+    let after_language = if after_ticks
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("json"))
+    {
+        &after_ticks[4..]
+    } else {
+        after_ticks
+    };
+    let source = after_language.trim_start();
+    let source = source.trim_end();
+    source
+        .strip_suffix("```")
+        .map(str::trim_end)
+        .unwrap_or(source)
+}
+
+fn raw_review_report_from_json(value: &serde_json::Value) -> Result<RawReviewReport> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("review report must be a JSON object"))?;
+    let task_id = object
+        .get("taskId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("review report taskId must be a string"))?
+        .to_owned();
+    let round_number = object
+        .get("round")
+        .and_then(serde_json::Value::as_number)
+        .ok_or_else(|| anyhow::anyhow!("review report round must be an integer"))?;
+    let round_u64 = round_number.as_u64().or_else(|| {
+        round_number.as_f64().and_then(|value| {
+            (value.is_finite() && value >= 0.0 && value.fract() == 0.0).then_some(value as u64)
+        })
+    });
+    let round = u32::try_from(
+        round_u64.ok_or_else(|| anyhow::anyhow!("review report round must be an integer"))?,
+    )
+    .map_err(|_| anyhow::anyhow!("review report round is out of range"))?;
+    let status = object
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("review report status must be a string"))?
+        .to_owned();
+    let summary = object
+        .get("summary")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("review report summary must be a string"))?
+        .to_owned();
+    let next = object
+        .get("next")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+
+    Ok(RawReviewReport {
+        task_id,
+        round,
+        status,
+        summary,
+        next,
+    })
+}
+
+fn validate_review_report(
+    raw: RawReviewReport,
+    task: &TaskId,
+    round: Round,
+) -> Result<ReviewReport> {
     if raw.task_id != task.as_str() || raw.round != round.get() {
-        bail!("review report identity mismatch");
+        bail!(
+            "review report identity mismatch: expected taskId={} round={}, got taskId={} round={}",
+            task.as_str(),
+            round.get(),
+            raw.task_id,
+            raw.round
+        );
     }
 
     let status = match raw.status.as_str() {
@@ -684,13 +771,16 @@ pub fn parse_strict_review_report(
         _ => bail!("invalid review status"),
     };
 
-    let summary = raw.summary.trim().to_owned();
-    if summary.is_empty() {
+    if raw.summary.trim().is_empty() {
         bail!("empty review summary");
     }
 
-    let next = raw.next.trim().to_owned();
-    if status == ReviewStatus::Next && next.is_empty() {
+    if status == ReviewStatus::Next
+        && raw
+            .next
+            .as_deref()
+            .is_none_or(|next| next.trim().is_empty())
+    {
         bail!("status=next requires next");
     }
 
@@ -698,9 +788,145 @@ pub fn parse_strict_review_report(
         task_id: task.clone(),
         round,
         status,
-        summary,
-        next: if next.is_empty() { None } else { Some(next) },
+        summary: raw.summary,
+        next: raw.next,
     })
+}
+
+fn recover_review_report(source: &str, task: &TaskId, round: Round) -> Option<RawReviewReport> {
+    let mut candidates = Vec::new();
+    let mut offset = 0;
+
+    while let Some(relative) = find_review_key(&source[offset..], "taskId") {
+        let start = offset + relative;
+        if let Some(candidate) = recover_review_candidate(&source[start..]) {
+            candidates.push(candidate);
+        }
+        offset = start.saturating_add("taskId".len());
+        if offset >= source.len() {
+            break;
+        }
+    }
+
+    if candidates.is_empty()
+        && let Some(candidate) = recover_review_candidate(source)
+    {
+        candidates.push(candidate);
+    }
+
+    candidates
+        .iter()
+        .find(|candidate| candidate.task_id == task.as_str() && candidate.round == round.get())
+        .cloned()
+        .or_else(|| candidates.pop())
+}
+
+fn recover_review_candidate(source: &str) -> Option<RawReviewReport> {
+    let task_id = review_field_value(source, "taskId")?.trim().to_owned();
+    let round_raw = review_field_value(source, "round")?;
+    let round_text = round_raw.trim();
+    if round_text.is_empty() || !round_text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let round = round_text.parse::<u32>().ok()?;
+    let status = review_field_value(source, "status")?.trim().to_owned();
+    let summary = review_field_value(source, "summary")?.trim().to_owned();
+
+    if task_id.is_empty() || status.is_empty() || summary.is_empty() {
+        return None;
+    }
+
+    let next = review_field_value(source, "next")
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+
+    Some(RawReviewReport {
+        task_id,
+        round,
+        status,
+        summary,
+        next,
+    })
+}
+
+fn find_review_key(source: &str, key: &str) -> Option<usize> {
+    source.match_indices(key).find_map(|(index, _)| {
+        let mut trailing = source[index + key.len()..].trim_start();
+        if trailing.starts_with('"') || trailing.starts_with('\'') {
+            trailing = trailing[1..].trim_start();
+        }
+        trailing.starts_with(':').then_some(index)
+    })
+}
+
+fn review_field_value(source: &str, key: &str) -> Option<String> {
+    let key_start = find_review_key(source, key)?;
+    let mut after_key = source[key_start + key.len()..].trim_start();
+    if after_key.starts_with('"') || after_key.starts_with('\'') {
+        after_key = after_key[1..].trim_start();
+    }
+    let value = after_key.strip_prefix(':')?.trim_start();
+    if value.is_empty() {
+        return None;
+    }
+
+    let quote = value.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        let end = value.find([',', '}', '\n', '\r']).unwrap_or(value.len());
+        let candidate = value[..end].trim();
+        return (!candidate.is_empty()).then(|| candidate.to_owned());
+    }
+
+    let mut output = String::new();
+    let mut chars = value[quote.len_utf8()..].char_indices().peekable();
+    while let Some((index, character)) = chars.next() {
+        if character == '\\' {
+            let (_, escaped) = chars.next()?;
+            if escaped == 'u' {
+                let hex_start = index + character.len_utf8() + escaped.len_utf8();
+                let tail = &value[quote.len_utf8() + hex_start..];
+                if tail.len() < 4 || !tail.as_bytes()[..4].iter().all(u8::is_ascii_hexdigit) {
+                    return None;
+                }
+                let code = u32::from_str_radix(&tail[..4], 16).ok()?;
+                output.push(char::from_u32(code)?);
+                for _ in 0..4 {
+                    chars.next()?;
+                }
+            } else {
+                match escaped {
+                    '"' => output.push('"'),
+                    '\'' => output.push('\''),
+                    '\\' => output.push('\\'),
+                    '/' => output.push('/'),
+                    'b' => output.push('\u{0008}'),
+                    'f' => output.push('\u{000c}'),
+                    'n' => output.push('\n'),
+                    'r' => output.push('\r'),
+                    't' => output.push('\t'),
+                    other => output.push(other),
+                }
+            }
+            continue;
+        }
+
+        if character == quote {
+            let after_index = quote.len_utf8() + index + character.len_utf8();
+            let trailing = value[after_index..].trim_start();
+            let closes_value = trailing.is_empty()
+                || trailing.starts_with(',')
+                || trailing.starts_with('}')
+                || trailing.starts_with(']')
+                || trailing.starts_with('"')
+                || trailing.starts_with('\'');
+            if closes_value {
+                return Some(output);
+            }
+        }
+        output.push(character);
+    }
+
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1087,6 +1313,93 @@ mod tests {
         assert_eq!(state.goal, "new");
         assert_eq!(state.goal_revision, GoalRevision::new(8));
         assert_eq!(state.round, Round::new(2));
+    }
+
+    #[test]
+    fn review_parser_accepts_optional_markdown_fence_like_source_2_10_15() {
+        let report = parse_strict_review_report(
+            "```json\n{\"taskId\":\"task-1\",\"round\":2,\"status\":\"complete\",\"summary\":\"done\",\"next\":\"\"}\n```",
+            &task_id(),
+            Round::new(2),
+        )
+        .unwrap();
+        assert_eq!(report.status, ReviewStatus::Complete);
+        assert_eq!(report.summary, "done");
+    }
+
+    #[test]
+    fn review_parser_does_not_recover_structurally_invalid_valid_json() {
+        let error = parse_strict_review_report(
+            r#"{"taskId":"task-1","round":2,"status":"next","summary":"continue","next":null}"#,
+            &task_id(),
+            Round::new(2),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("status=next requires next"));
+    }
+
+    #[test]
+    fn review_parser_keeps_valid_json_status_strict() {
+        assert!(parse_strict_review_report(
+            r#"{"taskId":"task-1","round":2,"status":" next ","summary":"continue","next":"fix"}"#,
+            &task_id(),
+            Round::new(2),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn review_parser_accepts_integer_valued_json_round() {
+        let report = parse_strict_review_report(
+            r#"{"taskId":"task-1","round":2.0,"status":"complete","summary":"done"}"#,
+            &task_id(),
+            Round::new(2),
+        )
+        .unwrap();
+        assert_eq!(report.round, Round::new(2));
+    }
+
+    #[test]
+    fn review_parser_recovers_wrapped_report_with_unescaped_human_quotes() {
+        let report = parse_strict_review_report(
+            r#"验收结果如下：
+```json
+{"taskId":"task-1","round":2,"status":"next","summary":"已检查“绘画”结果，发现 "尺寸" 需要继续处理","next":"重新绘画后复核"}
+```"#,
+            &task_id(),
+            Round::new(2),
+        )
+        .unwrap();
+        assert_eq!(report.status, ReviewStatus::Next);
+        assert_eq!(
+            report.summary,
+            "已检查“绘画”结果，发现 \"尺寸\" 需要继续处理"
+        );
+        assert_eq!(report.next.as_deref(), Some("重新绘画后复核"));
+    }
+
+    #[test]
+    fn review_recovery_prefers_exact_current_task_and_round_over_stale_report() {
+        let report = parse_strict_review_report(
+            r#"验收说明：旧记录 {"taskId":"old-task","round":1,"status":"next","summary":"旧轮次","next":"旧下一步"}；当前报告如下： {"taskId":"task-1","round":3,"status":"next","summary":"当前轮仍缺少真实安装验收证据","next":"只补当前轮人工验收证据"}"#,
+            &task_id(),
+            Round::new(3),
+        )
+        .unwrap();
+        assert_eq!(report.round, Round::new(3));
+        assert_eq!(report.summary, "当前轮仍缺少真实安装验收证据");
+        assert_eq!(report.next.as_deref(), Some("只补当前轮人工验收证据"));
+    }
+
+    #[test]
+    fn recovered_review_still_rejects_wrong_identity() {
+        let error = parse_strict_review_report(
+            r#"wrapped {"taskId":"old-task","round":2,"status":"complete","summary":"done"}"#,
+            &task_id(),
+            Round::new(2),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("identity mismatch"));
     }
 
     #[test]
