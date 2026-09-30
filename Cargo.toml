@@ -5,6 +5,7 @@ members = [
   "crates/adapters/chatgpt-cdp",
   "crates/adapters/linux-browser",
   "crates/adapters/sqlite-store",
+  "crates/adapters/attachment-store",
   "crates/runtime",
   "crates/cli",
 ]
