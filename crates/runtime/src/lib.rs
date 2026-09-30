@@ -732,11 +732,7 @@ impl DesktopRuntime {
             );
         }
 
-        if settled_any {
-            tracing::info!(
-                "settled previously executed Send from current desktop semantic evidence"
-            );
-        }
+        let _ = settled_any;
         Ok(())
     }
 
