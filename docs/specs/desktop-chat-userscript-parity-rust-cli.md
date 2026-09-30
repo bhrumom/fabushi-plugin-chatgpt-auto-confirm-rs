@@ -9,7 +9,7 @@ Source baseline commit: `587a03d6e607851ee8ced5d3ad13f65242fea07c`
 Source release at baseline: `2.10.15`  
 Primary production surface: ChatGPT desktop application  
 Reference real-device acceptance host: `htch-runtime`  
-Build/test authority: GitHub Actions only
+Build/test policy: htch-runtime may build/test during development; GitHub Actions remains the merge/release authority
 
 ## 0. Precedence
 
@@ -606,7 +606,7 @@ Exit codes must distinguish at least:
 
 ## 11. Testing and verification policy
 
-**All builds and automated tests run in GitHub Actions. Do not run `cargo build`, `cargo test`, Clippy, formatter verification or architecture builds locally or on `htch-runtime`.**
+**Development builds and tests may run directly on `htch-runtime` to shorten the desktop-integration feedback loop. GitHub Actions remains mandatory for merge/release qualification. Do not treat an `htch-runtime` result as a substitute for exact-HEAD CI evidence.**
 
 Required pyramid:
 
@@ -651,9 +651,11 @@ Use sanitized accessibility-tree fixtures/mock AT-SPI service for:
 
 GitHub Actions packages the actual CLI and runs it against a deterministic fake desktop surface through the same production port protocol. This proves wiring and process supervision, but not real ChatGPT behavior.
 
+During development, the same integration tests may also be built and run directly on `htch-runtime`; those runs are diagnostic/development evidence only.
+
 ### Layer 5 — real desktop acceptance on `htch-runtime`
 
-Runs only an exact-HEAD GitHub Actions artifact against the installed ChatGPT desktop application.
+For release qualification, runs an exact-HEAD GitHub Actions artifact against the installed ChatGPT desktop application. During development, locally built-on-device Rust binaries may also be exercised on `htch-runtime`, but they do not satisfy the release acceptance gate.
 
 A lower layer never substitutes for a higher gate.
 
@@ -672,19 +674,20 @@ These facts are reference discovery evidence, not a frozen product contract.
 
 Real acceptance procedure:
 
-1. GitHub Actions builds/tests/packages the exact candidate commit.
-2. Record workflow run id, artifact id/name and artifact SHA-256.
-3. Download that exact artifact to `htch-runtime`.
-4. Use `run_shell_command` only to invoke the packaged CLI; do not compile or test Rust on the device.
-5. Ensure ChatGPT desktop uses a user-owned authenticated session. Never inject credentials.
-6. Run `doctor` and desktop attachment checks.
-7. Dispatch a canary task containing a unique Fabushi marker and a deterministic reasoning preset.
-8. Verify from the CLI event stream that preset verification preceded attachment/send and that Send settled to the correct authored user boundary.
-9. Use device accessibility inspection as an **independent read-only oracle** to corroborate app state and evidence.
-10. Let the Rust CLI, not the device-controller, perform the ChatGPT UI mutation under test.
-11. Verify a real final response is bound to the current response boundary and the CLI reaches terminal state only after valid evidence.
-12. When a safe real authorization scenario is available, verify current-conversation grant handling and settlement. If no safe authorization card is available, Gate F remains unpassed rather than being replaced by a fixture claim.
-13. Persist a sanitized acceptance report and hashes.
+1. During development, `htch-runtime` may fetch/checkout the intended commit and run Rust build/test/format/clippy/architecture commands directly for rapid iteration.
+2. Device-side development results must record the exact commit SHA and commands used, and must never be reported as release qualification.
+3. For release qualification, GitHub Actions builds/tests/packages the exact candidate commit.
+4. Record workflow run id, artifact id/name and artifact SHA-256.
+5. Download that exact artifact to `htch-runtime` and use it for the formal real-device acceptance run.
+6. Ensure ChatGPT desktop uses a user-owned authenticated session. Never inject credentials.
+7. Run `doctor` and desktop attachment checks.
+8. Dispatch a canary task containing a unique Fabushi marker and a deterministic reasoning preset.
+9. Verify from the CLI event stream that preset verification preceded attachment/send and that Send settled to the correct authored user boundary.
+10. Use device accessibility inspection as an **independent read-only oracle** to corroborate app state and evidence.
+11. Let the Rust CLI, not the device-controller, perform the ChatGPT UI mutation under test.
+12. Verify a real final response is bound to the current response boundary and the CLI reaches terminal state only after valid evidence.
+13. When a safe real authorization scenario is available, verify current-conversation grant handling and settlement. If no safe authorization card is available, Gate F remains unpassed rather than being replaced by a fixture claim.
+14. Persist a sanitized acceptance report and hashes.
 
 During product acceptance, MCP/device `computer_*` actions must not click Send, choose reasoning, choose approval, attach files or perform another product action on behalf of the Rust CLI. They may inspect/read state, start the application when necessary, or assist an explicit user-owned login flow. This separation prevents false-positive E2E evidence.
 
@@ -782,15 +785,16 @@ No row may be marked `implemented` from type scaffolding alone. It requires ship
 4. supervise daemon path;
 5. stable exit/error contract.
 
-### Phase 5 — Actions-only verification
+### Phase 5 — development + CI verification
 
-1. architecture gate;
-2. fmt;
-3. domain/application tests;
-4. adapter contract fixtures;
-5. clippy;
-6. packaged release artifact;
-7. fixture integration.
+1. optionally run architecture/fmt/test/clippy/integration on `htch-runtime` during development;
+2. run architecture gate in GitHub Actions;
+3. run fmt check in GitHub Actions;
+4. run domain/application tests in GitHub Actions;
+5. run adapter contract fixtures in GitHub Actions;
+6. run clippy in GitHub Actions;
+7. produce packaged release artifact in GitHub Actions;
+8. run fixture integration in GitHub Actions.
 
 ### Phase 6 — `htch-runtime` acceptance
 
@@ -829,7 +833,7 @@ Required on exact candidate commit:
 - `cargo clippy --workspace --all-targets -- -D warnings`;
 - release/package build.
 
-These commands are executed by GitHub Actions, not locally.
+These commands must pass in GitHub Actions on the exact candidate commit. They may also be run on `htch-runtime` during development.
 
 ### Gate C — source parity contract
 
@@ -917,8 +921,8 @@ Specifically:
 - continuous Work -> Review can run across multiple conversations;
 - abnormal handoff preserves useful work context without transcript explosion;
 - multiple tasks are fairly supervised with a single UI writer;
-- all automated builds/tests come from GitHub Actions;
-- `htch-runtime` runs only exact-HEAD packaged artifacts for real desktop acceptance;
+- development builds/tests may run on `htch-runtime`, while merge/release qualification still requires exact-HEAD GitHub Actions;
+- formal `htch-runtime` release acceptance uses the exact-HEAD packaged GitHub Actions artifact;
 - full parity is not claimed until the migration ledger and Gates A-G are closed.
 
 ## 18. Baseline implementation status
