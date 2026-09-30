@@ -6,7 +6,7 @@ use fabushi_chatgpt_application::{
 };
 use fabushi_chatgpt_desktop_atspi::ChatGptDesktopAtspi;
 use fabushi_chatgpt_desktop_process::ChatGptDesktopProcess;
-use fabushi_chatgpt_sqlite_store::{SqliteStore, UiSessionLease};
+use fabushi_chatgpt_sqlite_store::{SqliteStore, TransitionRecord, UiSessionLease};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,10 +16,12 @@ use tokio::time::MissedTickBehavior;
 
 pub use fabushi_chatgpt_application::RunOptions;
 pub use fabushi_chatgpt_cdp::ChatGptCdp;
-pub use fabushi_chatgpt_domain::{
-    ChatSurfaceSnapshot, DispatchId, ReasoningPreset, RunReport, RunState,
-};
+pub use fabushi_chatgpt_domain::{ChatSurfaceSnapshot, ReasoningPreset, RunReport, RunState};
+use fabushi_chatgpt_domain::{DispatchId, RunId, TaskId};
 pub use fabushi_chatgpt_linux_browser::{BrowserLaunch, find_chromium_binary, launch_chromium};
+use serde_json::json;
+use sha2::{Digest, Sha256};
+use tokio::sync::Mutex;
 
 const DESKTOP_UI_LEASE_NAME: &str = "chatgpt-desktop-ui";
 const DESKTOP_UI_LEASE_TTL_MS: i64 = 15_000;
@@ -253,13 +255,200 @@ impl ChatSurfacePort for DesktopSessionActorHandle {
     }
 }
 
-pub struct RunWorker {
+struct DurableRunJournal {
+    store: SqliteStore,
+    task_id: TaskId,
+    run_id: RunId,
+    revision: i64,
+}
+
+impl DurableRunJournal {
+    fn open(path: &Path, task_id: TaskId, run_id: RunId) -> Result<Self> {
+        let store = SqliteStore::open(path)?;
+        let revision = store.task_revision(&task_id)?.unwrap_or(0);
+        Ok(Self {
+            store,
+            task_id,
+            run_id,
+            revision,
+        })
+    }
+
+    fn begin(&mut self, effect_kind: &str, effect_payload_json: String) -> Result<i64> {
+        let next_revision = self.revision + 1;
+        let mut hasher = Sha256::new();
+        hasher.update(self.task_id.as_str().as_bytes());
+        hasher.update(self.run_id.as_str().as_bytes());
+        hasher.update(next_revision.to_le_bytes());
+        hasher.update(effect_kind.as_bytes());
+        hasher.update(effect_payload_json.as_bytes());
+        let idempotency_key = format!("run-effect:{:x}", hasher.finalize());
+        let materialized_state_json = json!({
+            "taskId": self.task_id.as_str(),
+            "runId": self.run_id.as_str(),
+            "revision": next_revision,
+            "lastEffect": effect_kind,
+        })
+        .to_string();
+        self.store.record_transition(
+            &TransitionRecord {
+                task_id: self.task_id.clone(),
+                run_id: self.run_id.clone(),
+                expected_revision: self.revision,
+                next_revision,
+                event_kind: format!("{effect_kind}_prepared"),
+                event_payload_json: effect_payload_json.clone(),
+                materialized_state_json,
+                effect_kind: effect_kind.to_owned(),
+                effect_payload_json,
+                idempotency_key: idempotency_key.clone(),
+            },
+            unix_time_ms()?,
+        )?;
+        self.revision = next_revision;
+        let effect = self
+            .store
+            .pending_effects(128)?
+            .into_iter()
+            .find(|effect| effect.idempotency_key == idempotency_key)
+            .ok_or_else(|| anyhow::anyhow!("durable effect missing after commit"))?;
+        self.store.mark_effect_attempted(effect.id)?;
+        Ok(effect.id)
+    }
+
+    fn settle(&self, effect_id: i64, ok: bool, detail: &str) -> Result<()> {
+        self.store.settle_effect(
+            effect_id,
+            &json!({ "ok": ok, "detail": detail }).to_string(),
+            unix_time_ms()?,
+        )
+    }
+}
+
+#[derive(Clone)]
+struct DurableRunSurface {
     surface: DesktopSessionActorHandle,
+    journal: Arc<Mutex<DurableRunJournal>>,
+}
+
+impl DurableRunSurface {
+    fn new(
+        surface: DesktopSessionActorHandle,
+        state_db_path: &Path,
+        task_id: TaskId,
+        run_id: RunId,
+    ) -> Result<Self> {
+        Ok(Self {
+            surface,
+            journal: Arc::new(Mutex::new(DurableRunJournal::open(
+                state_db_path,
+                task_id,
+                run_id,
+            )?)),
+        })
+    }
+
+    async fn record_and_settle<T>(
+        &self,
+        effect_kind: &str,
+        payload: serde_json::Value,
+        effect: impl std::future::Future<Output = Result<T>> + Send,
+    ) -> Result<T>
+    where
+        T: Send,
+    {
+        let effect_id = {
+            let mut journal = self.journal.lock().await;
+            journal.begin(effect_kind, payload.to_string())?
+        };
+        let result = effect.await;
+        let settlement = match &result {
+            Ok(_) => (true, "effect returned successfully".to_owned()),
+            Err(error) => (false, error.to_string()),
+        };
+        {
+            let journal = self.journal.lock().await;
+            journal.settle(effect_id, settlement.0, &settlement.1)?;
+        }
+        result
+    }
+}
+
+#[async_trait]
+impl ChatSurfacePort for DurableRunSurface {
+    async fn observe(&self) -> Result<ChatSurfaceSnapshot> {
+        self.surface.observe().await
+    }
+
+    async fn set_reasoning_preset(&self, preset: ReasoningPreset) -> Result<bool> {
+        self.record_and_settle(
+            "set_reasoning",
+            json!({"preset": preset.index()}),
+            self.surface.set_reasoning_preset(preset),
+        )
+        .await
+    }
+
+    async fn send_prompt(&self, prompt: &str) -> Result<()> {
+        self.record_and_settle(
+            "send_prompt",
+            json!({"prompt": prompt}),
+            self.surface.send_prompt(prompt),
+        )
+        .await
+    }
+
+    async fn approve_current_conversation(&self) -> Result<bool> {
+        self.record_and_settle(
+            "approve_current_conversation",
+            json!({}),
+            self.surface.approve_current_conversation(),
+        )
+        .await
+    }
+
+    async fn dismiss_rate_limit_notice(&self) -> Result<bool> {
+        self.record_and_settle(
+            "dismiss_rate_limit_notice",
+            json!({}),
+            self.surface.dismiss_rate_limit_notice(),
+        )
+        .await
+    }
+
+    async fn recover_current_surface(&self) -> Result<()> {
+        self.record_and_settle(
+            "recover_current_surface",
+            json!({}),
+            self.surface.recover_current_surface(),
+        )
+        .await
+    }
+
+    async fn start_fresh_conversation(&self) -> Result<()> {
+        self.record_and_settle(
+            "start_fresh_conversation",
+            json!({}),
+            self.surface.start_fresh_conversation(),
+        )
+        .await
+    }
+}
+
+pub struct RunWorker {
+    surface: DurableRunSurface,
 }
 
 impl RunWorker {
-    fn new(surface: DesktopSessionActorHandle) -> Self {
-        Self { surface }
+    fn new(
+        surface: DesktopSessionActorHandle,
+        state_db_path: &Path,
+        task_id: TaskId,
+        run_id: RunId,
+    ) -> Result<Self> {
+        Ok(Self {
+            surface: DurableRunSurface::new(surface, state_db_path, task_id, run_id)?,
+        })
     }
 
     async fn execute(&self, prompt: &str, options: RunOptions) -> Result<RunReport> {
@@ -399,8 +588,15 @@ impl DesktopRuntime {
         let marker = dispatch_marker()?;
         let prepared = format!("{prompt}\n\n[Fabushi:{marker}]");
         let mut options = options;
-        options.expected_dispatch_id = Some(DispatchId::new(marker));
-        let worker = RunWorker::new(self.desktop_session().await?.clone());
+        options.expected_dispatch_id = Some(DispatchId::new(marker.clone()));
+        let task_id = TaskId::new(format!("task-{marker}"));
+        let run_id = RunId::new(format!("run-{marker}"));
+        let worker = RunWorker::new(
+            self.desktop_session().await?.clone(),
+            &self.state_db_path,
+            task_id,
+            run_id,
+        )?;
         worker.execute(&prepared, options).await
     }
 }
@@ -457,6 +653,7 @@ pub async fn run_prompt(
 mod actor_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
 
     #[derive(Default)]
     struct FakeSurface {
@@ -539,6 +736,77 @@ mod actor_tests {
         drop(third);
         tokio::time::sleep(Duration::from_millis(50)).await;
 
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[derive(Default)]
+    struct BlockingSendSurface {
+        entered: Notify,
+        release: Notify,
+    }
+
+    #[async_trait]
+    impl ChatSurfacePort for BlockingSendSurface {
+        async fn observe(&self) -> Result<ChatSurfaceSnapshot> {
+            Ok(ChatSurfaceSnapshot::default())
+        }
+
+        async fn send_prompt(&self, _prompt: &str) -> Result<()> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(())
+        }
+
+        async fn approve_current_conversation(&self) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn dismiss_rate_limit_notice(&self) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn recover_current_surface(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn start_fresh_conversation(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn run_worker_journals_destructive_effect_before_settlement() {
+        let path = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-effect-journal-{}-{}.sqlite3",
+            std::process::id(),
+            dispatch_marker().unwrap()
+        ));
+        let fake = Arc::new(BlockingSendSurface::default());
+        let actor_surface: Arc<dyn ChatSurfacePort> = fake.clone();
+        let actor = DesktopSessionActorHandle::spawn(actor_surface);
+        let task_id = TaskId::new("task-journal");
+        let run_id = RunId::new("run-journal");
+        let surface = DurableRunSurface::new(actor, &path, task_id.clone(), run_id).unwrap();
+        let sending = {
+            let surface = surface.clone();
+            tokio::spawn(async move { surface.send_prompt("hello").await })
+        };
+
+        fake.entered.notified().await;
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(store.task_revision(&task_id).unwrap(), Some(1));
+        let pending = store.pending_effects(10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].effect_kind, "send_prompt");
+        assert_eq!(pending[0].attempt_count, 1);
+
+        fake.release.notify_one();
+        sending.await.unwrap().unwrap();
+        assert!(store.pending_effects(10).unwrap().is_empty());
+
+        drop(surface);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));

@@ -159,13 +159,13 @@
       "status": "partial",
       "evidence": [
         "crates/adapters/sqlite-store/src/lib.rs",
-        "crates/adapters/sqlite-store/Cargo.toml"
+        "crates/adapters/sqlite-store/Cargo.toml",
+        "crates/runtime/src/lib.rs"
       ],
       "missing": [
-        "application/runtime production wiring",
-        "full task CRUD/control",
-        "durable actor recovery",
-        "real acceptance"
+        "startup inspection/replay of unsettled effects from semantic postconditions",
+        "stable durable task/run identity across CLI restart and full task CRUD/control",
+        "real crash/restart acceptance"
       ]
     },
     {
@@ -214,7 +214,7 @@
       "missing": [
         "cross-process durable UI lease acceptance on htch-runtime",
         "fair multi-task next-wake scheduler",
-        "SQLite/outbox crash recovery wiring",
+        "startup semantic reconciliation/replay of unsettled SQLite outbox effects",
         "pause/resume/cancel worker lifecycle",
         "htch-runtime concurrent-task acceptance"
       ]

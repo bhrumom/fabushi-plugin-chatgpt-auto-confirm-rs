@@ -16,3 +16,5 @@ fabushi-chatgpt-domain = { path = "../domain" }
 fabushi-chatgpt-sqlite-store = { path = "../adapters/sqlite-store" }
 fabushi-chatgpt-linux-browser = { path = "../adapters/linux-browser" }
 tokio.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
