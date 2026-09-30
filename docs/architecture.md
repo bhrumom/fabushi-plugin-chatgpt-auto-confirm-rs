@@ -1,438 +1,283 @@
 # Canonical Architecture
 
-Status: authoritative
+Status: authoritative  
+Last reconciled: 2026-09-30
 
 ## 1. Decision
 
-Use a recoverable modular monolith with Hexagonal Architecture (Ports and Adapters), deterministic application state machines, and actor-style runtime supervision.
+Use a recoverable modular monolith with Hexagonal Architecture, deterministic domain/application state machines, SQLite WAL durable state, a transactional effect outbox, and actor-style supervision.
 
-Do not use microservices by default. Browser automation needs strong local ownership of browser processes, profiles, page targets, task leases, and recovery state. Crate boundaries provide compile-time modularity; actors provide runtime isolation.
+The production target is the ChatGPT desktop application. Browser/CDP code may remain temporarily as migration scaffolding and regression comparison, but it is not the target production topology.
 
 ## 2. Dependency direction
 
-Allowed dependency direction:
+Allowed internal dependency direction:
 
-    cli
-     |
-     v
-   runtime  -----------------------------+
-     |                                   |
-     v                                   v
- application <---------------------- adapters
-     |                            /     |      \
-     v                           /      |       \
-   domain                 chatgpt-cdp linux  sqlite
+```
+cli
+ |
+ v
+runtime ------------------------------+
+ |                                     |
+ v                                     v
+application <---------------------- adapters
+ |
+ v
+domain
+```
 
 Rules:
 
-1. domain depends on no internal crate and no async/browser/OS/database runtime.
-2. application depends only on domain and interface-support libraries.
-3. adapters depend inward on application/domain and implement ports.
-4. runtime is the composition root and chooses Tokio plus concrete adapters.
-5. cli depends on runtime only among internal crates.
-6. selectors/CDP scripts never appear in domain/application.
-7. recovery decisions never live in browser adapters.
+1. `domain` depends on no internal crate and no Tokio, SQLite, D-Bus, AT-SPI, Electron, filesystem, process, HTTP or browser automation API.
+2. `application` depends only on `domain` plus interface-support libraries. It owns use cases and recovery policy.
+3. adapters point inward and implement application ports.
+4. `runtime` is the composition root and actor supervisor.
+5. `cli` depends on `runtime` only among internal crates.
+6. DOM selectors, URLs, AT-SPI roles/labels, process IDs, Electron details, screen coordinates, SQLite schemas and OS APIs must not leak into `domain` or `application`.
+7. recovery decisions live in application policy, never in adapters.
+8. desktop adapters report semantic facts and execute requested effects; they do not decide what the task should do next.
 
-## 3. Crates
+## 3. Target crates
 
-### crates/domain
+Production target:
 
-Pure deterministic invariants and value types:
-- PageSnapshot semantic facts;
-- completion invariants;
-- canonical conversation URL validation;
-- TaskId, RunId, AccountId, ConversationId;
-- task/run states;
-- approval fingerprints;
-- recovery reasons and durable event types.
+```
+crates/
+  domain/
+  application/
+  adapters/
+    chatgpt-desktop-atspi/
+    chatgpt-desktop-process/
+    sqlite-store/
+    attachment-store/
+  runtime/
+  cli/
+```
 
-Forbidden: Tokio, CDP, Chromium, filesystem, SQLite, HTTP and OS APIs.
+Legacy migration-only adapters may coexist while parity is incomplete:
 
-### crates/application
+- `crates/adapters/chatgpt-cdp`
+- `crates/adapters/linux-browser`
 
-Use cases and ports:
-- RunPrompt;
-- recovery policy;
-- BrowserPort;
-- Clock;
-- future RunStore, EventJournal, ProfileManager and EvidenceSink ports.
+They must not become the default shipping composition once desktop parity is declared complete.
 
-Application decides what effect should happen. It never knows selectors, PIDs, SQLite schemas or profile paths.
+## 4. Domain
 
-### crates/adapters/chatgpt-cdp
+`crates/domain` owns pure semantic types and invariants:
 
-Owns:
-- CDP target discovery and WebSocket transport;
-- ChatGPT DOM -> PageSnapshot projection;
-- prompt composer interaction;
-- exact Allow once action;
-- rate-limit notice dismissal;
-- future verified model/thinking selection;
-- sanitized DOM fixture contract tests.
+- `TaskId`, `RunId`, `DispatchId`, `Phase`, `Round`, `GoalRevision`;
+- opaque `ConversationRef` and `ConversationFingerprint`;
+- `UserTurnBoundary`, `AssistantResponseBoundary`, ownership confidence;
+- `ChatSurfaceSnapshot`;
+- five-position `ReasoningPreset`;
+- approval fingerprints and settlement identity;
+- attachment identity;
+- versioned `RecoveryEnvelope`;
+- task/run states and durable events;
+- completion invariants.
 
-The adapter reports facts and executes requested effects; it does not choose recovery policy.
+The domain must not parse URLs or expose web/page abstractions. `PageSnapshot`, canonical conversation URLs and browser target IDs are forbidden final interfaces.
 
-### crates/adapters/linux-browser
+## 5. Application
 
-Owns:
-- Chromium/Chrome discovery;
-- localhost-only CDP configuration;
-- process launch/restart/shutdown;
-- profile permissions;
-- future dynamic DevToolsActivePort discovery.
+`crates/application` owns policy and use cases:
 
-It never inspects ChatGPT DOM.
+- task enqueue/run/pause/resume/cancel/delete/edit-goal;
+- one-shot and continuous Work -> Review orchestration;
+- strict `MAHAYANA_TASK_REPORT_V1` parsing bound to current `taskId` + `round`;
+- dispatch intent, send confirmation and deduplication;
+- exact current-conversation authorization policy;
+- 12-second authorization settlement latch;
+- 8-second live no-approval confirmation before destructive handoff;
+- ordinary/recovered terminal stability;
+- 2-minute Review final settlement;
+- reasoning preset verification/recovery;
+- attachment readiness policy;
+- recovery matrix;
+- `RecoveryEnvelope` construction;
+- multi-task fairness;
+- effect idempotency and settlement rules.
 
-### future crates/adapters/sqlite-store
+Application ports include:
 
-Use SQLite WAL for durable state:
-- tasks;
-- runs;
-- append-only run events;
-- approval fingerprints;
-- account/browser metadata;
-- worker leases;
-- acceptance evidence metadata.
+- `ChatSurfacePort`;
+- `ChatProcessPort`;
+- task/run stores;
+- `EventJournal`;
+- `EffectOutbox`;
+- `AttachmentStore`;
+- `Clock`;
+- `EvidenceSink`.
 
-SQLite is preferred to ad-hoc JSON because crash recovery needs transactions, revisions, indexes and atomic lease ownership.
+## 6. Semantic desktop contract
 
-### crates/runtime
+Application consumes `ChatSurfaceSnapshot`, never raw accessibility or renderer data.
 
-Composition root and actor runtime:
-- concrete adapter wiring;
-- Tokio clock;
-- Supervisor;
-- AccountBrowserActor;
-- RunWorker lifecycle;
-- bounded concurrency;
-- cancellation;
-- startup recovery;
-- graceful shutdown.
+Minimum facts include:
 
-Runtime must not become a second business-policy layer.
+- app health;
+- composer readiness and draft fingerprint;
+- user-turn and assistant-response boundaries;
+- conversation ref/fingerprint and ownership confidence;
+- visible assistant prose;
+- visible working/activity trace;
+- streaming/busy and Stop state;
+- authorization presence, actionability and settlement state;
+- response-local Copy evidence;
+- strict Review report evidence;
+- rate-limit, retryable error, unable-to-load, connection-interrupted, length-limit, stream-timeout/cache-expired;
+- renderer/app-shell hydration;
+- reasoning picker and verified selected preset;
+- attachment readiness;
+- blocker/modal;
+- progress fingerprint.
 
-### crates/cli
+Adapter implementation details remain private to the adapter.
 
-Thin operator surface. Parse arguments, call runtime entrypoints, print structured results and return meaningful exit codes. It must not import concrete adapters directly.
+## 7. Production runtime topology
 
-## 4. Production runtime topology
+```
+Supervisor
+  |
+  +-- DesktopSessionActor   # sole desktop UI mutation owner
+  |      |
+  |      +-- visible conversation lease
+  |      +-- process/window attachment
+  |
+  +-- RunWorker(task A)
+  +-- RunWorker(task B)
+  +-- RunWorker(task C)
+```
 
-    Supervisor
-      |
-      +-- AccountBrowserActor(account A)
-      |      |
-      |      +-- TargetLease(run 1)
-      |      +-- TargetLease(run 2)
-      |
-      +-- AccountBrowserActor(account B)
-             |
-             +-- TargetLease(run 3)
+`DesktopSessionActor` serializes all mutating ChatGPT desktop actions. Multiple server-side conversations may continue concurrently, but the local desktop UI has exactly one mutation owner.
 
-Use one authenticated browser process per account profile and one leased page target per active run.
+`RunWorker` never directly accesses AT-SPI, windows, processes or native dialogs. It emits semantic desired effects and waits for observed settlement.
 
-Why:
-- Chromium profiles are not safe for concurrent writers from independent processes.
-- cloning a live profile per task is fragile and can create stale auth/session state.
-- one process per account preserves authenticated state;
-- target leases isolate conversations;
-- on process crash, workers recover from durable state and canonical conversation URLs.
+## 8. Durable state
 
-A worker must never navigate or close a target leased by another worker.
+SQLite WAL is the durable source of truth.
 
-## 5. Actor ownership
+Minimum tables:
 
-### Supervisor
+- `tasks`;
+- `runs`;
+- `dispatch_attempts`;
+- `run_events`;
+- `effect_outbox`;
+- `approval_fingerprints`;
+- `ui_session_leases`;
+- `attachments`;
+- `acceptance_evidence`.
 
-Owns global runtime topology:
-- restore unfinished runs at startup;
-- enforce max concurrency;
-- route a run to an account browser;
-- maintain worker leases;
-- restart failed account browser actors;
-- cancel/drain workers on shutdown.
-
-It never manipulates DOM.
-
-### AccountBrowserActor
-
-Sole owner of one account browser process and profile:
-- launch/attach;
-- verify CDP health;
-- create/find targets;
-- lease one target to one RunWorker;
-- restart process on fatal transport failure;
-- rebind workers via canonical conversation URLs.
-
-### RunWorker
-
-Sole owner of one run:
-- execute application use cases;
-- persist meaningful transitions;
-- operate only its target lease;
-- obey cancellation;
-- settle exactly once.
-
-No two workers may concurrently own the same run or target.
-
-## 6. Durable state model
-
-The renderer is ephemeral. Conversation and run state are durable.
-
-Target tables:
-
-### tasks
-- task_id
-- account_id
-- original_prompt
-- current_revision
-- status
-- priority
-- created_at
-- updated_at
-
-### runs
-- run_id
-- task_id
-- state
-- revision
-- canonical_conversation_url
-- target identity
-- last_activity_fingerprint
-- last_progress_at
-- continuation_count
-- dispatch_retry_count
-- recovery_count
-- rate_limit_pause_count
-- started_at
-- finished_at
-
-### run_events
-
-Append-only journal:
-- sequence
-- run_id
-- event_type
-- payload_json
-- created_at
-
-Examples:
-- RunStarted
-- PromptDispatchRequested
-- PromptDispatchConfirmed
-- ApprovalObserved
-- ApprovalApplied
-- RateLimitObserved
-- RecoveryReloadRequested
-- RecoveryReloadApplied
-- ContinuationRequested
-- CanonicalConversationBound
-- TerminalEvidenceObserved
-- RunCompleted
-- RunFailed
-- RunCancelled
-
-### approval_fingerprints
-
-Deduplicate authorization actions across renderer remounts and process restarts.
-
-### worker_leases
-
-Prevent duplicate workers after crash/restart using owner identity, revision and expiry.
-
-## 7. Transaction and idempotency rule
-
-For each durable transition:
+For each destructive UI effect:
 
 1. calculate next state;
-2. append event;
-3. update run snapshot/revision;
-4. commit both in one SQLite transaction;
-5. then expose the new durable state.
+2. append durable event;
+3. update materialized state;
+4. append outbox effect with idempotency key;
+5. commit the same SQLite transaction;
+6. execute the UI effect;
+7. re-observe semantic postcondition;
+8. settle the effect.
 
-Browser effects cannot be atomic with SQLite, so each effect needs idempotency plus post-effect observation.
+UI effects are at-least-once with idempotency and postcondition observation. Exactly-once must never be assumed.
 
-Examples:
-- prompt send: attempt fingerprint + user-turn confirmation;
-- approval: approval fingerprint + post-click settlement;
-- reload: safe repeatable effect;
-- continuation: distinct continuation marker + user-turn confirmation.
+## 9. Conversation identity
 
-Do not assume exactly-once browser effects. Design for at-least-once effects with deduplication and observable settlement.
+A web route is not domain identity.
 
-## 8. Browser contract
+Durable identity is composed from:
 
-Application sees semantic facts only.
+1. `TaskId / RunId / Phase / Round / GoalRevision`;
+2. Fabushi dispatch marker;
+3. current user-turn boundary;
+4. current assistant-response boundary;
+5. `ConversationFingerprint`;
+6. optional opaque `ConversationRef` supplied by the desktop adapter.
 
-BrowserPort evolves toward:
-- observe;
-- send_prompt;
-- approve_once;
-- dismiss_notice;
-- reload;
-- navigate;
-- ensure_execution_profile;
-- create_target;
-- close_owned_target.
+Sidebar title, recency, URL shape or visible assistant text alone is insufficient ownership evidence.
 
-Selector policy:
-1. stable data-testid or explicit role/aria contract;
-2. structural relation inside the latest message/card;
-3. localized exact labels only when semantic identifiers do not exist;
-4. never broad historical-transcript text search for destructive actions.
+## 10. Safety and completion
 
-Selectors are centralized and covered by sanitized DOM fixtures.
+Automatic authorization is limited to exact current-conversation/current-session scope. Persistent/global grants are forbidden.
 
-## 9. Completion invariant
+Authorization surface presence and actionability are distinct. Disabled/remounted controls still count as presence and are never success evidence.
 
-A run is terminal only when:
-- response is not in flight;
-- latest assistant turn belongs to latest user turn;
-- latest assistant turn owns a stable response action row;
-- Copy/复制 exists on that row;
-- terminal evidence is stable across repeated observations.
+Stop disappearance is never completion evidence.
 
-Stop-button disappearance alone is never completion evidence.
+Ordinary completion requires current-run ownership, no streaming/busy state, no Stop, no authorization, no active settlement, no higher-priority blocker/error state, response-local Copy evidence and stable current response evidence.
 
-Only validated canonical /c/<conversation-id> URLs are durable recovery URLs.
+Normal terminal stability is about 4 seconds; recovered/static fallback is about 8 seconds. Review may complete from a valid current-bound strict report before Copy hydrates, within the dedicated Review settlement policy.
 
-## 10. Execution profile
+## 11. Recovery ownership
 
-Introduce ExecutionProfile:
-- model;
-- thinking_effort;
-- connector requirements;
-- optional tool mode.
+Application owns timer and precedence rules, including:
 
-Before dispatch, application asks BrowserPort to ensure and verify the profile. The adapter returns observed values. If requested model/thinking cannot be verified, fail closed rather than inheriting the prior UI selection.
+- 90-second dispatch confirmation followed by safe fresh-conversation recovery and re-dispatch of the prepared intent;
+- 60-second unlimited missing reasoning-picker same-surface recovery cycle;
+- 45-second initial attachment wait plus bounded retry;
+- 15-minute generic no-progress recovery;
+- bounded generic renderer hydration recovery;
+- explicit unable-to-load recovery every 30 seconds up to seven times then fresh handoff;
+- immediate fresh handoff on connection interruption;
+- fresh handoff on stream polling timeout;
+- once-per-failure retry on stream cache expiry;
+- 5-minute rate-limit cooldown, preserving the first three episodes and using fresh recovery on the fourth;
+- fresh handoff for conversation length limit with bounded 64k carry.
 
-## 11. Recovery state machine
+Memory measurements are diagnostic only and never trigger reload/restart/fresh-chat/task abandonment.
 
-Recovery timers are policy inputs, never hidden inside CDP code:
-- dispatch confirmation window;
-- stale-progress reload window;
-- rate-limit backoff;
-- continuation window;
-- global timeout.
+## 12. Desktop adapters
 
-Possible application effects:
-- ResendOriginalPrompt;
-- ReloadCurrentConversation;
-- DismissRateLimitAndBackoff;
-- ContinueAll;
-- ReattachCanonicalConversation;
-- StartFreshConversationWithRecoveryEnvelope;
-- FailRun.
+### chatgpt-desktop-atspi
 
-### RecoveryEnvelope
+Owns Linux AT-SPI2/D-Bus discovery and mapping between the actual ChatGPT desktop accessibility surface and semantic facts/effects.
 
-When a fresh conversation is necessary, build the new prompt from durable state, not just the last visible fragment.
+It may know roles, labels, hierarchy, Electron accessibility quirks and native dialog details. Those facts never cross the port boundary.
 
-It should include:
-- original goal;
-- latest authoritative acceptance/planning prompt when applicable;
-- materially relevant assistant progress/status messages from the interrupted run;
-- completed work;
-- remaining work;
-- blockers;
-- exact repository/commit/task identity;
-- explicit instruction to continue rather than redo completed work.
+### chatgpt-desktop-process
 
-The envelope is versioned, serializable and testable.
+Owns app discovery/launch/attach/health/restart observation and build/version evidence. It does not inspect conversation content.
 
-## 12. Concurrency
+### sqlite-store
 
-Use bounded actor-style concurrency:
-- Tokio tasks are runtime implementation details;
-- mpsc commands between actors;
-- cancellation propagation;
-- Semaphore limits active RunWorkers;
-- AccountBrowserActor serializes browser-level resource mutation;
-- each RunWorker owns one TargetLease.
+Owns SQL schema, transactions, WAL configuration, optimistic revisions, event journal, outbox and UI-session leases.
 
-Do not guard the whole runtime with one global Mutex.
+### attachment-store
 
-## 13. Security
+Owns user-selected file bodies or stable local references and attachment hashes/metadata. It must never silently omit a required attachment and send text-only work.
 
-- CDP binds to 127.0.0.1 only.
-- profiles are user-owned local state.
-- do not collect passwords, OTPs, API tokens or payment data.
-- cookie export is not a normal runtime workflow.
-- profile directories should be mode 0700 on Linux.
-- logs contain task/run IDs and hashes; prompt bodies and sensitive page text are excluded by default.
-- auto approval remains exact Allow once/current-session only.
-- uncertain authorization UI fails closed.
+## 13. CLI
 
-## 14. Observability
+CLI is thin. It parses arguments, invokes runtime entrypoints, emits JSON/JSONL and stable exit codes.
 
-Structured tracing fields:
-- task_id;
-- run_id;
-- account_id;
-- target_id;
-- state;
-- transition;
-- recovery_count;
-- dispatch_attempt;
-- duration.
+The target surface includes:
 
-Metrics later:
-- dispatch confirmation latency;
-- first assistant activity latency;
-- completion latency;
-- approval count;
-- reload count;
-- continuation count;
-- browser restart count;
-- terminal failure reason.
+- `doctor`;
+- task enqueue/list/show/edit/delete;
+- pause/resume/cancel;
+- run/supervise/watch;
+- evidence/report export.
 
-## 15. Testing pyramid
+CLI must not contain selectors, accessibility labels, process/window logic, SQL or recovery policy.
 
-Layer 1: domain unit/property tests.
-- Stop disappeared is not completion.
-- stale Copy from old turn is not completion.
-- canonical URL rejects transient routes.
-- approval fingerprint stability.
+## 14. Testing and release gates
 
-Layer 2: application fake ports + virtual clock.
-- 90-second resend.
-- 15-minute reload.
-- 5-minute rate-limit backoff.
-- 30-minute continuation.
-- timeout.
-- stable terminal evidence.
-- idempotency decisions.
+Development builds/tests may run on `htch-runtime`.
 
-Layer 3: adapter contract with sanitized DOM fixtures and mock CDP.
+Exact candidate HEAD must pass GitHub Actions:
 
-Layer 4: real Chromium against local fixture page.
+- architecture gate;
+- `cargo fmt --all -- --check`;
+- `cargo test --workspace`;
+- `cargo clippy --workspace --all-targets -- -D warnings`;
+- package/release build;
+- deterministic integration fixtures.
 
-Layer 5: authenticated Linux ChatGPT with user-owned login and exact commit/environment/evidence.
+Formal real-device release acceptance must download the exact-HEAD Actions artifact to `htch-runtime`. The Rust CLI itself must perform Send, reasoning selection, approval, attachment, retry and recovery actions. Device-control is only an independent oracle and may not substitute for product behavior.
 
-A lower layer never substitutes for a higher acceptance layer.
+## 15. Migration rule
 
-## 16. Architecture gates
+No migration ledger row may be marked implemented because a struct, trait, stub or mock exists. A row requires production implementation, production wiring, deterministic tests and the highest applicable acceptance evidence.
 
-CI rejects:
-- Tokio/HTTP/CDP/SQLite/browser dependencies in domain;
-- concrete adapters imported by application;
-- concrete adapters imported directly by cli;
-- browser selector strings in domain/application;
-- recovery policy duplicated in adapters/runtime;
-- automatic approval broader than Allow once/current session.
-
-Architecture is a release gate, not documentation advice.
-
-## 17. Implementation order
-
-1. establish dependency boundaries and architecture CI;
-2. put recovery orchestration behind application ports;
-3. add SQLite durable journal and leases;
-4. add Supervisor/AccountBrowserActor/RunWorker;
-5. add target ownership and crash reattachment;
-6. port queue/task-report semantics;
-7. implement verified model/thinking selection;
-8. add RecoveryEnvelope and fresh-chat handoff;
-9. run local Chromium contract suite;
-10. run real authenticated Linux acceptance.
-
-Do not split into distributed services unless profiling or isolation evidence proves the modular monolith insufficient.
+The legacy CDP/browser path is migration scaffolding only until it is removed or feature-gated away from the production default.
