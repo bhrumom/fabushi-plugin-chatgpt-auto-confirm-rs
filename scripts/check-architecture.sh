@@ -38,10 +38,10 @@ if contains "$CLI_CARGO" 'fabushi-chatgpt-(application|domain|cdp|linux-browser)
   fail "CLI bypasses the runtime composition root"
 fi
 
-if grep -R -n -E 'querySelector|data-testid|Runtime\.evaluate|Page\.reload|remote-debugging-port' \
+if grep -R -n -E 'querySelector|data-testid|Runtime\.evaluate|Page\.reload|remote-debugging-port|PageSnapshot|BrowserPort|canonical_conversation_url|https://chatgpt\.com/c/' \
   crates/domain/src crates/application/src >/tmp/fabushi-architecture-selector-leaks.txt 2>/dev/null; then
   cat /tmp/fabushi-architecture-selector-leaks.txt >&2
-  fail "browser/CDP implementation detail leaked into domain/application"
+  fail "browser/desktop implementation detail or superseded web abstraction leaked into domain/application"
 fi
 
 if grep -R -n -E 'Allow once|允许一次|Approve once|仅允许本次|允许本次' crates/domain/src >/tmp/fabushi-domain-ui-labels.txt 2>/dev/null; then
