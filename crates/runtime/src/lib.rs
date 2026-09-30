@@ -1080,7 +1080,11 @@ mod actor_tests {
         let fake = Arc::new(BlockingReasoningSurface::default());
         let actor_surface: Arc<dyn ChatSurfacePort> = fake.clone();
         let actor = DesktopSessionActorHandle::spawn(actor_surface);
-        let path = temp_state_db_path("reasoning-journal");
+        let path = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-reasoning-journal-{}-{}.sqlite3",
+            std::process::id(),
+            dispatch_marker().unwrap()
+        ));
         let surface = DurableRunSurface::new(
             actor,
             &path,
