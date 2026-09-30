@@ -63,11 +63,13 @@ impl AttachmentStore {
     }
 
     pub fn verify(&self, attachment: &StoredAttachment) -> Result<bool> {
-        let canonical_root = self.root.canonicalize().context("canonicalize attachment root")?;
-        let canonical_path = attachment
-            .storage_ref
+        let canonical_root = self
+            .root
             .canonicalize()
-            .with_context(|| format!("canonicalize attachment path {:?}", attachment.storage_ref))?;
+            .context("canonicalize attachment root")?;
+        let canonical_path = attachment.storage_ref.canonicalize().with_context(|| {
+            format!("canonicalize attachment path {:?}", attachment.storage_ref)
+        })?;
 
         if !canonical_path.starts_with(&canonical_root) {
             bail!("attachment storage reference escaped attachment root");
