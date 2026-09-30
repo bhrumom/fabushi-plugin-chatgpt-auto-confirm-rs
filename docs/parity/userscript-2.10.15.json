@@ -1,0 +1,233 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "repository": "bhrumom/fabushi-chatgpt-auto-confirm-userscript",
+    "commit": "587a03d6e607851ee8ced5d3ad13f65242fea07c",
+    "version": "2.10.15"
+  },
+  "target": {
+    "repository": "bhrumom/fabushi-plugin-chatgpt-auto-confirm-rs",
+    "spec": "docs/specs/desktop-chat-userscript-parity-rust-cli.md"
+  },
+  "rules": {
+    "implementedRequires": [
+      "production_implementation",
+      "production_wiring",
+      "deterministic_test",
+      "highest_applicable_acceptance_evidence"
+    ]
+  },
+  "responsibilities": [
+    {
+      "id": "semantic-snapshot",
+      "source": "page/task inspection",
+      "destination": "domain ChatSurfaceSnapshot + ChatSurfacePort",
+      "status": "partial",
+      "evidence": [
+        "crates/domain/src/lib.rs",
+        "crates/application/src/lib.rs"
+      ],
+      "missing": [
+        "desktop adapter production wiring",
+        "real desktop acceptance"
+      ]
+    },
+    {
+      "id": "reasoning-five-position",
+      "source": "v2.10.7/v2.10.15",
+      "destination": "ReasoningPreset + desktop adapter",
+      "status": "partial",
+      "evidence": [
+        "crates/domain/src/lib.rs"
+      ],
+      "missing": [
+        "picker enforcement",
+        "60s unlimited recovery production wiring",
+        "acceptance"
+      ]
+    },
+    {
+      "id": "authorization-settlement",
+      "source": "v2.10.13/v2.10.14",
+      "destination": "application authorization policy",
+      "status": "partial",
+      "evidence": [
+        "crates/application/src/lib.rs"
+      ],
+      "missing": [
+        "durable persisted latch",
+        "desktop card projection",
+        "production effect wiring",
+        "acceptance"
+      ]
+    },
+    {
+      "id": "terminal-evidence",
+      "source": "current response Copy + stability",
+      "destination": "domain/application",
+      "status": "partial",
+      "evidence": [
+        "crates/domain/src/lib.rs",
+        "crates/application/src/lib.rs"
+      ],
+      "missing": [
+        "desktop response boundary projection",
+        "production wiring",
+        "acceptance"
+      ]
+    },
+    {
+      "id": "strict-review-report",
+      "source": "MAHAYANA_TASK_REPORT_V1",
+      "destination": "application",
+      "status": "partial",
+      "evidence": [
+        "crates/application/src/lib.rs"
+      ],
+      "missing": [
+        "continuous production orchestration",
+        "2-minute settlement wiring",
+        "acceptance"
+      ]
+    },
+    {
+      "id": "continuous-work-review",
+      "source": "Work -> Review -> Work",
+      "destination": "application/runtime",
+      "status": "partial",
+      "evidence": [
+        "crates/application/src/lib.rs"
+      ],
+      "missing": [
+        "durable store",
+        "runtime orchestration",
+        "production wiring",
+        "acceptance"
+      ]
+    },
+    {
+      "id": "explicit-load-failure",
+      "source": "v2.10.8",
+      "destination": "application RecoveryState",
+      "status": "partial",
+      "evidence": [
+        "crates/application/src/lib.rs"
+      ],
+      "missing": [
+        "durable attempt state",
+        "desktop recovery effect wiring",
+        "acceptance"
+      ]
+    },
+    {
+      "id": "connection-interrupted",
+      "source": "current 2.10.15",
+      "destination": "application RecoveryState",
+      "status": "partial",
+      "evidence": [
+        "crates/application/src/lib.rs"
+      ],
+      "missing": [
+        "RecoveryEnvelope handoff wiring",
+        "acceptance"
+      ]
+    },
+    {
+      "id": "rate-limit",
+      "source": "5m; first 3 preserve; 4th fresh",
+      "destination": "application RecoveryState",
+      "status": "partial",
+      "evidence": [
+        "crates/application/src/lib.rs"
+      ],
+      "missing": [
+        "scheduler next-wake integration",
+        "desktop notice provenance",
+        "acceptance"
+      ]
+    },
+    {
+      "id": "sqlite-outbox",
+      "source": "browser durable state replacement",
+      "destination": "sqlite-store",
+      "status": "pending",
+      "evidence": [],
+      "missing": [
+        "crate",
+        "schema",
+        "transactions",
+        "outbox",
+        "tests",
+        "wiring"
+      ]
+    },
+    {
+      "id": "desktop-atspi",
+      "source": "desktop replacement",
+      "destination": "chatgpt-desktop-atspi",
+      "status": "pending",
+      "evidence": [],
+      "missing": [
+        "crate",
+        "semantic observation",
+        "effects",
+        "fixtures",
+        "real acceptance"
+      ]
+    },
+    {
+      "id": "desktop-process",
+      "source": "desktop lifecycle",
+      "destination": "chatgpt-desktop-process",
+      "status": "pending",
+      "evidence": [],
+      "missing": [
+        "crate",
+        "launch/attach/health",
+        "wiring"
+      ]
+    },
+    {
+      "id": "runtime-actors",
+      "source": "multi-task workbench",
+      "destination": "Supervisor/DesktopSessionActor/RunWorker",
+      "status": "pending",
+      "evidence": [],
+      "missing": [
+        "durable lease",
+        "fair scheduling",
+        "single writer",
+        "wiring",
+        "tests"
+      ]
+    },
+    {
+      "id": "attachments",
+      "source": "task attachment continuity",
+      "destination": "attachment-store + desktop adapter",
+      "status": "pending",
+      "evidence": [],
+      "missing": [
+        "persistence",
+        "native attach",
+        "readiness",
+        "recovery",
+        "acceptance"
+      ]
+    },
+    {
+      "id": "desktop-release-acceptance",
+      "source": "full parity",
+      "destination": "htch-runtime exact-head Actions artifact",
+      "status": "pending",
+      "evidence": [],
+      "missing": [
+        "packaged artifact",
+        "real canary",
+        "reasoning",
+        "terminal",
+        "approval journey"
+      ]
+    }
+  ]
+}
