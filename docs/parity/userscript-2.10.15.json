@@ -74,12 +74,12 @@
       "status": "partial",
       "evidence": [
         "crates/domain/src/lib.rs",
-        "crates/application/src/lib.rs"
+        "crates/application/src/lib.rs",
+        "crates/adapters/chatgpt-desktop-atspi/src/bridge.py"
       ],
       "missing": [
-        "desktop response boundary projection",
-        "production wiring",
-        "acceptance"
+        "live/virtualized assistant response-boundary hardening",
+        "real desktop acceptance"
       ]
     },
     {

@@ -360,6 +360,34 @@ def assistant_activity_trace(items):
     return entries
 
 
+BROAD_RESPONSE_ROLES = ("application", "frame", "document", "document web", "desktop frame", "root pane")
+
+def bounded_common_ancestor(left, right, max_depth=8):
+    left_ancestors = []
+    current = left
+    for _ in range(max_depth + 1):
+        if current is None: break
+        left_ancestors.append(current)
+        current = parent_of(current)
+    current = right
+    for _ in range(max_depth + 1):
+        if current is None: break
+        for candidate in left_ancestors:
+            if same_node(current, candidate):
+                return None if role(candidate) in BROAD_RESPONSE_ROLES else candidate
+        current = parent_of(current)
+    return None
+
+def response_local_copy_evidence(items, marker_index, response_text_items):
+    if marker_index < 0 or not response_text_items: return False
+    marker_node = items[marker_index]["node"]
+    copies = [item for item in items[marker_index + 1:] if item["visible"] and item["role"] in ("push button", "button") and any(word in normalized(item) for word in COPY_WORDS)]
+    for copy_item in copies:
+        for text_item in reversed(response_text_items):
+            scope = bounded_common_ancestor(text_item["node"], copy_item["node"])
+            if scope is not None and not is_descendant(marker_node, scope): return True
+    return False
+
 def marker_info(items):
     marker_re = re.compile(r"\[Fabushi:([0-9a-fA-F-]{8,})\]")
     latest = None
@@ -410,6 +438,7 @@ def snapshot():
     after = items[marker_index + 1 :] if marker_index >= 0 else []
     work_trace = assistant_activity_trace(after) if marker_index >= 0 else []
     after_text = []
+    response_text_items = []
     for item in after:
         if item["role"] in ("static", "paragraph", "text") and item["visible"]:
             if assistant_activity_scope(item["node"]) is not None:
@@ -417,11 +446,9 @@ def snapshot():
             value = (item["text"] or item["name"]).strip()
             if value and len(value) <= 12000 and "fabushi:" not in value.lower():
                 after_text.append(value)
+                response_text_items.append(item)
     prose = "\n".join(after_text[-80:])[-16000:]
-    copy_after = any(
-        item["role"] in ("push button", "button") and any(w in normalized(item) for w in COPY_WORDS)
-        for item in after
-    )
+    copy_after = response_local_copy_evidence(items, marker_index, response_text_items)
     stop = any(
         item["enabled"] and item["role"] in ("push button", "button")
         and any(w in normalized(item) for w in STOP_WORDS)

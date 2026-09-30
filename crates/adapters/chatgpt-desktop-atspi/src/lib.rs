@@ -151,10 +151,14 @@ mod tests {
     }
 
     #[test]
-    fn bridge_binds_terminal_copy_after_fabushi_marker() {
-        assert!(BRIDGE.contains("marker_info"));
-        assert!(BRIDGE.contains("copy_after"));
-        assert!(BRIDGE.contains("after = items[marker_index + 1"));
+    fn bridge_binds_terminal_copy_to_bounded_response_scope() {
+        assert!(BRIDGE.contains("def response_local_copy_evidence("));
+        assert!(BRIDGE.contains("def bounded_common_ancestor("));
+        assert!(BRIDGE.contains("not is_descendant(marker_node, scope)"));
+        assert!(BRIDGE.contains(
+            "copy_after = response_local_copy_evidence(items, marker_index, response_text_items)"
+        ));
+        assert!(!BRIDGE.contains("copy_after = any("));
     }
 
     #[test]
