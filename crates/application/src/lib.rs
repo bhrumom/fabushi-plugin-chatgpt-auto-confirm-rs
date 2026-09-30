@@ -2,8 +2,9 @@ use anyhow::{Result, bail};
 use async_trait::async_trait;
 use fabushi_chatgpt_domain::{
     ApprovalSettlementKey, AssistantResponseBoundary, AuthorizationSettlementState,
-    ChatSurfaceSnapshot, GoalRevision, OwnershipConfidence, Phase, ReasoningPreset, ReviewStatus,
-    Round, RunReport, RunState, TaskId,
+    ChatSurfaceSnapshot, GoalRevision, HydrationState, OwnershipConfidence, Phase, ReasoningPreset,
+    RecoveryEnvelope, RecoveryEnvelopeV1, ReviewStatus, Round, RunId, RunReport, RunState,
+    StrictReviewReportEvidence, TaskId,
 };
 use serde::Deserialize;
 use std::time::Duration;
@@ -22,6 +23,8 @@ pub const EXPLICIT_LOAD_MAX_RECOVERIES: u32 = 7;
 pub const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 pub const RATE_LIMIT_PRESERVE_EPISODES: u32 = 3;
 pub const MAX_CONVERSATION_CARRY_CHARS: usize = 64_000;
+pub const GENERIC_HYDRATION_WINDOW: Duration = Duration::from_secs(30);
+pub const GENERIC_HYDRATION_MAX_RECOVERIES: u32 = 2;
 
 #[async_trait]
 pub trait ChatSurfacePort: Send + Sync {
@@ -341,6 +344,284 @@ impl RecoveryState {
 
         RecoveryDecision::Stay
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReasoningDecision {
+    Ready,
+    Select(ReasoningPreset),
+    Wait,
+    RecoverCurrentSurface,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReasoningGateState {
+    missing_since: Option<Duration>,
+    pub recovery_count: u32,
+}
+
+impl ReasoningGateState {
+    pub fn observe(
+        &mut self,
+        snapshot: &ChatSurfaceSnapshot,
+        target: ReasoningPreset,
+        now: Duration,
+    ) -> ReasoningDecision {
+        if snapshot.reasoning_picker_available {
+            self.missing_since = None;
+            return if snapshot.selected_reasoning_preset == Some(target) {
+                ReasoningDecision::Ready
+            } else {
+                ReasoningDecision::Select(target)
+            };
+        }
+
+        let since = *self.missing_since.get_or_insert(now);
+        if now.saturating_sub(since) >= REASONING_PICKER_RECOVERY_WINDOW {
+            self.recovery_count += 1;
+            self.missing_since = Some(now);
+            return ReasoningDecision::RecoverCurrentSurface;
+        }
+
+        ReasoningDecision::Wait
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HydrationDecision {
+    Ready,
+    Wait,
+    RecoverCurrentSurface,
+    Exhausted,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HydrationRecoveryState {
+    missing_since: Option<Duration>,
+    pub recovery_attempts: u32,
+    exhausted: bool,
+}
+
+impl HydrationRecoveryState {
+    pub fn observe(
+        &mut self,
+        snapshot: &ChatSurfaceSnapshot,
+        identity_visible: bool,
+        now: Duration,
+    ) -> HydrationDecision {
+        if identity_visible {
+            self.missing_since = None;
+            self.recovery_attempts = 0;
+            self.exhausted = false;
+            return HydrationDecision::Ready;
+        }
+
+        if self.exhausted {
+            return HydrationDecision::Exhausted;
+        }
+
+        if snapshot.hydration == HydrationState::Ready {
+            return HydrationDecision::Wait;
+        }
+
+        let since = *self.missing_since.get_or_insert(now);
+        if now.saturating_sub(since) < GENERIC_HYDRATION_WINDOW {
+            return HydrationDecision::Wait;
+        }
+
+        if self.recovery_attempts < GENERIC_HYDRATION_MAX_RECOVERIES {
+            self.recovery_attempts += 1;
+            self.missing_since = Some(now);
+            return HydrationDecision::RecoverCurrentSurface;
+        }
+
+        self.exhausted = true;
+        HydrationDecision::Exhausted
+    }
+
+    pub fn is_exhausted(&self) -> bool {
+        self.exhausted
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PopupClass {
+    HarmlessClose,
+    HarmlessLater,
+    HarmlessSkip,
+    Login,
+    Authorization,
+    Consent,
+    AccountSelection,
+    SecurityVerification,
+    Payment,
+    Unknown,
+}
+
+pub fn may_auto_dismiss_popup(class: PopupClass) -> bool {
+    matches!(
+        class,
+        PopupClass::HarmlessClose | PopupClass::HarmlessLater | PopupClass::HarmlessSkip
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewSettlementDecision {
+    Wait,
+    Final(ReviewReport),
+    RecoverReviewConversation,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReviewSettlementTracker {
+    last_progress_fingerprint: Option<String>,
+    no_final_since: Option<Duration>,
+}
+
+impl ReviewSettlementTracker {
+    pub fn observe(
+        &mut self,
+        snapshot: &ChatSurfaceSnapshot,
+        task_id: &TaskId,
+        round: Round,
+        now: Duration,
+    ) -> ReviewSettlementDecision {
+        if let Some(report) = validated_snapshot_review_report(snapshot, task_id, round) {
+            self.no_final_since = None;
+            return ReviewSettlementDecision::Final(report);
+        }
+
+        let fingerprint = snapshot.activity_fingerprint();
+        if self.last_progress_fingerprint.as_deref() != Some(fingerprint.as_str()) {
+            self.last_progress_fingerprint = Some(fingerprint);
+            self.no_final_since = Some(now);
+            return ReviewSettlementDecision::Wait;
+        }
+
+        let unsafe_or_active = snapshot.streaming_or_busy
+            || snapshot.stop_available
+            || snapshot.authorization_surface_present
+            || snapshot.authorization_settlement == AuthorizationSettlementState::Settling
+            || snapshot.rate_limit
+            || snapshot.retryable_error
+            || snapshot.blocker_or_modal;
+        if unsafe_or_active {
+            self.no_final_since = Some(now);
+            return ReviewSettlementDecision::Wait;
+        }
+
+        let since = *self.no_final_since.get_or_insert(now);
+        if now.saturating_sub(since) >= REVIEW_FINAL_SETTLEMENT_WINDOW {
+            ReviewSettlementDecision::RecoverReviewConversation
+        } else {
+            ReviewSettlementDecision::Wait
+        }
+    }
+}
+
+fn validated_snapshot_review_report(
+    snapshot: &ChatSurfaceSnapshot,
+    task_id: &TaskId,
+    round: Round,
+) -> Option<ReviewReport> {
+    let StrictReviewReportEvidence {
+        task_id: evidence_task,
+        round: evidence_round,
+        status,
+        summary,
+        next,
+        response_boundary,
+    } = snapshot.strict_review_report.as_ref()?;
+
+    if evidence_task != task_id
+        || *evidence_round != round
+        || snapshot.assistant_response_boundary.as_ref() != Some(response_boundary)
+        || snapshot.assistant_response_ownership != OwnershipConfidence::Strong
+        || summary.trim().is_empty()
+        || (*status == ReviewStatus::Next
+            && next.as_deref().is_none_or(|value| value.trim().is_empty()))
+        || snapshot.streaming_or_busy
+        || snapshot.stop_available
+        || snapshot.authorization_surface_present
+        || snapshot.authorization_settlement == AuthorizationSettlementState::Settling
+        || snapshot.rate_limit
+        || snapshot.retryable_error
+        || snapshot.blocker_or_modal
+    {
+        return None;
+    }
+
+    Some(ReviewReport {
+        task_id: evidence_task.clone(),
+        round: *evidence_round,
+        status: *status,
+        summary: summary.trim().to_owned(),
+        next: next
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+    })
+}
+
+pub fn bounded_conversation_carry(value: &str) -> String {
+    tail_chars(value, MAX_CONVERSATION_CARRY_CHARS)
+}
+
+pub fn build_recovery_envelope(
+    task_id: TaskId,
+    run_id: RunId,
+    phase: Phase,
+    round: Round,
+    goal_revision: GoalRevision,
+    authoritative_instruction: &str,
+    snapshot: &ChatSurfaceSnapshot,
+    previous_work_result: Option<&str>,
+    current_next: Option<&str>,
+    original_goal: &str,
+    completed: &[String],
+    remaining: &[String],
+    blockers: &[String],
+) -> RecoveryEnvelope {
+    RecoveryEnvelope::V1(RecoveryEnvelopeV1 {
+        task_id,
+        run_id,
+        phase,
+        round,
+        goal_revision,
+        authoritative_instruction: tail_chars(authoritative_instruction, 8_000),
+        visible_assistant_prose: tail_chars(&snapshot.assistant_visible_prose, 8_000),
+        visible_work_trace: bounded_vec(&snapshot.assistant_visible_work_trace, 12_000),
+        previous_work_result: previous_work_result.map(|value| tail_chars(value, 8_000)),
+        current_next: current_next.map(|value| tail_chars(value, 6_000)),
+        original_goal: tail_chars(original_goal, 8_000),
+        completed: bounded_vec(completed, 5_000),
+        remaining: bounded_vec(remaining, 6_000),
+        blockers: bounded_vec(blockers, 3_000),
+    })
+}
+
+fn bounded_vec(values: &[String], limit: usize) -> Vec<String> {
+    let mut remaining = limit;
+    let mut output = Vec::new();
+    for value in values.iter().rev() {
+        if remaining == 0 {
+            break;
+        }
+        let bounded = tail_chars(value, remaining);
+        remaining = remaining.saturating_sub(bounded.chars().count());
+        output.push(bounded);
+    }
+    output.reverse();
+    output
+}
+
+fn tail_chars(value: &str, limit: usize) -> String {
+    let count = value.chars().count();
+    if count <= limit {
+        return value.to_owned();
+    }
+    value.chars().skip(count - limit).collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
