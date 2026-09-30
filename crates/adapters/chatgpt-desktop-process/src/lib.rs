@@ -30,7 +30,8 @@ impl ChatGptDesktopProcess {
 
     fn running_from_proc(&self) -> Result<bool> {
         let proc = Path::new("/proc");
-        let entries = std::fs::read_dir(proc).context("read /proc for ChatGPT process discovery")?;
+        let entries =
+            std::fs::read_dir(proc).context("read /proc for ChatGPT process discovery")?;
 
         for entry in entries {
             let entry = entry?;
@@ -75,7 +76,10 @@ impl ChatProcessPort for ChatGptDesktopProcess {
         }
 
         if !self.launcher.is_file() {
-            bail!("ChatGPT desktop launcher does not exist: {:?}", self.launcher);
+            bail!(
+                "ChatGPT desktop launcher does not exist: {:?}",
+                self.launcher
+            );
         }
 
         Command::new(&self.launcher)
