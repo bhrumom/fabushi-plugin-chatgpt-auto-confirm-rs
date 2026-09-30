@@ -150,15 +150,16 @@
       "id": "sqlite-outbox",
       "source": "browser durable state replacement",
       "destination": "sqlite-store",
-      "status": "pending",
-      "evidence": [],
+      "status": "partial",
+      "evidence": [
+        "crates/adapters/sqlite-store/src/lib.rs",
+        "crates/adapters/sqlite-store/Cargo.toml"
+      ],
       "missing": [
-        "crate",
-        "schema",
-        "transactions",
-        "outbox",
-        "tests",
-        "wiring"
+        "application/runtime production wiring",
+        "full task CRUD/control",
+        "durable actor recovery",
+        "real acceptance"
       ]
     },
     {
@@ -205,14 +206,17 @@
       "id": "attachments",
       "source": "task attachment continuity",
       "destination": "attachment-store + desktop adapter",
-      "status": "pending",
-      "evidence": [],
+      "status": "partial",
+      "evidence": [
+        "crates/adapters/attachment-store/src/lib.rs",
+        "crates/adapters/attachment-store/Cargo.toml"
+      ],
       "missing": [
-        "persistence",
-        "native attach",
-        "readiness",
-        "recovery",
-        "acceptance"
+        "SQLite metadata wiring",
+        "native desktop attachment effect",
+        "45s readiness/backoff",
+        "fresh-chat reattach",
+        "real acceptance"
       ]
     },
     {
