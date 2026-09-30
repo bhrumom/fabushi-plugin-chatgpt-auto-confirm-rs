@@ -2,9 +2,9 @@ use anyhow::{Result, bail};
 use async_trait::async_trait;
 use fabushi_chatgpt_domain::{
     ApprovalSettlementKey, AssistantResponseBoundary, AuthorizationSettlementState,
-    ChatSurfaceSnapshot, GoalRevision, HydrationState, OwnershipConfidence, Phase, ReasoningPreset,
-    RecoveryEnvelope, RecoveryEnvelopeV1, ReviewStatus, Round, RunId, RunReport, RunState,
-    StrictReviewReportEvidence, TaskId,
+    ChatSurfaceSnapshot, DispatchId, GoalRevision, HydrationState, OwnershipConfidence, Phase,
+    ReasoningPreset, RecoveryEnvelope, RecoveryEnvelopeV1, ReviewStatus, Round, RunId, RunReport,
+    RunState, StrictReviewReportEvidence, TaskId,
 };
 use serde::Deserialize;
 use std::time::Duration;
@@ -75,6 +75,7 @@ pub struct RunOptions {
     pub dispatch_confirm_after: Duration,
     pub continuation_after: Duration,
     pub review_identity: Option<ReviewRunIdentity>,
+    pub expected_dispatch_id: Option<DispatchId>,
 }
 
 impl Default for RunOptions {
@@ -90,6 +91,7 @@ impl Default for RunOptions {
             dispatch_confirm_after: DISPATCH_CONFIRM_WINDOW,
             continuation_after: Duration::from_secs(30 * 60),
             review_identity: None,
+            expected_dispatch_id: None,
         }
     }
 }
@@ -141,9 +143,14 @@ impl<'a> RunPrompt<'a> {
             }
 
             let snapshot = self.surface.observe().await?;
+            let dispatch_identity_matches = options
+                .expected_dispatch_id
+                .as_ref()
+                .is_none_or(|expected| snapshot.current_dispatch_id.as_ref() == Some(expected));
             let dispatch_confirmed = snapshot.user_turn_boundary.is_some()
                 && snapshot.user_turn_boundary != baseline
-                && snapshot.user_turn_ownership == OwnershipConfidence::Strong;
+                && snapshot.user_turn_ownership == OwnershipConfidence::Strong
+                && dispatch_identity_matches;
 
             if !dispatch_confirmed {
                 if now.saturating_sub(dispatched) >= options.dispatch_confirm_after {
@@ -1022,7 +1029,7 @@ impl ContinuousTaskState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fabushi_chatgpt_domain::{ConversationFingerprint, RunId, UserTurnBoundary};
+    use fabushi_chatgpt_domain::{ConversationFingerprint, DispatchId, RunId, UserTurnBoundary};
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
@@ -1137,6 +1144,47 @@ mod tests {
             response_local_copy: true,
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn run_prompt_requires_current_dispatch_marker_before_confirming_send() {
+        let before = ChatSurfaceSnapshot {
+            user_turn_boundary: Some(UserTurnBoundary::new("u0")),
+            ..Default::default()
+        };
+        let mut wrong = owned_review_snapshot("unrelated final", "a-wrong");
+        wrong.current_dispatch_id = Some(DispatchId::new("other-dispatch"));
+        let mut matching = owned_review_snapshot("current final", "a-current");
+        matching.user_turn_boundary = Some(UserTurnBoundary::new("u2"));
+        matching.current_dispatch_id = Some(DispatchId::new("dispatch-1"));
+        let surface = ScriptedSurface::new(vec![
+            before,
+            wrong.clone(),
+            wrong,
+            matching.clone(),
+            matching.clone(),
+            matching,
+        ]);
+        let clock = FakeClock::new();
+        let options = RunOptions {
+            poll_interval: Duration::from_secs(2),
+            timeout: Duration::from_secs(30),
+            dispatch_confirm_after: Duration::from_secs(2),
+            stale_reload_after: Duration::from_secs(1_000),
+            expected_dispatch_id: Some(DispatchId::new("dispatch-1")),
+            ..RunOptions::default()
+        };
+
+        let report = RunPrompt::new(&surface, &clock)
+            .execute("prepared prompt", options)
+            .await
+            .unwrap();
+
+        assert_eq!(report.state, RunState::Complete);
+        assert_eq!(report.assistant_text, "current final");
+        assert_eq!(surface.fresh_count(), 1);
+        assert_eq!(surface.send_count(), 2);
+        assert_eq!(report.dispatch_retries, 1);
     }
 
     #[tokio::test]

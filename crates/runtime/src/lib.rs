@@ -16,7 +16,9 @@ use tokio::time::MissedTickBehavior;
 
 pub use fabushi_chatgpt_application::RunOptions;
 pub use fabushi_chatgpt_cdp::ChatGptCdp;
-pub use fabushi_chatgpt_domain::{ChatSurfaceSnapshot, ReasoningPreset, RunReport, RunState};
+pub use fabushi_chatgpt_domain::{
+    ChatSurfaceSnapshot, DispatchId, ReasoningPreset, RunReport, RunState,
+};
 pub use fabushi_chatgpt_linux_browser::{BrowserLaunch, find_chromium_binary, launch_chromium};
 
 const DESKTOP_UI_LEASE_NAME: &str = "chatgpt-desktop-ui";
@@ -396,6 +398,8 @@ impl DesktopRuntime {
 
         let marker = dispatch_marker()?;
         let prepared = format!("{prompt}\n\n[Fabushi:{marker}]");
+        let mut options = options;
+        options.expected_dispatch_id = Some(DispatchId::new(marker));
         let worker = RunWorker::new(self.desktop_session().await?.clone());
         worker.execute(&prepared, options).await
     }
