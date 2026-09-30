@@ -142,6 +142,141 @@ def find_named(items, names, roles=None, actionable=False):
             return item
     return None
 
+ACTION_ROLES = ("push button", "button", "toggle button")
+ALLOW_LABELS = (
+    "allow", "allow once", "allow one time", "approve", "approve once", "approve one time",
+    "允许", "允许一次", "批准", "批准一次",
+)
+REJECT_LABELS = ("reject", "deny", "decline", "拒绝", "不允许")
+OPTION_LABEL_HINTS = (
+    "approval options", "authorization options", "options", "more", "menu", "expand",
+    "审批选项", "授权选项", "选项", "更多", "展开", "箭头",
+)
+BROAD_AUTH_CONTAINER_ROLES = ("application", "frame", "document web", "document frame")
+
+
+def item_labels(item):
+    values = []
+    for value in (item.get("name", ""), item.get("text", "")):
+        value = " ".join((value or "").strip().lower().split())
+        if value and value not in values:
+            values.append(value)
+    return values
+
+
+def exact_action_label(item, labels):
+    wanted = set(labels)
+    return any(value in wanted for value in item_labels(item))
+
+
+def parent_of(node):
+    try:
+        return node.parent
+    except Exception:
+        return None
+
+
+def same_node(left, right):
+    try:
+        return left == right
+    except Exception:
+        return left is right
+
+
+def is_descendant(node, ancestor, max_depth=12):
+    current = node
+    for _ in range(max_depth + 1):
+        if current is None:
+            return False
+        if same_node(current, ancestor):
+            return True
+        current = parent_of(current)
+    return False
+
+
+def node_attributes(node):
+    try:
+        raw = node.getAttributes()
+    except Exception:
+        return {}
+    result = {}
+    for entry in raw or []:
+        text = str(entry)
+        if ":" in text:
+            key, value = text.split(":", 1)
+        elif "=" in text:
+            key, value = text.split("=", 1)
+        else:
+            continue
+        result[key.strip().lower()] = value.strip().lower()
+    return result
+
+
+def has_popup_semantics(item):
+    attributes = node_attributes(item["node"])
+    for key, value in attributes.items():
+        if "haspopup" in key and value not in ("", "false", "0", "none"):
+            return True
+    return False
+
+
+def is_allow_action(item):
+    return item["visible"] and item["role"] in ACTION_ROLES and exact_action_label(item, ALLOW_LABELS)
+
+
+def is_reject_action(item):
+    return item["visible"] and item["role"] in ACTION_ROLES and exact_action_label(item, REJECT_LABELS)
+
+
+def is_options_action(item, allow_item):
+    if not item["visible"] or item["role"] not in ACTION_ROLES or same_node(item["node"], allow_item["node"]):
+        return False
+    if has_popup_semantics(item):
+        return True
+    labels = item_labels(item)
+    return any(any(hint in value for hint in OPTION_LABEL_HINTS) for value in labels)
+
+
+def authorization_cards(items):
+    """Return only bounded Reject + Allow + split-menu authorization structures.
+
+    Presence deliberately ignores enabled state. A disabled/remounting card must
+    continue to block destructive recovery; actionability is reported separately.
+    """
+    cards = []
+    seen_containers = []
+    allow_candidates = [item for item in items if is_allow_action(item) and not has_popup_semantics(item)]
+    for allow_item in allow_candidates:
+        container = parent_of(allow_item["node"])
+        for _ in range(9):
+            if container is None or role(container) in BROAD_AUTH_CONTAINER_ROLES:
+                break
+            actions = [
+                item for item in items
+                if item["role"] in ACTION_ROLES and item["visible"]
+                and is_descendant(item["node"], container)
+            ]
+            reject_item = next((item for item in actions if is_reject_action(item)), None)
+            options_item = next((item for item in actions if is_options_action(item, allow_item)), None)
+            if reject_item is not None and options_item is not None:
+                if not any(same_node(container, seen) for seen in seen_containers):
+                    seen_containers.append(container)
+                    cards.append({
+                        "container": container,
+                        "allow": allow_item,
+                        "reject": reject_item,
+                        "options": options_item,
+                        "actionable": bool(
+                            allow_item["enabled"]
+                            and reject_item["enabled"]
+                            and options_item["enabled"]
+                        ),
+                    })
+                break
+            container = parent_of(container)
+    return cards
+
+
 def marker_info(items):
     marker_re = re.compile(r"\[Fabushi:([0-9a-fA-F-]{8,})\]")
     latest = None
@@ -207,11 +342,9 @@ def snapshot():
         for item in items
     )
 
-    reject = [item for item in items if any(w in normalized(item) for w in REJECT_WORDS)]
-    allow = [item for item in items if any(w in normalized(item) for w in ALLOW_WORDS)]
-    options = [item for item in items if any(w in normalized(item) for w in OPTIONS_WORDS)]
-    auth_present = bool(reject and allow and options)
-    auth_actionable = auth_present and any(item["enabled"] for item in allow) and any(item["enabled"] for item in options)
+    auth_cards = authorization_cards(items)
+    auth_present = bool(auth_cards)
+    auth_actionable = any(card["actionable"] for card in auth_cards)
 
     all_text = "\n".join((item["text"] or item["name"]) for item in items if item["visible"]).lower()
     rate_limit = any(t in all_text for t in RATE_LIMIT_TEXT)
@@ -318,12 +451,11 @@ def recover():
 def approve():
     app = find_app()
     items = flattened(app)
-    reject = [i for i in items if any(w in normalized(i) for w in REJECT_WORDS)]
-    options = [i for i in items if any(w in normalized(i) for w in OPTIONS_WORDS)]
-    if not reject or not options:
+    cards = [card for card in authorization_cards(items) if card["actionable"]]
+    if len(cards) != 1:
         return False
-    option = next((i for i in options if i["enabled"]), None)
-    if option is None or not action(option["node"]):
+    option = cards[0]["options"]
+    if not action(option["node"]):
         return False
     time.sleep(0.25)
     items = flattened(app)

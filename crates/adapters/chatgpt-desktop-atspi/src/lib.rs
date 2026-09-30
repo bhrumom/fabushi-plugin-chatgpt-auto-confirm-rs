@@ -128,6 +128,19 @@ mod tests {
     }
 
     #[test]
+    fn authorization_projection_requires_one_bounded_card_shape() {
+        assert!(BRIDGE.contains("def authorization_cards(items):"));
+        assert!(BRIDGE.contains("is_descendant(item[\"node\"], container)"));
+        assert!(BRIDGE.contains("reject_item is not None and options_item is not None"));
+        assert!(BRIDGE.contains("auth_present = bool(auth_cards)"));
+        assert!(BRIDGE.contains("auth_actionable = any(card[\"actionable\"]"));
+        assert!(!BRIDGE.contains("auth_present = bool(reject and allow and options)"));
+        assert!(BRIDGE.contains(
+            "cards = [card for card in authorization_cards(items) if card[\"actionable\"]]"
+        ));
+    }
+
+    #[test]
     fn bridge_binds_terminal_copy_after_fabushi_marker() {
         assert!(BRIDGE.contains("marker_info"));
         assert!(BRIDGE.contains("copy_after"));

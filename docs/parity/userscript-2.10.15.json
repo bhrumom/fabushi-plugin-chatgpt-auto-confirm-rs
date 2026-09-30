@@ -57,11 +57,12 @@
       "destination": "application authorization policy",
       "status": "partial",
       "evidence": [
-        "crates/application/src/lib.rs"
+        "crates/application/src/lib.rs",
+        "crates/adapters/chatgpt-desktop-atspi/src/bridge.py"
       ],
       "missing": [
         "durable persisted latch",
-        "desktop card projection",
+        "live disabled/remount authorization acceptance",
         "production effect wiring",
         "acceptance"
       ]
@@ -181,7 +182,6 @@
       ],
       "missing": [
         "deterministic semantic fixtures beyond source-contract tests",
-        "reasoning selection effect",
         "native attachment effect/readiness",
         "stream retry and review-report projection hardening",
         "real authorization and terminal acceptance"
