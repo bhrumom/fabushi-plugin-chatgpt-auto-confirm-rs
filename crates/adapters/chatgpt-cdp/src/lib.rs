@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
-use fabushi_chatgpt_application::BrowserPort;
-use fabushi_chatgpt_domain::PageSnapshot;
+use fabushi_chatgpt_application::ChatSurfacePort;
+use fabushi_chatgpt_domain::ChatSurfaceSnapshot;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -120,7 +120,7 @@ impl ChatGptCdp {
             .unwrap_or(Value::Null))
     }
 
-    pub async fn snapshot(&self) -> Result<PageSnapshot> {
+    pub async fn snapshot(&self) -> Result<ChatSurfaceSnapshot> {
         let value = self.evaluate(SNAPSHOT_SCRIPT).await?;
         serde_json::from_value(value).context("failed to decode ChatGPT page snapshot")
     }
@@ -164,8 +164,8 @@ impl ChatGptCdp {
 }
 
 #[async_trait]
-impl BrowserPort for ChatGptCdp {
-    async fn snapshot(&self) -> Result<PageSnapshot> {
+impl ChatSurfacePort for ChatGptCdp {
+    async fn observe(&self) -> Result<ChatSurfaceSnapshot> {
         ChatGptCdp::snapshot(self).await
     }
 
@@ -173,7 +173,7 @@ impl BrowserPort for ChatGptCdp {
         ChatGptCdp::send_prompt(self, prompt).await
     }
 
-    async fn approve_once(&self) -> Result<bool> {
+    async fn approve_current_conversation(&self) -> Result<bool> {
         ChatGptCdp::click_allow_once(self).await
     }
 
@@ -181,12 +181,12 @@ impl BrowserPort for ChatGptCdp {
         ChatGptCdp::dismiss_rate_limit_notice(self).await
     }
 
-    async fn reload(&self) -> Result<()> {
+    async fn recover_current_surface(&self) -> Result<()> {
         ChatGptCdp::reload(self).await
     }
 
-    async fn navigate(&self, url: &str) -> Result<()> {
-        ChatGptCdp::navigate(self, url).await
+    async fn start_fresh_conversation(&self) -> Result<()> {
+        ChatGptCdp::navigate(self, "https://chatgpt.com/").await
     }
 }
 
