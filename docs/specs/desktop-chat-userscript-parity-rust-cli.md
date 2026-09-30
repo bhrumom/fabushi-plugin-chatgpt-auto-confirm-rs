@@ -952,4 +952,8 @@ Current PR #2 migration progress on 2026-09-30:
 - the production CLI/runtime remains legacy CDP at this point and therefore Gate D/G are not satisfied.
 - `htch-runtime` became unavailable during this implementation pass, so no device-side build or desktop acceptance result is claimed for the current head. GitHub Actions remains the available exact-head verification authority until that device is online again.
 
+Additional current evidence:
+
+- `chatgpt-desktop-process` now implements a semantic `ChatProcessPort` boundary with Linux `/proc` discovery and the known `/usr/bin/chatgpt` launcher. It remains partial until runtime composition and htch-runtime lifecycle acceptance are proven.
+
 Future implementation work must continue updating this section and the migration ledger from production wiring and evidence rather than changing status by assertion.
