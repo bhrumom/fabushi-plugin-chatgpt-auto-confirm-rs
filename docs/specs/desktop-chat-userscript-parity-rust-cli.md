@@ -708,7 +708,7 @@ The ledger must be updated as implementation proceeds. `partial` means useful Ru
 | 90s send confirmation and safe resend | application | partial: semantic runner performs fresh-conversation recovery before re-dispatch; durable prepared-intent/outbox settlement pending |
 | Five-position reasoning preset | domain + desktop adapter | partial: exact 0..4 semantic model/default Extra High is tested; desktop picker enforcement pending |
 | 60s unlimited missing-picker recovery | application | pending |
-| Attachment persistence/upload/readiness | attachment-store + desktop adapter | pending |
+| Attachment persistence/upload/readiness | attachment-store + desktop adapter | partial: immutable task attachment bytes are persisted atomically with SHA-256 integrity checks and traversal rejection; SQLite metadata, native desktop attach/readiness/retry and recovery wiring pending |
 | Authorization structural detection | desktop adapter semantic projection | pending |
 | Exact current-conversation approval | application + desktop adapter | partial browser-era logic only |
 | Disabled/remounted approval handling | application/domain | partial: presence/actionability are distinct domain facts; desktop structural projection/remount evidence pending |
