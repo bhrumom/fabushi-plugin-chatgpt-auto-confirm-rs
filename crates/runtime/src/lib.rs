@@ -6,7 +6,9 @@ use fabushi_chatgpt_application::{
 };
 use fabushi_chatgpt_desktop_atspi::ChatGptDesktopAtspi;
 use fabushi_chatgpt_desktop_process::ChatGptDesktopProcess;
-use fabushi_chatgpt_sqlite_store::{SqliteStore, TransitionRecord, UiSessionLease};
+use fabushi_chatgpt_sqlite_store::{
+    PreparedDispatch, SqliteStore, TransitionRecord, UiSessionLease,
+};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,7 +19,7 @@ use tokio::time::MissedTickBehavior;
 pub use fabushi_chatgpt_application::RunOptions;
 pub use fabushi_chatgpt_cdp::ChatGptCdp;
 pub use fabushi_chatgpt_domain::{ChatSurfaceSnapshot, ReasoningPreset, RunReport, RunState};
-use fabushi_chatgpt_domain::{DispatchId, RunId, TaskId};
+use fabushi_chatgpt_domain::{DispatchId, OwnershipConfidence, RunId, TaskId, UserTurnBoundary};
 pub use fabushi_chatgpt_linux_browser::{BrowserLaunch, find_chromium_binary, launch_chromium};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -274,7 +276,12 @@ impl DurableRunJournal {
         })
     }
 
-    fn begin(&mut self, effect_kind: &str, effect_payload_json: String) -> Result<i64> {
+    fn begin(
+        &mut self,
+        effect_kind: &str,
+        effect_payload_json: String,
+        prepared_dispatch: Option<PreparedDispatch>,
+    ) -> Result<i64> {
         let next_revision = self.revision + 1;
         let mut hasher = Sha256::new();
         hasher.update(self.task_id.as_str().as_bytes());
@@ -302,6 +309,7 @@ impl DurableRunJournal {
                 effect_kind: effect_kind.to_owned(),
                 effect_payload_json,
                 idempotency_key: idempotency_key.clone(),
+                prepared_dispatch,
             },
             unix_time_ms()?,
         )?;
@@ -323,12 +331,34 @@ impl DurableRunJournal {
             unix_time_ms()?,
         )
     }
+
+    fn settle_dispatch(
+        &self,
+        dispatch_id: &DispatchId,
+        settlement: serde_json::Value,
+    ) -> Result<()> {
+        self.store.settle_dispatch_attempt(
+            &self.task_id,
+            &self.run_id,
+            dispatch_id,
+            &settlement.to_string(),
+            unix_time_ms()?,
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PendingSendSettlement {
+    effect_id: i64,
+    baseline_user_turn: Option<UserTurnBoundary>,
 }
 
 #[derive(Clone)]
 struct DurableRunSurface {
     surface: DesktopSessionActorHandle,
     journal: Arc<Mutex<DurableRunJournal>>,
+    dispatch_id: DispatchId,
+    pending_send: Arc<Mutex<Option<PendingSendSettlement>>>,
 }
 
 impl DurableRunSurface {
@@ -337,6 +367,7 @@ impl DurableRunSurface {
         state_db_path: &Path,
         task_id: TaskId,
         run_id: RunId,
+        dispatch_id: DispatchId,
     ) -> Result<Self> {
         Ok(Self {
             surface,
@@ -345,6 +376,8 @@ impl DurableRunSurface {
                 task_id,
                 run_id,
             )?)),
+            dispatch_id,
+            pending_send: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -359,7 +392,7 @@ impl DurableRunSurface {
     {
         let effect_id = {
             let mut journal = self.journal.lock().await;
-            journal.begin(effect_kind, payload.to_string())?
+            journal.begin(effect_kind, payload.to_string(), None)?
         };
         let result = effect.await;
         let settlement = match &result {
@@ -372,12 +405,63 @@ impl DurableRunSurface {
         }
         result
     }
+
+    async fn settle_pending_send_if_observed(
+        &self,
+        snapshot: &ChatSurfaceSnapshot,
+    ) -> Result<bool> {
+        let pending = self.pending_send.lock().await.clone();
+        let Some(pending) = pending else {
+            return Ok(false);
+        };
+        let confirmed = snapshot.current_dispatch_id.as_ref() == Some(&self.dispatch_id)
+            && snapshot.user_turn_ownership == OwnershipConfidence::Strong
+            && snapshot.user_turn_boundary.is_some()
+            && snapshot.user_turn_boundary != pending.baseline_user_turn;
+        if !confirmed {
+            return Ok(false);
+        }
+
+        {
+            let journal = self.journal.lock().await;
+            journal.settle(
+                pending.effect_id,
+                true,
+                "dispatch marker and new strong user turn observed",
+            )?;
+            journal.settle_dispatch(
+                &self.dispatch_id,
+                json!({
+                    "confirmed": true,
+                    "userTurnBoundary": snapshot.user_turn_boundary.as_ref().map(|value| value.as_str()),
+                    "conversationFingerprint": snapshot.conversation_fingerprint.as_ref().map(|value| value.as_str()),
+                }),
+            )?;
+        }
+        *self.pending_send.lock().await = None;
+        Ok(true)
+    }
+
+    async fn settle_pending_send_for_recovery(&self) -> Result<()> {
+        let pending = self.pending_send.lock().await.take();
+        if let Some(pending) = pending {
+            let journal = self.journal.lock().await;
+            journal.settle(
+                pending.effect_id,
+                false,
+                "unconfirmed send superseded by fresh-conversation recovery",
+            )?;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl ChatSurfacePort for DurableRunSurface {
     async fn observe(&self) -> Result<ChatSurfaceSnapshot> {
-        self.surface.observe().await
+        let snapshot = self.surface.observe().await?;
+        self.settle_pending_send_if_observed(&snapshot).await?;
+        Ok(snapshot)
     }
 
     async fn set_reasoning_preset(&self, preset: ReasoningPreset) -> Result<bool> {
@@ -390,12 +474,34 @@ impl ChatSurfacePort for DurableRunSurface {
     }
 
     async fn send_prompt(&self, prompt: &str) -> Result<()> {
-        self.record_and_settle(
-            "send_prompt",
-            json!({"prompt": prompt}),
-            self.surface.send_prompt(prompt),
-        )
-        .await
+        let baseline = self.surface.observe().await?.user_turn_boundary;
+        let prepared_intent = json!({
+            "preparedPrompt": prompt,
+            "dispatchId": self.dispatch_id.as_str(),
+            "baselineUserTurnBoundary": baseline.as_ref().map(|value| value.as_str()),
+        });
+        let effect_id = {
+            let mut journal = self.journal.lock().await;
+            journal.begin(
+                "send_prompt",
+                prepared_intent.to_string(),
+                Some(PreparedDispatch {
+                    dispatch_id: self.dispatch_id.clone(),
+                    prepared_intent_json: prepared_intent.to_string(),
+                }),
+            )?
+        };
+        *self.pending_send.lock().await = Some(PendingSendSettlement {
+            effect_id,
+            baseline_user_turn: baseline,
+        });
+
+        let result = self.surface.send_prompt(prompt).await;
+        if result.is_ok() {
+            let snapshot = self.surface.observe().await?;
+            self.settle_pending_send_if_observed(&snapshot).await?;
+        }
+        result
     }
 
     async fn approve_current_conversation(&self) -> Result<bool> {
@@ -426,6 +532,7 @@ impl ChatSurfacePort for DurableRunSurface {
     }
 
     async fn start_fresh_conversation(&self) -> Result<()> {
+        self.settle_pending_send_for_recovery().await?;
         self.record_and_settle(
             "start_fresh_conversation",
             json!({}),
@@ -445,9 +552,10 @@ impl RunWorker {
         state_db_path: &Path,
         task_id: TaskId,
         run_id: RunId,
+        dispatch_id: DispatchId,
     ) -> Result<Self> {
         Ok(Self {
-            surface: DurableRunSurface::new(surface, state_db_path, task_id, run_id)?,
+            surface: DurableRunSurface::new(surface, state_db_path, task_id, run_id, dispatch_id)?,
         })
     }
 
@@ -596,6 +704,7 @@ impl DesktopRuntime {
             &self.state_db_path,
             task_id,
             run_id,
+            DispatchId::new(marker),
         )?;
         worker.execute(&prepared, options).await
     }
@@ -652,7 +761,7 @@ pub async fn run_prompt(
 #[cfg(test)]
 mod actor_tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::Notify;
 
     #[derive(Default)]
@@ -745,17 +854,31 @@ mod actor_tests {
     struct BlockingSendSurface {
         entered: Notify,
         release: Notify,
+        sent: AtomicBool,
     }
 
     #[async_trait]
     impl ChatSurfacePort for BlockingSendSurface {
         async fn observe(&self) -> Result<ChatSurfaceSnapshot> {
-            Ok(ChatSurfaceSnapshot::default())
+            if self.sent.load(Ordering::SeqCst) {
+                Ok(ChatSurfaceSnapshot {
+                    user_turn_boundary: Some(UserTurnBoundary::new("u1")),
+                    current_dispatch_id: Some(DispatchId::new("dispatch-journal")),
+                    user_turn_ownership: OwnershipConfidence::Strong,
+                    ..Default::default()
+                })
+            } else {
+                Ok(ChatSurfaceSnapshot {
+                    user_turn_boundary: Some(UserTurnBoundary::new("u0")),
+                    ..Default::default()
+                })
+            }
         }
 
         async fn send_prompt(&self, _prompt: &str) -> Result<()> {
             self.entered.notify_one();
             self.release.notified().await;
+            self.sent.store(true, Ordering::SeqCst);
             Ok(())
         }
 
@@ -788,7 +911,14 @@ mod actor_tests {
         let actor = DesktopSessionActorHandle::spawn(actor_surface);
         let task_id = TaskId::new("task-journal");
         let run_id = RunId::new("run-journal");
-        let surface = DurableRunSurface::new(actor, &path, task_id.clone(), run_id).unwrap();
+        let surface = DurableRunSurface::new(
+            actor,
+            &path,
+            task_id.clone(),
+            run_id.clone(),
+            DispatchId::new("dispatch-journal"),
+        )
+        .unwrap();
         let sending = {
             let surface = surface.clone();
             tokio::spawn(async move { surface.send_prompt("hello").await })
@@ -805,6 +935,16 @@ mod actor_tests {
         fake.release.notify_one();
         sending.await.unwrap().unwrap();
         assert!(store.pending_effects(10).unwrap().is_empty());
+        assert!(
+            store
+                .dispatch_attempt_settlement(
+                    &task_id,
+                    &run_id,
+                    &DispatchId::new("dispatch-journal"),
+                )
+                .unwrap()
+                .is_some()
+        );
 
         drop(surface);
         let _ = std::fs::remove_file(&path);
