@@ -77,6 +77,11 @@ impl ChatSurfacePort for ChatGptDesktopAtspi {
         self.bridge("snapshot", None).await
     }
 
+    async fn set_reasoning_preset(&self, preset: ReasoningPreset) -> Result<bool> {
+        let target = preset.index().to_string();
+        self.bridge("set-reasoning", Some(&target)).await
+    }
+
     async fn send_prompt(&self, prompt: &str) -> Result<()> {
         let sent: bool = self.bridge("send", Some(prompt)).await?;
         if !sent {
@@ -127,6 +132,14 @@ mod tests {
         assert!(BRIDGE.contains("marker_info"));
         assert!(BRIDGE.contains("copy_after"));
         assert!(BRIDGE.contains("after = items[marker_index + 1"));
+    }
+
+    #[test]
+    fn reasoning_effect_uses_semantic_power_control_and_reobserves_positions() {
+        assert!(BRIDGE.contains("name == \"Power\""));
+        assert!(BRIDGE.contains("KEY_SYM"));
+        assert!(BRIDGE.contains("reasoning_position"));
+        assert!(BRIDGE.contains("next_position == current"));
     }
 
     #[test]

@@ -29,6 +29,9 @@ pub const GENERIC_HYDRATION_MAX_RECOVERIES: u32 = 2;
 #[async_trait]
 pub trait ChatSurfacePort: Send + Sync {
     async fn observe(&self) -> Result<ChatSurfaceSnapshot>;
+    async fn set_reasoning_preset(&self, _preset: ReasoningPreset) -> Result<bool> {
+        Ok(false)
+    }
     async fn send_prompt(&self, prompt: &str) -> Result<()>;
     async fn approve_current_conversation(&self) -> Result<bool>;
     async fn dismiss_rate_limit_notice(&self) -> Result<bool>;
@@ -357,6 +360,7 @@ pub enum ReasoningDecision {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReasoningGateState {
     missing_since: Option<Duration>,
+    selection_failed_since: Option<Duration>,
     pub recovery_count: u32,
 }
 
@@ -370,6 +374,7 @@ impl ReasoningGateState {
         if snapshot.reasoning_picker_available {
             self.missing_since = None;
             return if snapshot.selected_reasoning_preset == Some(target) {
+                self.selection_failed_since = None;
                 ReasoningDecision::Ready
             } else {
                 ReasoningDecision::Select(target)
@@ -384,6 +389,20 @@ impl ReasoningGateState {
         }
 
         ReasoningDecision::Wait
+    }
+
+    pub fn selection_failed(&mut self, now: Duration) -> ReasoningDecision {
+        let since = *self.selection_failed_since.get_or_insert(now);
+        if now.saturating_sub(since) >= REASONING_PICKER_RECOVERY_WINDOW {
+            self.recovery_count += 1;
+            self.selection_failed_since = Some(now);
+            return ReasoningDecision::RecoverCurrentSurface;
+        }
+        ReasoningDecision::Wait
+    }
+
+    pub fn selection_succeeded(&mut self) {
+        self.selection_failed_since = None;
     }
 }
 
@@ -866,6 +885,29 @@ mod tests {
         assert_eq!(
             state.observe(&ready, ReasoningPreset::ExtraHigh, Duration::from_secs(122)),
             ReasoningDecision::Ready
+        );
+    }
+
+    #[test]
+    fn reasoning_selection_failure_uses_same_unbounded_sixty_second_recovery() {
+        let mut state = ReasoningGateState::default();
+        assert_eq!(
+            state.selection_failed(Duration::ZERO),
+            ReasoningDecision::Wait
+        );
+        assert_eq!(
+            state.selection_failed(Duration::from_secs(60)),
+            ReasoningDecision::RecoverCurrentSurface
+        );
+        assert_eq!(
+            state.selection_failed(Duration::from_secs(120)),
+            ReasoningDecision::RecoverCurrentSurface
+        );
+        assert_eq!(state.recovery_count, 2);
+        state.selection_succeeded();
+        assert_eq!(
+            state.selection_failed(Duration::from_secs(121)),
+            ReasoningDecision::Wait
         );
     }
 

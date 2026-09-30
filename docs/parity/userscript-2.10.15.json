@@ -41,13 +41,14 @@
       "status": "partial",
       "evidence": [
         "crates/domain/src/lib.rs",
+        "crates/application/src/lib.rs",
         "crates/adapters/chatgpt-desktop-atspi/src/bridge.py",
+        "crates/adapters/chatgpt-desktop-atspi/src/lib.rs",
         "crates/runtime/src/lib.rs"
       ],
       "missing": [
-        "active five-position selection effect",
-        "60s unlimited recovery production loop",
-        "acceptance"
+        "formal Rust CLI htch-runtime acceptance across five positions",
+        "exact release artifact acceptance"
       ]
     },
     {

@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use fabushi_chatgpt_application::{
-    ChatProcessHealth, ChatProcessPort, ChatSurfacePort, Clock, RunPrompt,
+    ChatProcessHealth, ChatProcessPort, ChatSurfacePort, Clock, ReasoningDecision,
+    ReasoningGateState, RunPrompt,
 };
 use fabushi_chatgpt_desktop_atspi::ChatGptDesktopAtspi;
 use fabushi_chatgpt_desktop_process::ChatGptDesktopProcess;
@@ -69,6 +70,37 @@ impl DesktopRuntime {
             .context("observe ChatGPT desktop semantic surface")
     }
 
+    async fn ensure_reasoning_preset(&self, target: ReasoningPreset) -> Result<()> {
+        let clock = TokioClock::default();
+        let mut gate = ReasoningGateState::default();
+        loop {
+            let snapshot = self.surface.observe().await?;
+            match gate.observe(&snapshot, target, clock.now()) {
+                ReasoningDecision::Ready => return Ok(()),
+                ReasoningDecision::Select(preset) => {
+                    let changed = self.surface.set_reasoning_preset(preset).await?;
+                    if changed && self.surface.observed_reasoning_preset().await? == Some(target) {
+                        gate.selection_succeeded();
+                        return Ok(());
+                    }
+                    if gate.selection_failed(clock.now())
+                        == ReasoningDecision::RecoverCurrentSurface
+                    {
+                        self.surface.recover_current_surface().await?;
+                    }
+                    clock.sleep(Duration::from_millis(500)).await;
+                }
+                ReasoningDecision::Wait => {
+                    clock.sleep(Duration::from_millis(500)).await;
+                }
+                ReasoningDecision::RecoverCurrentSurface => {
+                    self.surface.recover_current_surface().await?;
+                    clock.sleep(Duration::from_millis(500)).await;
+                }
+            }
+        }
+    }
+
     pub async fn run_prompt(
         &self,
         prompt: &str,
@@ -76,12 +108,7 @@ impl DesktopRuntime {
         options: RunOptions,
     ) -> Result<RunReport> {
         self.ensure_ready().await?;
-        let observed = self.surface.observed_reasoning_preset().await?;
-        if observed != Some(requested_reasoning) {
-            bail!(
-                "ChatGPT desktop reasoning preset is not verified: requested={requested_reasoning:?} observed={observed:?}; refusing to Send"
-            );
-        }
+        self.ensure_reasoning_preset(requested_reasoning).await?;
 
         let marker = dispatch_marker()?;
         let prepared = format!("{prompt}\n\n[Fabushi:{marker}]");

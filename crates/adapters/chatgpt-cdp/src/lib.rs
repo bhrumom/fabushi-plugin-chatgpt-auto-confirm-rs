@@ -169,6 +169,13 @@ impl ChatSurfacePort for ChatGptCdp {
         ChatGptCdp::snapshot(self).await
     }
 
+    async fn set_reasoning_preset(
+        &self,
+        _preset: fabushi_chatgpt_domain::ReasoningPreset,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
     async fn send_prompt(&self, prompt: &str) -> Result<()> {
         ChatGptCdp::send_prompt(self, prompt).await
     }

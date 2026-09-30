@@ -349,12 +349,19 @@ def dismiss_rate_limit():
     button = find_named(items, GOT_IT_WORDS, roles=("push button", "button"), actionable=True)
     return bool(button and action(button["node"]))
 
-def reasoning():
-    app = find_app()
+def reasoning_position(items):
+    rx = re.compile(r"^(Instant|Medium|High|Extra High|Max|Pro),\s*([1-5])\s+of\s+5\.?$", re.I)
+    for item in items:
+        value = (item["name"] or item["text"]).strip()
+        match = rx.match(value)
+        if match:
+            return int(match.group(2)) - 1
+    return None
+
+def ensure_reasoning_menu(app):
     items = flattened(app)
-    observed = current_reasoning(items)
-    if observed is not None:
-        return observed
+    if any(item["name"] == "Power" and item["enabled"] for item in items):
+        return items
     picker = find_named(
         items, ("Select ChatGPT model", "选择 ChatGPT 模型"),
         roles=("push button", "button"), actionable=True
@@ -363,12 +370,66 @@ def reasoning():
         return None
     action(picker["node"])
     time.sleep(0.25)
-    observed = current_reasoning(flattened(app))
-    try:
-        pyatspi.Registry.generateKeyboardEvent(0, "Escape", pyatspi.KEY_PRESSRELEASE)
-    except Exception:
-        pass
+    return flattened(app)
+
+def close_reasoning_menu(app):
+    items = flattened(app)
+    if not any(item["name"] == "Power" for item in items):
+        return
+    picker = find_named(
+        items, ("Select ChatGPT model", "选择 ChatGPT 模型"),
+        roles=("push button", "button"), actionable=True
+    )
+    if picker is not None:
+        action(picker["node"])
+        time.sleep(0.08)
+
+def reasoning():
+    app = find_app()
+    items = ensure_reasoning_menu(app)
+    if items is None:
+        return None
+    observed = current_reasoning(items)
+    close_reasoning_menu(app)
     return observed
+
+def set_reasoning(target):
+    if target < 0 or target > 4:
+        raise RuntimeError("reasoning preset must be between 0 and 4")
+    app = find_app()
+    items = ensure_reasoning_menu(app)
+    if items is None:
+        return False
+    current = reasoning_position(items)
+    if current is None:
+        close_reasoning_menu(app)
+        return False
+    for _ in range(8):
+        if current == target:
+            close_reasoning_menu(app)
+            return True
+        items = flattened(app)
+        power = next((item for item in items if item["name"] == "Power" and item["enabled"]), None)
+        if power is None:
+            close_reasoning_menu(app)
+            return False
+        try:
+            power["node"].queryComponent().grabFocus()
+        except Exception:
+            close_reasoning_menu(app)
+            return False
+        time.sleep(0.06)
+        keyval = 65363 if target > current else 65361
+        pyatspi.Registry.generateKeyboardEvent(keyval, None, pyatspi.KEY_SYM)
+        time.sleep(0.18)
+        next_position = reasoning_position(flattened(app))
+        if next_position is None or next_position == current:
+            close_reasoning_menu(app)
+            return False
+        current = next_position
+    verified = current == target
+    close_reasoning_menu(app)
+    return verified
 
 def main():
     op = sys.argv[1]
@@ -386,6 +447,8 @@ def main():
         result = dismiss_rate_limit()
     elif op == "reasoning":
         result = reasoning()
+    elif op == "set-reasoning":
+        result = set_reasoning(int(sys.argv[2]))
     else:
         raise RuntimeError("unknown operation: " + op)
     print(json.dumps(result, ensure_ascii=False))
