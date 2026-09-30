@@ -44,20 +44,24 @@ pub struct RunOptions {
     pub timeout:Duration,
     pub poll_interval:Duration,
     pub auto_confirm:bool,
+    pub continuation_settle_delay:Duration,
     pub stale_reload_after:Duration,
     pub rate_limit_pause:Duration,
     pub max_rate_limit_pauses:u32,
     pub dispatch_confirm_after:Duration,
+    pub continuation_after:Duration,
 }
 impl Default for RunOptions {
     fn default()->Self { Self {
         timeout:Duration::from_secs(3600),
         poll_interval:Duration::from_millis(900),
         auto_confirm:true,
+        continuation_settle_delay:Duration::from_secs(1),
         stale_reload_after:GENERIC_STALL_WINDOW,
         rate_limit_pause:RATE_LIMIT_COOLDOWN,
         max_rate_limit_pauses:RATE_LIMIT_PRESERVE_EPISODES,
         dispatch_confirm_after:DISPATCH_CONFIRM_WINDOW,
+        continuation_after:Duration::from_secs(30*60),
     }}
 }
 
