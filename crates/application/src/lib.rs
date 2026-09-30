@@ -1309,6 +1309,7 @@ mod tests {
             before,
             waiting.clone(),
             waiting.clone(),
+            waiting.clone(),
             waiting,
             final_review,
         ]);
