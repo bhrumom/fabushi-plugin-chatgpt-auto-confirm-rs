@@ -568,36 +568,40 @@ pub fn bounded_conversation_carry(value: &str) -> String {
     tail_chars(value, MAX_CONVERSATION_CARRY_CHARS)
 }
 
-pub fn build_recovery_envelope(
-    task_id: TaskId,
-    run_id: RunId,
-    phase: Phase,
-    round: Round,
-    goal_revision: GoalRevision,
-    authoritative_instruction: &str,
-    snapshot: &ChatSurfaceSnapshot,
-    previous_work_result: Option<&str>,
-    current_next: Option<&str>,
-    original_goal: &str,
-    completed: &[String],
-    remaining: &[String],
-    blockers: &[String],
-) -> RecoveryEnvelope {
+pub struct RecoveryEnvelopeInput<'a> {
+    pub task_id: TaskId,
+    pub run_id: RunId,
+    pub phase: Phase,
+    pub round: Round,
+    pub goal_revision: GoalRevision,
+    pub authoritative_instruction: &'a str,
+    pub snapshot: &'a ChatSurfaceSnapshot,
+    pub previous_work_result: Option<&'a str>,
+    pub current_next: Option<&'a str>,
+    pub original_goal: &'a str,
+    pub completed: &'a [String],
+    pub remaining: &'a [String],
+    pub blockers: &'a [String],
+}
+
+pub fn build_recovery_envelope(input: RecoveryEnvelopeInput<'_>) -> RecoveryEnvelope {
     RecoveryEnvelope::V1(RecoveryEnvelopeV1 {
-        task_id,
-        run_id,
-        phase,
-        round,
-        goal_revision,
-        authoritative_instruction: tail_chars(authoritative_instruction, 8_000),
-        visible_assistant_prose: tail_chars(&snapshot.assistant_visible_prose, 8_000),
-        visible_work_trace: bounded_vec(&snapshot.assistant_visible_work_trace, 12_000),
-        previous_work_result: previous_work_result.map(|value| tail_chars(value, 8_000)),
-        current_next: current_next.map(|value| tail_chars(value, 6_000)),
-        original_goal: tail_chars(original_goal, 8_000),
-        completed: bounded_vec(completed, 5_000),
-        remaining: bounded_vec(remaining, 6_000),
-        blockers: bounded_vec(blockers, 3_000),
+        task_id: input.task_id,
+        run_id: input.run_id,
+        phase: input.phase,
+        round: input.round,
+        goal_revision: input.goal_revision,
+        authoritative_instruction: tail_chars(input.authoritative_instruction, 8_000),
+        visible_assistant_prose: tail_chars(&input.snapshot.assistant_visible_prose, 8_000),
+        visible_work_trace: bounded_vec(&input.snapshot.assistant_visible_work_trace, 12_000),
+        previous_work_result: input
+            .previous_work_result
+            .map(|value| tail_chars(value, 8_000)),
+        current_next: input.current_next.map(|value| tail_chars(value, 6_000)),
+        original_goal: tail_chars(input.original_goal, 8_000),
+        completed: bounded_vec(input.completed, 5_000),
+        remaining: bounded_vec(input.remaining, 6_000),
+        blockers: bounded_vec(input.blockers, 3_000),
     })
 }
 
@@ -972,21 +976,27 @@ mod tests {
             ],
             ..Default::default()
         };
-        let envelope = build_recovery_envelope(
-            task_id(),
-            RunId::new("run-1"),
-            Phase::Work,
-            Round::new(3),
-            GoalRevision::new(2),
-            &"instruction".repeat(2_000),
-            &snapshot,
-            Some(&"previous".repeat(2_000)),
-            Some("next"),
-            &"goal".repeat(3_000),
-            &["done".repeat(2_000)],
-            &["remaining".repeat(2_000)],
-            &["blocked".repeat(1_000)],
-        );
+        let instruction = "instruction".repeat(2_000);
+        let previous = "previous".repeat(2_000);
+        let goal = "goal".repeat(3_000);
+        let completed = vec!["done".repeat(2_000)];
+        let remaining = vec!["remaining".repeat(2_000)];
+        let blockers = vec!["blocked".repeat(1_000)];
+        let envelope = build_recovery_envelope(RecoveryEnvelopeInput {
+            task_id: task_id(),
+            run_id: RunId::new("run-1"),
+            phase: Phase::Work,
+            round: Round::new(3),
+            goal_revision: GoalRevision::new(2),
+            authoritative_instruction: &instruction,
+            snapshot: &snapshot,
+            previous_work_result: Some(&previous),
+            current_next: Some("next"),
+            original_goal: &goal,
+            completed: &completed,
+            remaining: &remaining,
+            blockers: &blockers,
+        });
 
         let RecoveryEnvelope::V1(payload) = envelope;
         assert_eq!(payload.task_id, task_id());
