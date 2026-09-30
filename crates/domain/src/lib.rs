@@ -147,6 +147,7 @@ pub struct ChatSurfaceSnapshot {
     pub authorization_actionable: bool,
     pub authorization_settlement: AuthorizationSettlementState,
     pub response_local_copy: bool,
+    pub strict_review_report: Option<StrictReviewReportEvidence>,
     pub rate_limit: bool,
     pub retryable_error: bool,
     pub unable_to_load_conversation: bool,
@@ -215,6 +216,16 @@ pub struct ApprovalSettlementKey {
 pub enum ReviewStatus {
     Complete,
     Next,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StrictReviewReportEvidence {
+    pub task_id: TaskId,
+    pub round: Round,
+    pub status: ReviewStatus,
+    pub summary: String,
+    pub next: Option<String>,
+    pub response_boundary: AssistantResponseBoundary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
