@@ -6,9 +6,15 @@ macro_rules! opaque_id {
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
         #[serde(transparent)]
         pub struct $name(String);
+
         impl $name {
-            pub fn new(value: impl Into<String>) -> Self { Self(value.into()) }
-            pub fn as_str(&self) -> &str { &self.0 }
+            pub fn new(value: impl Into<String>) -> Self {
+                Self(value.into())
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
         }
     };
 }
@@ -25,38 +31,100 @@ opaque_id!(ProgressFingerprint);
 opaque_id!(AttachmentId);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all="snake_case")]
-pub enum Phase { Work, Review }
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    Work,
+    Review,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(transparent)]
 pub struct Round(u32);
-impl Round { pub fn new(value:u32)->Self{Self(value)} pub fn get(self)->u32{self.0} }
+
+impl Round {
+    pub fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(transparent)]
 pub struct GoalRevision(u64);
-impl GoalRevision { pub fn new(value:u64)->Self{Self(value)} pub fn get(self)->u64{self.0} }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all="snake_case")]
-pub enum ReasoningPreset { Instant, Medium, High, #[default] ExtraHigh, Pro }
-impl ReasoningPreset {
-    pub fn index(self)->u8 { match self { Self::Instant=>0, Self::Medium=>1, Self::High=>2, Self::ExtraHigh=>3, Self::Pro=>4 } }
-    pub fn from_index(index:u8)->Option<Self> { Some(match index {0=>Self::Instant,1=>Self::Medium,2=>Self::High,3=>Self::ExtraHigh,4=>Self::Pro,_=>return None}) }
+impl GoalRevision {
+    pub fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub fn get(self) -> u64 {
+        self.0
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all="snake_case")]
-pub enum OwnershipConfidence { #[default] None, Weak, Strong }
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningPreset {
+    Instant,
+    Medium,
+    High,
+    #[default]
+    ExtraHigh,
+    Pro,
+}
+
+impl ReasoningPreset {
+    pub fn index(self) -> u8 {
+        match self {
+            Self::Instant => 0,
+            Self::Medium => 1,
+            Self::High => 2,
+            Self::ExtraHigh => 3,
+            Self::Pro => 4,
+        }
+    }
+
+    pub fn from_index(index: u8) -> Option<Self> {
+        Some(match index {
+            0 => Self::Instant,
+            1 => Self::Medium,
+            2 => Self::High,
+            3 => Self::ExtraHigh,
+            4 => Self::Pro,
+            _ => return None,
+        })
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all="snake_case")]
-pub enum AuthorizationSettlementState { #[default] Inactive, Settling }
+#[serde(rename_all = "snake_case")]
+pub enum OwnershipConfidence {
+    #[default]
+    None,
+    Weak,
+    Strong,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all="snake_case")]
-pub enum HydrationState { #[default] Ready, Loading, ShellOnly, Failed }
+#[serde(rename_all = "snake_case")]
+pub enum AuthorizationSettlementState {
+    #[default]
+    Inactive,
+    Settling,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HydrationState {
+    #[default]
+    Ready,
+    Loading,
+    ShellOnly,
+    Failed,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(default)]
@@ -95,28 +163,41 @@ pub struct ChatSurfaceSnapshot {
 }
 
 impl ChatSurfaceSnapshot {
-    pub fn ordinary_terminal_evidence(&self)->bool {
+    pub fn ordinary_terminal_evidence(&self) -> bool {
         self.app_healthy
             && self.assistant_response_boundary.is_some()
-            && self.assistant_response_ownership==OwnershipConfidence::Strong
-            && !self.streaming_or_busy && !self.stop_available
+            && self.assistant_response_ownership == OwnershipConfidence::Strong
+            && !self.streaming_or_busy
+            && !self.stop_available
             && !self.authorization_surface_present
-            && self.authorization_settlement==AuthorizationSettlementState::Inactive
-            && !self.rate_limit && !self.retryable_error
-            && !self.unable_to_load_conversation && !self.connection_interrupted
-            && !self.conversation_length_limit && !self.stream_polling_timeout
-            && !self.stream_cache_expired && !self.blocker_or_modal
+            && self.authorization_settlement == AuthorizationSettlementState::Inactive
+            && !self.rate_limit
+            && !self.retryable_error
+            && !self.unable_to_load_conversation
+            && !self.connection_interrupted
+            && !self.conversation_length_limit
+            && !self.stream_polling_timeout
+            && !self.stream_cache_expired
+            && !self.blocker_or_modal
             && self.response_local_copy
     }
 
-    pub fn activity_fingerprint(&self)->String {
-        let mut h=Sha256::new();
-        if let Some(v)=&self.conversation_fingerprint { h.update(v.as_str().as_bytes()); }
-        if let Some(v)=&self.user_turn_boundary { h.update(v.as_str().as_bytes()); }
-        if let Some(v)=&self.assistant_response_boundary { h.update(v.as_str().as_bytes()); }
+    pub fn activity_fingerprint(&self) -> String {
+        let mut h = Sha256::new();
+        if let Some(v) = &self.conversation_fingerprint {
+            h.update(v.as_str().as_bytes());
+        }
+        if let Some(v) = &self.user_turn_boundary {
+            h.update(v.as_str().as_bytes());
+        }
+        if let Some(v) = &self.assistant_response_boundary {
+            h.update(v.as_str().as_bytes());
+        }
         h.update(self.assistant_visible_prose.as_bytes());
-        for v in &self.assistant_visible_work_trace { h.update(v.as_bytes()); }
-        format!("{:x}",h.finalize())
+        for v in &self.assistant_visible_work_trace {
+            h.update(v.as_bytes());
+        }
+        format!("{:x}", h.finalize())
     }
 }
 
@@ -130,8 +211,11 @@ pub struct ApprovalSettlementKey {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all="snake_case")]
-pub enum ReviewStatus { Complete, Next }
+#[serde(rename_all = "snake_case")]
+pub enum ReviewStatus {
+    Complete,
+    Next,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RecoveryEnvelopeV1 {
@@ -152,8 +236,11 @@ pub struct RecoveryEnvelopeV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag="version",content="payload")]
-pub enum RecoveryEnvelope { #[serde(rename="1")] V1(RecoveryEnvelopeV1) }
+#[serde(tag = "version", content = "payload")]
+pub enum RecoveryEnvelope {
+    #[serde(rename = "1")]
+    V1(RecoveryEnvelopeV1),
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PreparedDispatch {
@@ -170,8 +257,18 @@ pub struct PreparedDispatch {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all="snake_case")]
-pub enum RunState { Dispatching, Running, WaitingApproval, Recovering, CoolingDown, Complete, Paused, Cancelled, Failed }
+#[serde(rename_all = "snake_case")]
+pub enum RunState {
+    Dispatching,
+    Running,
+    WaitingApproval,
+    Recovering,
+    CoolingDown,
+    Complete,
+    Paused,
+    Cancelled,
+    Failed,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunReport {
@@ -188,13 +285,56 @@ pub struct RunReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn terminal()->ChatSurfaceSnapshot {
-        ChatSurfaceSnapshot { app_healthy:true, assistant_response_boundary:Some(AssistantResponseBoundary::new("a1")),
-            assistant_response_ownership:OwnershipConfidence::Strong, response_local_copy:true, ..Default::default() }
+
+    fn terminal() -> ChatSurfaceSnapshot {
+        ChatSurfaceSnapshot {
+            app_healthy: true,
+            assistant_response_boundary: Some(AssistantResponseBoundary::new("a1")),
+            assistant_response_ownership: OwnershipConfidence::Strong,
+            response_local_copy: true,
+            ..Default::default()
+        }
     }
-    #[test] fn stop_absent_alone_is_not_terminal(){ assert!(!ChatSurfaceSnapshot{app_healthy:true,..Default::default()}.ordinary_terminal_evidence()); }
-    #[test] fn disabled_authorization_still_blocks_terminal(){ let mut s=terminal(); s.authorization_surface_present=true; s.authorization_actionable=false; assert!(!s.ordinary_terminal_evidence()); }
-    #[test] fn settlement_blocks_terminal(){ let mut s=terminal(); s.authorization_settlement=AuthorizationSettlementState::Settling; assert!(!s.ordinary_terminal_evidence()); }
-    #[test] fn visible_work_changes_progress(){ let mut s=terminal(); let a=s.activity_fingerprint(); s.assistant_visible_work_trace.push("checking".into()); assert_ne!(a,s.activity_fingerprint()); }
-    #[test] fn reasoning_positions_are_exact(){ for i in 0..=4 { assert_eq!(ReasoningPreset::from_index(i).unwrap().index(),i); } assert_eq!(ReasoningPreset::default(),ReasoningPreset::ExtraHigh); }
+
+    #[test]
+    fn stop_absent_alone_is_not_terminal() {
+        assert!(
+            !ChatSurfaceSnapshot {
+                app_healthy: true,
+                ..Default::default()
+            }
+            .ordinary_terminal_evidence()
+        );
+    }
+
+    #[test]
+    fn disabled_authorization_still_blocks_terminal() {
+        let mut s = terminal();
+        s.authorization_surface_present = true;
+        s.authorization_actionable = false;
+        assert!(!s.ordinary_terminal_evidence());
+    }
+
+    #[test]
+    fn settlement_blocks_terminal() {
+        let mut s = terminal();
+        s.authorization_settlement = AuthorizationSettlementState::Settling;
+        assert!(!s.ordinary_terminal_evidence());
+    }
+
+    #[test]
+    fn visible_work_changes_progress() {
+        let mut s = terminal();
+        let a = s.activity_fingerprint();
+        s.assistant_visible_work_trace.push("checking".into());
+        assert_ne!(a, s.activity_fingerprint());
+    }
+
+    #[test]
+    fn reasoning_positions_are_exact() {
+        for i in 0..=4 {
+            assert_eq!(ReasoningPreset::from_index(i).unwrap().index(), i);
+        }
+        assert_eq!(ReasoningPreset::default(), ReasoningPreset::ExtraHigh);
+    }
 }
