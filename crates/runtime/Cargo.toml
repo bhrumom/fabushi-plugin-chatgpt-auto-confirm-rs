@@ -13,5 +13,6 @@ fabushi-chatgpt-cdp = { path = "../adapters/chatgpt-cdp" }
 fabushi-chatgpt-desktop-atspi = { path = "../adapters/chatgpt-desktop-atspi" }
 fabushi-chatgpt-desktop-process = { path = "../adapters/chatgpt-desktop-process" }
 fabushi-chatgpt-domain = { path = "../domain" }
+fabushi-chatgpt-sqlite-store = { path = "../adapters/sqlite-store" }
 fabushi-chatgpt-linux-browser = { path = "../adapters/linux-browser" }
 tokio.workspace = true

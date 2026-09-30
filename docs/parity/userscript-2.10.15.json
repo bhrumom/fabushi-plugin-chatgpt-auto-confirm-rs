@@ -212,7 +212,7 @@
         "crates/adapters/sqlite-store/src/lib.rs"
       ],
       "missing": [
-        "runtime acquisition/renewal/release wiring for durable ui_session_leases",
+        "cross-process durable UI lease acceptance on htch-runtime",
         "fair multi-task next-wake scheduler",
         "SQLite/outbox crash recovery wiring",
         "pause/resume/cancel worker lifecycle",

@@ -6,15 +6,82 @@ use fabushi_chatgpt_application::{
 };
 use fabushi_chatgpt_desktop_atspi::ChatGptDesktopAtspi;
 use fabushi_chatgpt_desktop_process::ChatGptDesktopProcess;
+use fabushi_chatgpt_sqlite_store::{SqliteStore, UiSessionLease};
 use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{OnceCell, mpsc, oneshot};
+use tokio::time::MissedTickBehavior;
 
 pub use fabushi_chatgpt_application::RunOptions;
 pub use fabushi_chatgpt_cdp::ChatGptCdp;
 pub use fabushi_chatgpt_domain::{ChatSurfaceSnapshot, ReasoningPreset, RunReport, RunState};
 pub use fabushi_chatgpt_linux_browser::{BrowserLaunch, find_chromium_binary, launch_chromium};
+
+const DESKTOP_UI_LEASE_NAME: &str = "chatgpt-desktop-ui";
+const DESKTOP_UI_LEASE_TTL_MS: i64 = 15_000;
+const DESKTOP_UI_LEASE_HEARTBEAT: Duration = Duration::from_secs(5);
+
+struct DurableUiLease {
+    store: SqliteStore,
+    lease: UiSessionLease,
+    owner_id: String,
+}
+
+impl DurableUiLease {
+    fn acquire(path: &Path, owner_id: String) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create state directory {}", parent.display()))?;
+        }
+        let mut store = SqliteStore::open(path)?;
+        let now = unix_time_ms()?;
+        let lease = store
+            .acquire_ui_session_lease(
+                DESKTOP_UI_LEASE_NAME,
+                &owner_id,
+                now,
+                DESKTOP_UI_LEASE_TTL_MS,
+            )?
+            .ok_or_else(|| {
+                anyhow::anyhow!("ChatGPT desktop UI is owned by another Fabushi process")
+            })?;
+        Ok(Self {
+            store,
+            lease,
+            owner_id,
+        })
+    }
+
+    fn ensure(&mut self) -> Result<()> {
+        let now = unix_time_ms()?;
+        if self
+            .store
+            .renew_ui_session_lease(&self.lease, now, DESKTOP_UI_LEASE_TTL_MS)?
+        {
+            self.lease.expires_at_unix_ms = now + DESKTOP_UI_LEASE_TTL_MS;
+            return Ok(());
+        }
+
+        self.lease = self
+            .store
+            .acquire_ui_session_lease(
+                DESKTOP_UI_LEASE_NAME,
+                &self.owner_id,
+                now,
+                DESKTOP_UI_LEASE_TTL_MS,
+            )?
+            .ok_or_else(|| {
+                anyhow::anyhow!("lost ChatGPT desktop UI lease to another Fabushi process")
+            })?;
+        Ok(())
+    }
+
+    fn release(&self) {
+        let _ = self.store.release_ui_session_lease(&self.lease);
+    }
+}
 
 enum DesktopMutation {
     SetReasoning {
@@ -46,31 +113,47 @@ pub struct DesktopSessionActorHandle {
 }
 
 impl DesktopSessionActorHandle {
-    pub fn spawn(surface: Arc<dyn ChatSurfacePort>) -> Self {
+    #[cfg(test)]
+    fn spawn(surface: Arc<dyn ChatSurfacePort>) -> Self {
+        Self::spawn_inner(surface, None)
+    }
+
+    fn spawn_durable(surface: Arc<dyn ChatSurfacePort>, state_db_path: &Path) -> Result<Self> {
+        let owner_id = format!("{}-{}", std::process::id(), dispatch_marker()?);
+        let lease = DurableUiLease::acquire(state_db_path, owner_id)?;
+        Ok(Self::spawn_inner(surface, Some(lease)))
+    }
+
+    fn spawn_inner(
+        surface: Arc<dyn ChatSurfacePort>,
+        mut durable_lease: Option<DurableUiLease>,
+    ) -> Self {
         let (mutations, mut inbox) = mpsc::channel::<DesktopMutation>(64);
         let actor_surface = surface.clone();
         tokio::spawn(async move {
-            while let Some(mutation) = inbox.recv().await {
-                match mutation {
-                    DesktopMutation::SetReasoning { preset, reply } => {
-                        let _ = reply.send(actor_surface.set_reasoning_preset(preset).await);
+            let mut heartbeat = tokio::time::interval(DESKTOP_UI_LEASE_HEARTBEAT);
+            heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = heartbeat.tick(), if durable_lease.is_some() => {
+                        if let Some(lease) = durable_lease.as_mut() {
+                            let _ = lease.ensure();
+                        }
                     }
-                    DesktopMutation::SendPrompt { prompt, reply } => {
-                        let _ = reply.send(actor_surface.send_prompt(&prompt).await);
-                    }
-                    DesktopMutation::ApproveCurrentConversation { reply } => {
-                        let _ = reply.send(actor_surface.approve_current_conversation().await);
-                    }
-                    DesktopMutation::DismissRateLimitNotice { reply } => {
-                        let _ = reply.send(actor_surface.dismiss_rate_limit_notice().await);
-                    }
-                    DesktopMutation::RecoverCurrentSurface { reply } => {
-                        let _ = reply.send(actor_surface.recover_current_surface().await);
-                    }
-                    DesktopMutation::StartFreshConversation { reply } => {
-                        let _ = reply.send(actor_surface.start_fresh_conversation().await);
+                    mutation = inbox.recv() => {
+                        let Some(mutation) = mutation else { break; };
+                        if let Some(lease) = durable_lease.as_mut()
+                            && let Err(error) = lease.ensure()
+                        {
+                            reject_mutation(mutation, error);
+                            continue;
+                        }
+                        execute_mutation(&*actor_surface, mutation).await;
                     }
                 }
+            }
+            if let Some(lease) = durable_lease.as_ref() {
+                lease.release();
             }
         });
         Self { surface, mutations }
@@ -88,6 +171,45 @@ impl DesktopSessionActorHandle {
         receive
             .await
             .map_err(|_| anyhow::anyhow!("desktop session actor dropped mutation reply"))?
+    }
+}
+
+async fn execute_mutation(surface: &dyn ChatSurfacePort, mutation: DesktopMutation) {
+    match mutation {
+        DesktopMutation::SetReasoning { preset, reply } => {
+            let _ = reply.send(surface.set_reasoning_preset(preset).await);
+        }
+        DesktopMutation::SendPrompt { prompt, reply } => {
+            let _ = reply.send(surface.send_prompt(&prompt).await);
+        }
+        DesktopMutation::ApproveCurrentConversation { reply } => {
+            let _ = reply.send(surface.approve_current_conversation().await);
+        }
+        DesktopMutation::DismissRateLimitNotice { reply } => {
+            let _ = reply.send(surface.dismiss_rate_limit_notice().await);
+        }
+        DesktopMutation::RecoverCurrentSurface { reply } => {
+            let _ = reply.send(surface.recover_current_surface().await);
+        }
+        DesktopMutation::StartFreshConversation { reply } => {
+            let _ = reply.send(surface.start_fresh_conversation().await);
+        }
+    }
+}
+
+fn reject_mutation(mutation: DesktopMutation, error: anyhow::Error) {
+    let message = error.to_string();
+    match mutation {
+        DesktopMutation::SetReasoning { reply, .. }
+        | DesktopMutation::ApproveCurrentConversation { reply }
+        | DesktopMutation::DismissRateLimitNotice { reply } => {
+            let _ = reply.send(Err(anyhow::anyhow!(message)));
+        }
+        DesktopMutation::SendPrompt { reply, .. }
+        | DesktopMutation::RecoverCurrentSurface { reply }
+        | DesktopMutation::StartFreshConversation { reply } => {
+            let _ = reply.send(Err(anyhow::anyhow!(message)));
+        }
     }
 }
 
@@ -173,6 +295,7 @@ pub struct DesktopRuntime {
     process: ChatGptDesktopProcess,
     surface: Arc<ChatGptDesktopAtspi>,
     desktop_session: OnceCell<DesktopSessionActorHandle>,
+    state_db_path: PathBuf,
 }
 
 impl Default for DesktopRuntime {
@@ -190,14 +313,20 @@ impl DesktopRuntime {
             process,
             surface: Arc::new(surface),
             desktop_session: OnceCell::new(),
+            state_db_path: default_state_db_path(),
         }
     }
 
-    async fn desktop_session(&self) -> &DesktopSessionActorHandle {
+    pub fn with_state_db_path(mut self, path: PathBuf) -> Self {
+        self.state_db_path = path;
+        self
+    }
+
+    async fn desktop_session(&self) -> Result<&DesktopSessionActorHandle> {
         self.desktop_session
-            .get_or_init(|| async {
+            .get_or_try_init(|| async {
                 let surface: Arc<dyn ChatSurfacePort> = self.surface.clone();
-                DesktopSessionActorHandle::spawn(surface)
+                DesktopSessionActorHandle::spawn_durable(surface, &self.state_db_path)
             })
             .await
     }
@@ -227,7 +356,7 @@ impl DesktopRuntime {
     async fn ensure_reasoning_preset(&self, target: ReasoningPreset) -> Result<()> {
         let clock = TokioClock::default();
         let mut gate = ReasoningGateState::default();
-        let surface = self.desktop_session().await;
+        let surface = self.desktop_session().await?;
         loop {
             let snapshot = surface.observe().await?;
             match gate.observe(&snapshot, target, clock.now()) {
@@ -267,9 +396,37 @@ impl DesktopRuntime {
 
         let marker = dispatch_marker()?;
         let prepared = format!("{prompt}\n\n[Fabushi:{marker}]");
-        let worker = RunWorker::new(self.desktop_session().await.clone());
+        let worker = RunWorker::new(self.desktop_session().await?.clone());
         worker.execute(&prepared, options).await
     }
+}
+
+fn default_state_db_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("FABUSHI_CHATGPT_STATE_DB") {
+        return PathBuf::from(path);
+    }
+    if let Some(root) = std::env::var_os("XDG_STATE_HOME") {
+        return PathBuf::from(root)
+            .join("fabushi")
+            .join("chatgpt-auto-confirm")
+            .join("state.sqlite3");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join(".local")
+            .join("state")
+            .join("fabushi")
+            .join("chatgpt-auto-confirm")
+            .join("state.sqlite3");
+    }
+    PathBuf::from(".fabushi-chatgpt-auto-confirm-state.sqlite3")
+}
+
+fn unix_time_ms() -> Result<i64> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before Unix epoch")?;
+    i64::try_from(elapsed.as_millis()).context("Unix timestamp does not fit i64")
 }
 
 fn dispatch_marker() -> Result<String> {
@@ -348,6 +505,39 @@ mod actor_tests {
             self.mutation().await;
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn durable_desktop_session_actor_fences_competing_owner() {
+        let path = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-ui-lease-{}-{}.sqlite3",
+            std::process::id(),
+            dispatch_marker().unwrap()
+        ));
+        let first_surface: Arc<dyn ChatSurfacePort> = Arc::new(FakeSurface::default());
+        let first = DesktopSessionActorHandle::spawn_durable(first_surface, &path).unwrap();
+
+        let second_surface: Arc<dyn ChatSurfacePort> = Arc::new(FakeSurface::default());
+        let error = DesktopSessionActorHandle::spawn_durable(second_surface, &path)
+            .err()
+            .expect("competing actor must be fenced");
+        assert!(
+            error
+                .to_string()
+                .contains("owned by another Fabushi process")
+        );
+
+        drop(first);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let third_surface: Arc<dyn ChatSurfacePort> = Arc::new(FakeSurface::default());
+        let third = DesktopSessionActorHandle::spawn_durable(third_surface, &path).unwrap();
+        drop(third);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
     }
 
     #[tokio::test]
