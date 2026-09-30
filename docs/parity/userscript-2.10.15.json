@@ -180,12 +180,15 @@
       "id": "desktop-process",
       "source": "desktop lifecycle",
       "destination": "chatgpt-desktop-process",
-      "status": "pending",
-      "evidence": [],
+      "status": "partial",
+      "evidence": [
+        "crates/application/src/lib.rs",
+        "crates/adapters/chatgpt-desktop-process/src/lib.rs"
+      ],
       "missing": [
-        "crate",
-        "launch/attach/health",
-        "wiring"
+        "runtime composition",
+        "reattach/crash lifecycle policy wiring",
+        "htch-runtime lifecycle acceptance"
       ]
     },
     {
