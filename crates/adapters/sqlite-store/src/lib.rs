@@ -404,9 +404,14 @@ mod tests {
     #[test]
     fn commits_state_event_and_effect_atomically() {
         let mut store = SqliteStore::in_memory().unwrap();
-        store.record_transition(&transition(0, "effect-1"), 100).unwrap();
+        store
+            .record_transition(&transition(0, "effect-1"), 100)
+            .unwrap();
 
-        assert_eq!(store.task_revision(&TaskId::new("task-1")).unwrap(), Some(1));
+        assert_eq!(
+            store.task_revision(&TaskId::new("task-1")).unwrap(),
+            Some(1)
+        );
         assert_eq!(store.count_rows("run_events").unwrap(), 1);
         assert_eq!(store.count_rows("effect_outbox").unwrap(), 1);
 
@@ -433,7 +438,9 @@ mod tests {
     #[test]
     fn idempotency_key_prevents_duplicate_effect_in_same_transition() {
         let mut store = SqliteStore::in_memory().unwrap();
-        store.record_transition(&transition(0, "same-key"), 100).unwrap();
+        store
+            .record_transition(&transition(0, "same-key"), 100)
+            .unwrap();
 
         let duplicate = transition(1, "same-key");
         assert!(store.record_transition(&duplicate, 200).is_err());
