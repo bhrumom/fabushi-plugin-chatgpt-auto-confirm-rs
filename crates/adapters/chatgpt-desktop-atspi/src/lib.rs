@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn reasoning_effect_uses_semantic_power_control_and_reobserves_positions() {
-        assert!(BRIDGE.contains("name == \"Power\""));
+        assert!(BRIDGE.contains("item[\"name\"] == \"Power\""));
         assert!(BRIDGE.contains("KEY_SYM"));
         assert!(BRIDGE.contains("reasoning_position"));
         assert!(BRIDGE.contains("next_position == current"));
