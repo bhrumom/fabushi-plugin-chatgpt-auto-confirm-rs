@@ -368,6 +368,46 @@ impl SqliteStore {
         Ok(())
     }
 
+    pub fn settle_confirmed_dispatch_effect(
+        &mut self,
+        effect_id: i64,
+        task_id: &TaskId,
+        run_id: &RunId,
+        dispatch_id: &DispatchId,
+        settlement_json: &str,
+        now_unix_ms: i64,
+    ) -> Result<()> {
+        validate_json(settlement_json, "dispatch effect settlement")?;
+        let transaction = self.connection.transaction()?;
+        let effect_changed = transaction.execute(
+            "UPDATE effect_outbox
+             SET status='settled', settlement_json=?2, settled_at_unix_ms=?3
+             WHERE id=?1 AND status='pending'",
+            params![effect_id, settlement_json, now_unix_ms],
+        )?;
+        if effect_changed != 1 {
+            bail!("pending Send effect not found or already settled");
+        }
+        let dispatch_changed = transaction.execute(
+            "UPDATE dispatch_attempts
+             SET settlement_json=?4, settled_at_unix_ms=?5
+             WHERE task_id=?1 AND run_id=?2 AND dispatch_id=?3
+               AND settlement_json IS NULL",
+            params![
+                task_id.as_str(),
+                run_id.as_str(),
+                dispatch_id.as_str(),
+                settlement_json,
+                now_unix_ms
+            ],
+        )?;
+        if dispatch_changed != 1 {
+            bail!("pending dispatch attempt not found or already settled");
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn settle_dispatch_attempt(
         &self,
         task_id: &TaskId,
@@ -771,6 +811,55 @@ mod tests {
         assert!(!store.renew_ui_session_lease(&first, 1_600, 1_000).unwrap());
         assert!(store.release_ui_session_lease(&reacquired).unwrap());
         assert!(store.ui_session_lease("chatgpt-desktop").unwrap().is_none());
+    }
+
+    #[test]
+    fn confirmed_dispatch_and_effect_settle_atomically() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        let mut record = transition(0, "atomic-send-effect");
+        record.prepared_dispatch = Some(PreparedDispatch {
+            dispatch_id: DispatchId::new("dispatch-atomic"),
+            prepared_intent_json: r#"{"prompt":"hello","dispatchId":"dispatch-atomic"}"#.into(),
+        });
+        store.record_transition(&record, 100).unwrap();
+        let effect = store.pending_effects(1).unwrap().pop().unwrap();
+        store.mark_effect_attempted(effect.id).unwrap();
+
+        let missing = store
+            .settle_confirmed_dispatch_effect(
+                effect.id,
+                &TaskId::new("task-1"),
+                &RunId::new("run-1"),
+                &DispatchId::new("missing-dispatch"),
+                r#"{"confirmed":true}"#,
+                150,
+            )
+            .unwrap_err();
+        assert!(missing.to_string().contains("dispatch attempt"));
+        assert_eq!(store.pending_effects(10).unwrap().len(), 1);
+
+        store
+            .settle_confirmed_dispatch_effect(
+                effect.id,
+                &TaskId::new("task-1"),
+                &RunId::new("run-1"),
+                &DispatchId::new("dispatch-atomic"),
+                r#"{"confirmed":true}"#,
+                200,
+            )
+            .unwrap();
+        assert!(store.pending_effects(10).unwrap().is_empty());
+        assert_eq!(
+            store
+                .dispatch_attempt_settlement(
+                    &TaskId::new("task-1"),
+                    &RunId::new("run-1"),
+                    &DispatchId::new("dispatch-atomic"),
+                )
+                .unwrap()
+                .as_deref(),
+            Some(r#"{"confirmed":true}"#)
+        );
     }
 
     #[test]

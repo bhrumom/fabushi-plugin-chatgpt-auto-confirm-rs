@@ -164,8 +164,9 @@
         "crates/runtime/src/lib.rs"
       ],
       "missing": [
-        "startup inspection/replay of unsettled effects from semantic postconditions",
+        "semantic startup reconciliation for non-Send destructive effects",
         "stable durable task/run identity across CLI restart and full task CRUD/control",
+        "resumable supervision after fail-closed ambiguous pending effects",
         "real crash/restart acceptance"
       ]
     },

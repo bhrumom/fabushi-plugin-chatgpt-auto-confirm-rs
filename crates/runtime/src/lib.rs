@@ -28,6 +28,13 @@ use tokio::sync::Mutex;
 const DESKTOP_UI_LEASE_NAME: &str = "chatgpt-desktop-ui";
 const DESKTOP_UI_LEASE_TTL_MS: i64 = 15_000;
 const DESKTOP_UI_LEASE_HEARTBEAT: Duration = Duration::from_secs(5);
+const STARTUP_PENDING_EFFECT_LIMIT: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupReconcileOutcome {
+    Clear,
+    SettledObservedSend,
+}
 
 struct DurableUiLease {
     store: SqliteStore,
@@ -332,12 +339,14 @@ impl DurableRunJournal {
         )
     }
 
-    fn settle_dispatch(
-        &self,
+    fn settle_confirmed_dispatch(
+        &mut self,
+        effect_id: i64,
         dispatch_id: &DispatchId,
         settlement: serde_json::Value,
     ) -> Result<()> {
-        self.store.settle_dispatch_attempt(
+        self.store.settle_confirmed_dispatch_effect(
+            effect_id,
             &self.task_id,
             &self.run_id,
             dispatch_id,
@@ -423,15 +432,13 @@ impl DurableRunSurface {
         }
 
         {
-            let journal = self.journal.lock().await;
-            journal.settle(
+            let mut journal = self.journal.lock().await;
+            journal.settle_confirmed_dispatch(
                 pending.effect_id,
-                true,
-                "dispatch marker and new strong user turn observed",
-            )?;
-            journal.settle_dispatch(
                 &self.dispatch_id,
                 json!({
+                    "ok": true,
+                    "detail": "dispatch marker and new strong user turn observed",
                     "confirmed": true,
                     "userTurnBoundary": snapshot.user_turn_boundary.as_ref().map(|value| value.as_str()),
                     "conversationFingerprint": snapshot.conversation_fingerprint.as_ref().map(|value| value.as_str()),
@@ -688,6 +695,51 @@ impl DesktopRuntime {
         }
     }
 
+    async fn reconcile_unsettled_effects_before_run(&self) -> Result<()> {
+        let surface = self.desktop_session().await?;
+        let snapshot = surface.observe().await?;
+        let mut store = SqliteStore::open(&self.state_db_path)?;
+        let pending = store.pending_effects(STARTUP_PENDING_EFFECT_LIMIT)?;
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        let mut settled_any = false;
+        for effect in pending {
+            match reconcile_pending_effect(&mut store, &snapshot, &effect)? {
+                StartupReconcileOutcome::Clear => {}
+                StartupReconcileOutcome::SettledObservedSend => {
+                    settled_any = true;
+                }
+            }
+        }
+
+        let remaining = store.pending_effects(STARTUP_PENDING_EFFECT_LIMIT)?;
+        if !remaining.is_empty() {
+            let sample = remaining
+                .iter()
+                .take(4)
+                .map(|effect| {
+                    format!(
+                        "{}:{}:{}",
+                        effect.id, effect.effect_kind, effect.idempotency_key
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "unsettled destructive effects remain after startup reconciliation; refusing a new desktop mutation run to avoid duplicate effects: {sample}"
+            );
+        }
+
+        if settled_any {
+            tracing::info!(
+                "settled previously executed Send from current desktop semantic evidence"
+            );
+        }
+        Ok(())
+    }
+
     pub async fn run_prompt(
         &self,
         prompt: &str,
@@ -695,6 +747,7 @@ impl DesktopRuntime {
         options: RunOptions,
     ) -> Result<RunReport> {
         self.ensure_ready().await?;
+        self.reconcile_unsettled_effects_before_run().await?;
         self.ensure_reasoning_preset(requested_reasoning).await?;
 
         let marker = dispatch_marker()?;
@@ -712,6 +765,62 @@ impl DesktopRuntime {
         )?;
         worker.execute(&prepared, options).await
     }
+}
+
+fn reconcile_pending_effect(
+    store: &mut SqliteStore,
+    snapshot: &ChatSurfaceSnapshot,
+    effect: &fabushi_chatgpt_sqlite_store::PendingEffect,
+) -> Result<StartupReconcileOutcome> {
+    if effect.effect_kind != "send_prompt" {
+        return Ok(StartupReconcileOutcome::Clear);
+    }
+
+    let payload: serde_json::Value = serde_json::from_str(&effect.effect_payload_json)
+        .context("parse pending Send effect payload during startup reconciliation")?;
+    let dispatch_id = payload
+        .get("dispatchId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("pending Send effect is missing dispatchId"))?;
+    let baseline = payload
+        .get("baselineUserTurnBoundary")
+        .and_then(serde_json::Value::as_str);
+
+    let observed_boundary = snapshot
+        .user_turn_boundary
+        .as_ref()
+        .map(|value| value.as_str());
+    let confirmed = snapshot
+        .current_dispatch_id
+        .as_ref()
+        .map(|value| value.as_str())
+        == Some(dispatch_id)
+        && snapshot.user_turn_ownership == OwnershipConfidence::Strong
+        && observed_boundary.is_some()
+        && observed_boundary != baseline;
+
+    if !confirmed {
+        return Ok(StartupReconcileOutcome::Clear);
+    }
+
+    let settlement = json!({
+        "ok": true,
+        "detail": "startup reconciliation observed dispatch marker and new strong user turn",
+        "confirmed": true,
+        "userTurnBoundary": observed_boundary,
+        "conversationFingerprint": snapshot.conversation_fingerprint.as_ref().map(|value| value.as_str()),
+    })
+    .to_string();
+    store.settle_confirmed_dispatch_effect(
+        effect.id,
+        &TaskId::new(effect.task_id.clone()),
+        &RunId::new(effect.run_id.clone()),
+        &DispatchId::new(dispatch_id),
+        &settlement,
+        unix_time_ms()?,
+    )?;
+    Ok(StartupReconcileOutcome::SettledObservedSend)
 }
 
 fn default_state_db_path() -> PathBuf {
@@ -954,6 +1063,114 @@ mod actor_tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    fn create_pending_send(
+        store: &mut SqliteStore,
+        task_id: &TaskId,
+        run_id: &RunId,
+        dispatch_id: &str,
+        baseline: &str,
+    ) {
+        store
+            .record_transition(
+                &TransitionRecord {
+                    task_id: task_id.clone(),
+                    run_id: run_id.clone(),
+                    expected_revision: 0,
+                    next_revision: 1,
+                    event_kind: "send_prompt_prepared".into(),
+                    event_payload_json: json!({
+                        "preparedPrompt": "hello",
+                        "dispatchId": dispatch_id,
+                        "baselineUserTurnBoundary": baseline,
+                    })
+                    .to_string(),
+                    materialized_state_json: json!({"revision": 1}).to_string(),
+                    effect_kind: "send_prompt".into(),
+                    effect_payload_json: json!({
+                        "preparedPrompt": "hello",
+                        "dispatchId": dispatch_id,
+                        "baselineUserTurnBoundary": baseline,
+                    })
+                    .to_string(),
+                    idempotency_key: format!("send-{dispatch_id}"),
+                    prepared_dispatch: Some(PreparedDispatch {
+                        dispatch_id: DispatchId::new(dispatch_id),
+                        prepared_intent_json: json!({
+                            "preparedPrompt": "hello",
+                            "dispatchId": dispatch_id,
+                        })
+                        .to_string(),
+                    }),
+                },
+                100,
+            )
+            .unwrap();
+        let pending = store.pending_effects(10).unwrap();
+        store.mark_effect_attempted(pending[0].id).unwrap();
+    }
+
+    #[test]
+    fn startup_reconciliation_settles_send_only_from_semantic_postcondition() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        let task_id = TaskId::new("task-reconcile");
+        let run_id = RunId::new("run-reconcile");
+        create_pending_send(&mut store, &task_id, &run_id, "dispatch-reconcile", "u0");
+
+        let snapshot = ChatSurfaceSnapshot {
+            user_turn_boundary: Some(UserTurnBoundary::new("u1")),
+            current_dispatch_id: Some(DispatchId::new("dispatch-reconcile")),
+            user_turn_ownership: OwnershipConfidence::Strong,
+            ..Default::default()
+        };
+        let effect = store.pending_effects(10).unwrap().remove(0);
+        assert_eq!(
+            reconcile_pending_effect(&mut store, &snapshot, &effect).unwrap(),
+            StartupReconcileOutcome::SettledObservedSend
+        );
+        assert!(store.pending_effects(10).unwrap().is_empty());
+        assert!(
+            store
+                .dispatch_attempt_settlement(
+                    &task_id,
+                    &run_id,
+                    &DispatchId::new("dispatch-reconcile"),
+                )
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn startup_reconciliation_never_settles_ambiguous_send() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        let task_id = TaskId::new("task-ambiguous");
+        let run_id = RunId::new("run-ambiguous");
+        create_pending_send(&mut store, &task_id, &run_id, "dispatch-ambiguous", "u0");
+
+        let snapshot = ChatSurfaceSnapshot {
+            user_turn_boundary: Some(UserTurnBoundary::new("u1")),
+            current_dispatch_id: Some(DispatchId::new("different-dispatch")),
+            user_turn_ownership: OwnershipConfidence::Strong,
+            ..Default::default()
+        };
+        let effect = store.pending_effects(10).unwrap().remove(0);
+        assert_eq!(
+            reconcile_pending_effect(&mut store, &snapshot, &effect).unwrap(),
+            StartupReconcileOutcome::Clear
+        );
+        assert_eq!(store.pending_effects(10).unwrap().len(), 1);
+        assert_eq!(
+            store
+                .dispatch_attempt_settlement(
+                    &task_id,
+                    &run_id,
+                    &DispatchId::new("dispatch-ambiguous"),
+                )
+                .unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
