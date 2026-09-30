@@ -699,41 +699,41 @@ The ledger must be updated as implementation proceeds. `partial` means useful Ru
 |---|---|---|
 | Task/run/round/goal state | domain + sqlite-store | partial |
 | One-shot task mode | application | partial browser-era implementation only |
-| Continuous Work -> Review loop | application | pending |
-| Strict MAHAYANA_TASK_REPORT_V1 parser | application/domain | pending |
+| Continuous Work -> Review loop | application | partial: deterministic phase/round transition exists; durable runtime wiring pending |
+| Strict MAHAYANA_TASK_REPORT_V1 parser | application/domain | partial: exact taskId/round/status/summary/next validation has deterministic tests; production Review settlement wiring pending |
 | Userscript durable workbench state | sqlite-store | pending |
 | Tab/workspace ownership | DesktopSessionActor + UI lease | pending |
 | Multi-task fair supervision | runtime Supervisor/RunWorker | pending |
-| Prompt marker and ownership boundary | domain + ChatSurfacePort | pending |
-| 90s send confirmation and safe resend | application | partial browser-era implementation only |
-| Five-position reasoning preset | domain + desktop adapter | pending |
+| Prompt marker and ownership boundary | domain + ChatSurfacePort | partial: opaque dispatch/conversation/user/assistant boundary types exist; desktop projection and durable confirmation pending |
+| 90s send confirmation and safe resend | application | partial: semantic runner performs fresh-conversation recovery before re-dispatch; durable prepared-intent/outbox settlement pending |
+| Five-position reasoning preset | domain + desktop adapter | partial: exact 0..4 semantic model/default Extra High is tested; desktop picker enforcement pending |
 | 60s unlimited missing-picker recovery | application | pending |
 | Attachment persistence/upload/readiness | attachment-store + desktop adapter | pending |
 | Authorization structural detection | desktop adapter semantic projection | pending |
 | Exact current-conversation approval | application + desktop adapter | partial browser-era logic only |
-| Disabled/remounted approval handling | application/domain | pending |
-| 12s approval settlement latch | application/domain + store | pending |
-| 8s live no-approval recheck before handoff | application | pending |
-| Final latest-response Copy evidence | domain + desktop adapter | partial browser-era implementation only |
+| Disabled/remounted approval handling | application/domain | partial: presence/actionability are distinct domain facts; desktop structural projection/remount evidence pending |
+| 12s approval settlement latch | application/domain + store | partial: keyed 12s policy has deterministic test; durable store and production wiring pending |
+| 8s live no-approval recheck before handoff | application | partial: deterministic two-observation window exists; live desktop scan wiring pending |
+| Final latest-response Copy evidence | domain + desktop adapter | partial: strong response ownership + response-local Copy + 4s/8s stability modeled; desktop projection pending |
 | Review two-minute final settlement | application | pending |
 | Virtualized/missing task marker recovery | conversation fingerprint + response boundary | pending |
 | Visible assistant activity progress fingerprint | desktop adapter + application | pending |
 | Abnormal visible-work carry | RecoveryEnvelope | pending |
 | Generic 15m stall recovery | application | partial browser-era implementation only |
 | Generic hydration bounded recovery | application + desktop process/adapter | pending |
-| Explicit load failure 30s x7 | application | pending |
-| Connection-interrupted fresh handoff | application | pending |
-| Stream polling-timeout handoff | application | pending |
-| Stream-cache-expired current retry | application | pending |
-| Rate-limit 5m / 3 episodes / 4th fresh | application | partial browser-era behavior only |
+| Explicit load failure 30s x7 | application | partial: deterministic 30s x7 recovery state machine exists; durable attempt persistence/effect wiring pending |
+| Connection-interrupted fresh handoff | application | partial: immediate fresh-handoff decision is tested; RecoveryEnvelope/runtime wiring pending |
+| Stream polling-timeout handoff | application | partial: fresh-handoff decision modeled; runtime carry wiring pending |
+| Stream-cache-expired current retry | application | partial: once-per-failure-identity policy modeled; adapter retry action and durable identity pending |
+| Rate-limit 5m / 3 episodes / 4th fresh | application | partial: exact episode/cooldown decision policy is tested; fair scheduler/desktop notice provenance pending |
 | Conversation-length handoff / 64k carry | application/domain | pending |
 | Popup dismissal | desktop adapter + safety policy | pending |
 | Pause/resume/cancel/delete/edit goal | application + store + cli | pending |
 | Hot update/restart continuity | runtime + durable store/outbox | pending |
 | Memory diagnostic-only policy | runtime/observability | pending |
-| Web URL identity | redesigned as ConversationRef/fingerprint | pending |
+| Web URL identity | redesigned as ConversationRef/fingerprint | partial: opaque ConversationRef/fingerprint and semantic boundaries replace URL types in domain/application; production desktop binding pending |
 | localStorage/IndexedDB | redesigned as SQLite + attachment store | pending |
-| Browser/CDP host capability glue | not applicable; replace with runtime ports | redesign required |
+| Browser/CDP host capability glue | not applicable; replace with runtime ports | partial: core port is now ChatSurfacePort and architecture gate rejects BrowserPort/PageSnapshot in domain/application; default runtime is still legacy CDP |
 | Real desktop ChatGPT acceptance | htch-runtime exact-HEAD artifact gate | pending |
 
 No row may be marked `implemented` from type scaffolding alone. It requires shipping production wiring plus the highest applicable evidence layer.
@@ -940,4 +940,16 @@ That implementation is **not** desktop ChatGPT userscript parity:
 - desktop attachment/model/recovery behavior is not proven;
 - no exact-HEAD real desktop acceptance artifact has passed on `htch-runtime`.
 
-Future implementation work must update this section and the migration ledger with evidence rather than changing status by assertion.
+Current PR #2 migration progress on 2026-09-30:
+
+- Phase 0 architecture authority is reconciled to the desktop topology in `docs/architecture.md`.
+- ADR-0003 is superseded for the production path and ADR-0004 records the single-writer `DesktopSessionActor` topology.
+- `scripts/check-architecture.sh` rejects superseded `PageSnapshot`, `BrowserPort`, canonical web-conversation URL and browser/CDP leakage from domain/application.
+- `docs/parity/userscript-2.10.15.json` freezes the source baseline and records machine-readable partial/pending responsibilities.
+- domain/application now use desktop-neutral `ChatSurfaceSnapshot`, opaque conversation/turn boundaries, five-position reasoning semantics, authorization presence/actionability/settlement identity and deterministic recovery policy.
+- deterministic application tests cover the currently extracted 12-second authorization latch, 8-second no-approval confirmation, explicit load-failure 30-second x7 policy, immediate connection-interruption handoff, fourth rate-limit-episode handoff and strict Review identity binding.
+- these rows remain `partial`, not `implemented`, because SQLite/outbox persistence, actor/runtime production wiring, desktop AT-SPI/process adapters and real-device evidence are still absent.
+- the production CLI/runtime remains legacy CDP at this point and therefore Gate D/G are not satisfied.
+- `htch-runtime` became unavailable during this implementation pass, so no device-side build or desktop acceptance result is claimed for the current head. GitHub Actions remains the available exact-head verification authority until that device is online again.
+
+Future implementation work must continue updating this section and the migration ledger from production wiring and evidence rather than changing status by assertion.
