@@ -59,6 +59,7 @@ pub enum AuthorizationSettlementState { #[default] Inactive, Settling }
 pub enum HydrationState { #[default] Ready, Loading, ShellOnly, Failed }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
 pub struct ChatSurfaceSnapshot {
     pub app_healthy: bool,
     pub composer_ready: bool,
