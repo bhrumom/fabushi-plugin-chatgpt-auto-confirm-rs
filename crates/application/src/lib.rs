@@ -966,7 +966,10 @@ mod tests {
     fn recovery_envelope_is_versioned_bounded_and_carries_visible_work() {
         let snapshot = ChatSurfaceSnapshot {
             assistant_visible_prose: "prose".repeat(3_000),
-            assistant_visible_work_trace: vec!["checking repository".into(), "running tests".into()],
+            assistant_visible_work_trace: vec![
+                "checking repository".into(),
+                "running tests".into(),
+            ],
             ..Default::default()
         };
         let envelope = build_recovery_envelope(
