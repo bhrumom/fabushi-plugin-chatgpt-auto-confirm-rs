@@ -76,6 +76,8 @@ pub struct RunOptions {
     pub continuation_after: Duration,
     pub review_identity: Option<ReviewRunIdentity>,
     pub expected_dispatch_id: Option<DispatchId>,
+    pub run_phase: Option<Phase>,
+    pub run_round: Option<Round>,
 }
 
 impl Default for RunOptions {
@@ -92,6 +94,8 @@ impl Default for RunOptions {
             continuation_after: Duration::from_secs(30 * 60),
             review_identity: None,
             expected_dispatch_id: None,
+            run_phase: None,
+            run_round: None,
         }
     }
 }
@@ -126,7 +130,6 @@ impl<'a> RunPrompt<'a> {
             .review_identity
             .as_ref()
             .map(|_| ReviewSettlementTracker::default());
-        let mut no_approval_confirmation = NoApprovalConfirmation::default();
 
         loop {
             let now = self.clock.now();
@@ -154,7 +157,9 @@ impl<'a> RunPrompt<'a> {
                 && dispatch_identity_matches;
 
             if !dispatch_confirmed {
-                if now.saturating_sub(dispatched) >= options.dispatch_confirm_after {
+                if now.saturating_sub(dispatched) >= options.dispatch_confirm_after
+                    && self.destructive_handoff_is_safe().await?
+                {
                     self.surface.start_fresh_conversation().await?;
                     self.surface.send_prompt(prompt).await?;
                     recoveries += 1;
@@ -178,28 +183,14 @@ impl<'a> RunPrompt<'a> {
                 && self.surface.approve_current_conversation().await?
             {
                 approvals += 1;
-                no_approval_confirmation.reset();
                 terminal_since = None;
-                self.clock.sleep(AUTHORIZATION_SETTLEMENT_WINDOW).await;
+                self.clock.sleep(options.poll_interval).await;
                 continue;
             }
 
             if snapshot.authorization_surface_present
                 || snapshot.authorization_settlement == AuthorizationSettlementState::Settling
             {
-                no_approval_confirmation.reset();
-                terminal_since = None;
-                self.clock.sleep(options.poll_interval).await;
-                continue;
-            }
-
-            let no_approval_stable = if snapshot.stop_available {
-                no_approval_confirmation.reset();
-                false
-            } else {
-                no_approval_confirmation.observe(&snapshot, now)
-            };
-            if !snapshot.stop_available && !no_approval_stable {
                 terminal_since = None;
                 self.clock.sleep(options.poll_interval).await;
                 continue;
@@ -207,7 +198,9 @@ impl<'a> RunPrompt<'a> {
 
             if snapshot.rate_limit && self.surface.dismiss_rate_limit_notice().await? {
                 rate_limits += 1;
-                if rate_limits > options.max_rate_limit_pauses {
+                if rate_limits > options.max_rate_limit_pauses
+                    && self.destructive_handoff_is_safe().await?
+                {
                     self.surface.start_fresh_conversation().await?;
                     recoveries += 1;
                     rate_limits = 0;
@@ -233,6 +226,11 @@ impl<'a> RunPrompt<'a> {
                         });
                     }
                     ReviewSettlementDecision::RecoverReviewConversation => {
+                        if !self.destructive_handoff_is_safe().await? {
+                            terminal_since = None;
+                            self.clock.sleep(options.poll_interval).await;
+                            continue;
+                        }
                         self.surface.start_fresh_conversation().await?;
                         self.surface.send_prompt(prompt).await?;
                         recoveries += 1;
@@ -273,6 +271,21 @@ impl<'a> RunPrompt<'a> {
 
             self.clock.sleep(options.poll_interval).await;
         }
+    }
+
+    async fn destructive_handoff_is_safe(&self) -> Result<bool> {
+        let first = self.surface.observe().await?;
+        if first.authorization_surface_present
+            || first.authorization_settlement == AuthorizationSettlementState::Settling
+        {
+            return Ok(false);
+        }
+
+        self.clock.sleep(NO_APPROVAL_RECHECK_WINDOW).await;
+
+        let second = self.surface.observe().await?;
+        Ok(!second.authorization_surface_present
+            && second.authorization_settlement == AuthorizationSettlementState::Inactive)
     }
 }
 
@@ -1094,6 +1107,7 @@ mod tests {
         last_snapshot: Mutex<ChatSurfaceSnapshot>,
         sends: Mutex<Vec<String>>,
         fresh_conversations: Mutex<u32>,
+        dismiss_rate_limit: bool,
     }
 
     impl ScriptedSurface {
@@ -1104,7 +1118,13 @@ mod tests {
                 last_snapshot: Mutex::new(last_snapshot),
                 sends: Mutex::new(Vec::new()),
                 fresh_conversations: Mutex::new(0),
+                dismiss_rate_limit: false,
             }
+        }
+
+        fn with_rate_limit_dismiss(mut self) -> Self {
+            self.dismiss_rate_limit = true;
+            self
         }
 
         fn send_count(&self) -> usize {
@@ -1138,7 +1158,7 @@ mod tests {
         }
 
         async fn dismiss_rate_limit_notice(&self) -> Result<bool> {
-            Ok(false)
+            Ok(self.dismiss_rate_limit)
         }
 
         async fn recover_current_surface(&self) -> Result<()> {
@@ -1172,6 +1192,200 @@ mod tests {
             response_local_copy: true,
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn ordinary_terminal_completes_after_four_second_stability_without_no_approval_gate() {
+        let before = ChatSurfaceSnapshot {
+            user_turn_boundary: Some(UserTurnBoundary::new("u0")),
+            ..Default::default()
+        };
+        let final_snapshot = ChatSurfaceSnapshot {
+            app_healthy: true,
+            user_turn_boundary: Some(UserTurnBoundary::new("u1")),
+            user_turn_ownership: OwnershipConfidence::Strong,
+            assistant_response_boundary: Some(AssistantResponseBoundary::new("a1")),
+            assistant_response_ownership: OwnershipConfidence::Strong,
+            response_local_copy: true,
+            ..Default::default()
+        };
+        let surface = ScriptedSurface::new(vec![
+            before,
+            final_snapshot.clone(),
+            final_snapshot.clone(),
+            final_snapshot.clone(),
+            final_snapshot.clone(),
+            final_snapshot,
+        ]);
+        let clock = FakeClock::new();
+        let options = RunOptions {
+            poll_interval: Duration::from_secs(1),
+            timeout: Duration::from_secs(30),
+            stale_reload_after: Duration::from_secs(1_000),
+            ..RunOptions::default()
+        };
+
+        let report = RunPrompt::new(&surface, &clock)
+            .execute("prepared prompt", options)
+            .await
+            .unwrap();
+
+        assert_eq!(report.state, RunState::Complete);
+        assert_eq!(clock.now(), ORDINARY_TERMINAL_STABILITY);
+        assert_eq!(surface.fresh_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn rate_limit_notice_is_dismissed_without_eight_second_no_approval_delay() {
+        let before = ChatSurfaceSnapshot {
+            user_turn_boundary: Some(UserTurnBoundary::new("u0")),
+            ..Default::default()
+        };
+        let rate_limited = ChatSurfaceSnapshot {
+            user_turn_boundary: Some(UserTurnBoundary::new("u1")),
+            user_turn_ownership: OwnershipConfidence::Strong,
+            rate_limit: true,
+            ..Default::default()
+        };
+        let final_snapshot = ChatSurfaceSnapshot {
+            app_healthy: true,
+            user_turn_boundary: Some(UserTurnBoundary::new("u1")),
+            user_turn_ownership: OwnershipConfidence::Strong,
+            assistant_response_boundary: Some(AssistantResponseBoundary::new("a1")),
+            assistant_response_ownership: OwnershipConfidence::Strong,
+            response_local_copy: true,
+            ..Default::default()
+        };
+        let surface = ScriptedSurface::new(vec![
+            before,
+            rate_limited,
+            final_snapshot.clone(),
+            final_snapshot.clone(),
+            final_snapshot.clone(),
+            final_snapshot.clone(),
+            final_snapshot,
+        ])
+        .with_rate_limit_dismiss();
+        let clock = FakeClock::new();
+        let options = RunOptions {
+            poll_interval: Duration::from_secs(1),
+            rate_limit_pause: Duration::ZERO,
+            timeout: Duration::from_secs(30),
+            stale_reload_after: Duration::from_secs(1_000),
+            ..RunOptions::default()
+        };
+
+        let report = RunPrompt::new(&surface, &clock)
+            .execute("prepared prompt", options)
+            .await
+            .unwrap();
+
+        assert_eq!(report.state, RunState::Complete);
+        assert_eq!(clock.now(), ORDINARY_TERMINAL_STABILITY);
+        assert_eq!(surface.fresh_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn fourth_rate_limit_fresh_handoff_uses_two_live_authorization_scans() {
+        let before = ChatSurfaceSnapshot {
+            user_turn_boundary: Some(UserTurnBoundary::new("u0")),
+            ..Default::default()
+        };
+        let rate_limited = ChatSurfaceSnapshot {
+            user_turn_boundary: Some(UserTurnBoundary::new("u1")),
+            user_turn_ownership: OwnershipConfidence::Strong,
+            rate_limit: true,
+            ..Default::default()
+        };
+        let safe_scan = ChatSurfaceSnapshot {
+            user_turn_boundary: Some(UserTurnBoundary::new("u1")),
+            user_turn_ownership: OwnershipConfidence::Strong,
+            ..Default::default()
+        };
+        let final_snapshot = ChatSurfaceSnapshot {
+            app_healthy: true,
+            user_turn_boundary: Some(UserTurnBoundary::new("u1")),
+            user_turn_ownership: OwnershipConfidence::Strong,
+            assistant_response_boundary: Some(AssistantResponseBoundary::new("a1")),
+            assistant_response_ownership: OwnershipConfidence::Strong,
+            response_local_copy: true,
+            ..Default::default()
+        };
+        let surface = ScriptedSurface::new(vec![
+            before,
+            rate_limited.clone(),
+            rate_limited.clone(),
+            rate_limited.clone(),
+            rate_limited,
+            safe_scan.clone(),
+            safe_scan,
+            final_snapshot.clone(),
+            final_snapshot.clone(),
+            final_snapshot.clone(),
+            final_snapshot.clone(),
+            final_snapshot,
+        ])
+        .with_rate_limit_dismiss();
+        let clock = FakeClock::new();
+        let options = RunOptions {
+            poll_interval: Duration::from_secs(1),
+            rate_limit_pause: Duration::ZERO,
+            timeout: Duration::from_secs(60),
+            stale_reload_after: Duration::from_secs(1_000),
+            ..RunOptions::default()
+        };
+
+        let report = RunPrompt::new(&surface, &clock)
+            .execute("prepared prompt", options)
+            .await
+            .unwrap();
+
+        assert_eq!(report.state, RunState::Complete);
+        assert_eq!(surface.fresh_count(), 1);
+        assert_eq!(
+            clock.now(),
+            NO_APPROVAL_RECHECK_WINDOW + ORDINARY_TERMINAL_STABILITY
+        );
+    }
+
+    #[tokio::test]
+    async fn authorization_appearing_between_handoff_scans_cancels_destructive_fresh() {
+        let first = ChatSurfaceSnapshot::default();
+        let second = ChatSurfaceSnapshot {
+            authorization_surface_present: true,
+            authorization_actionable: false,
+            ..Default::default()
+        };
+        let surface = ScriptedSurface::new(vec![first, second]);
+        let clock = FakeClock::new();
+
+        assert!(
+            !RunPrompt::new(&surface, &clock)
+                .destructive_handoff_is_safe()
+                .await
+                .unwrap()
+        );
+        assert_eq!(clock.now(), NO_APPROVAL_RECHECK_WINDOW);
+        assert_eq!(surface.fresh_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn disabled_authorization_blocks_destructive_handoff_without_waiting() {
+        let disabled = ChatSurfaceSnapshot {
+            authorization_surface_present: true,
+            authorization_actionable: false,
+            ..Default::default()
+        };
+        let surface = ScriptedSurface::new(vec![disabled]);
+        let clock = FakeClock::new();
+
+        assert!(
+            !RunPrompt::new(&surface, &clock)
+                .destructive_handoff_is_safe()
+                .await
+                .unwrap()
+        );
+        assert_eq!(clock.now(), Duration::ZERO);
     }
 
     #[tokio::test]

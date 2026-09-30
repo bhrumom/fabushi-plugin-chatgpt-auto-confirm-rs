@@ -7,7 +7,7 @@ use fabushi_chatgpt_application::{
 use fabushi_chatgpt_desktop_atspi::ChatGptDesktopAtspi;
 use fabushi_chatgpt_desktop_process::ChatGptDesktopProcess;
 use fabushi_chatgpt_sqlite_store::{
-    PreparedDispatch, SqliteStore, TransitionRecord, UiSessionLease,
+    PreparedApproval, PreparedDispatch, SqliteStore, TransitionRecord, UiSessionLease,
 };
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -18,8 +18,13 @@ use tokio::time::MissedTickBehavior;
 
 pub use fabushi_chatgpt_application::RunOptions;
 pub use fabushi_chatgpt_cdp::ChatGptCdp;
-pub use fabushi_chatgpt_domain::{ChatSurfaceSnapshot, ReasoningPreset, RunReport, RunState};
-use fabushi_chatgpt_domain::{DispatchId, OwnershipConfidence, RunId, TaskId, UserTurnBoundary};
+use fabushi_chatgpt_domain::{
+    AuthorizationSettlementState, ConversationFingerprint, DispatchId, OwnershipConfidence, RunId,
+    TaskId, UserTurnBoundary,
+};
+pub use fabushi_chatgpt_domain::{
+    ChatSurfaceSnapshot, Phase, ReasoningPreset, Round, RunReport, RunState,
+};
 pub use fabushi_chatgpt_linux_browser::{BrowserLaunch, find_chromium_binary, launch_chromium};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -35,6 +40,7 @@ enum StartupReconcileOutcome {
     Clear,
     SettledObservedSend,
     SettledObservedReasoning,
+    SettledObservedApproval,
 }
 
 struct DurableUiLease {
@@ -289,6 +295,7 @@ impl DurableRunJournal {
         effect_kind: &str,
         effect_payload_json: String,
         prepared_dispatch: Option<PreparedDispatch>,
+        prepared_approval: Option<PreparedApproval>,
     ) -> Result<i64> {
         let next_revision = self.revision + 1;
         let mut hasher = Sha256::new();
@@ -318,6 +325,7 @@ impl DurableRunJournal {
                 effect_payload_json,
                 idempotency_key: idempotency_key.clone(),
                 prepared_dispatch,
+                prepared_approval,
             },
             unix_time_ms()?,
         )?;
@@ -342,6 +350,20 @@ impl DurableRunJournal {
 
     fn mark_attempted(&self, effect_id: i64) -> Result<()> {
         self.store.mark_effect_attempted(effect_id)
+    }
+
+    fn arm_approval_settlement(&self, fingerprint: &str, until_unix_ms: i64) -> Result<()> {
+        self.store
+            .arm_approval_settlement(fingerprint, until_unix_ms)
+    }
+
+    fn settle_approval(&self, effect_id: i64, fingerprint: &str, detail: &str) -> Result<()> {
+        self.store.settle_effect(
+            effect_id,
+            &json!({"ok": true, "detail": detail}).to_string(),
+            unix_time_ms()?,
+        )?;
+        self.store.settle_approval_fingerprint(fingerprint)
     }
 
     fn settle_confirmed_dispatch(
@@ -373,13 +395,24 @@ struct PendingSendSettlement {
     baseline_user_turn: Option<UserTurnBoundary>,
 }
 
+#[derive(Debug, Clone)]
+struct PendingApprovalSettlement {
+    effect_id: i64,
+    fingerprint: String,
+    conversation_fingerprint: ConversationFingerprint,
+    settlement_until_unix_ms: i64,
+}
+
 #[derive(Clone)]
 struct DurableRunSurface {
     surface: DesktopSessionActorHandle,
     journal: Arc<Mutex<DurableRunJournal>>,
     dispatch_id: DispatchId,
+    phase: Phase,
+    round: Round,
     pending_reasoning: Arc<Mutex<Option<PendingReasoningSettlement>>>,
     pending_send: Arc<Mutex<Option<PendingSendSettlement>>>,
+    pending_approval: Arc<Mutex<Option<PendingApprovalSettlement>>>,
 }
 
 impl DurableRunSurface {
@@ -389,17 +422,65 @@ impl DurableRunSurface {
         task_id: TaskId,
         run_id: RunId,
         dispatch_id: DispatchId,
+        phase: Phase,
+        round: Round,
     ) -> Result<Self> {
+        let journal = DurableRunJournal::open(state_db_path, task_id, run_id)?;
+        let phase_label = match phase {
+            Phase::Work => "work",
+            Phase::Review => "review",
+        };
+        let now = unix_time_ms()?;
+        let mut restored_approval = None;
+        for effect in journal.store.pending_effects(128)? {
+            if effect.task_id != journal.task_id.as_str()
+                || effect.run_id != journal.run_id.as_str()
+                || effect.effect_kind != "approve_current_conversation"
+            {
+                continue;
+            }
+            let payload: serde_json::Value = serde_json::from_str(&effect.effect_payload_json)
+                .context("parse durable approval effect while restoring run surface")?;
+            let Some(fingerprint) = payload
+                .get("fingerprint")
+                .and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            let Some(record) = journal.store.approval_fingerprint(fingerprint)? else {
+                continue;
+            };
+            if record.phase != phase_label || record.round != i64::from(round.get()) {
+                bail!("durable approval identity does not match requested phase/round");
+            }
+            let Some(until) = record.settlement_until_unix_ms else {
+                continue;
+            };
+            if record.state != "settling" {
+                continue;
+            }
+            restored_approval = Some(PendingApprovalSettlement {
+                effect_id: effect.id,
+                fingerprint: record.fingerprint,
+                conversation_fingerprint: ConversationFingerprint::new(
+                    record.conversation_fingerprint,
+                ),
+                settlement_until_unix_ms: until,
+            });
+            if until > now {
+                break;
+            }
+        }
+
         Ok(Self {
             surface,
-            journal: Arc::new(Mutex::new(DurableRunJournal::open(
-                state_db_path,
-                task_id,
-                run_id,
-            )?)),
+            journal: Arc::new(Mutex::new(journal)),
             dispatch_id,
+            phase,
+            round,
             pending_reasoning: Arc::new(Mutex::new(None)),
             pending_send: Arc::new(Mutex::new(None)),
+            pending_approval: Arc::new(Mutex::new(restored_approval)),
         })
     }
 
@@ -414,7 +495,7 @@ impl DurableRunSurface {
     {
         let effect_id = {
             let mut journal = self.journal.lock().await;
-            journal.begin(effect_kind, payload.to_string(), None)?
+            journal.begin(effect_kind, payload.to_string(), None, None)?
         };
         let result = effect.await;
         let settlement = match &result {
@@ -499,12 +580,51 @@ impl DurableRunSurface {
     }
 }
 
+impl DurableRunSurface {
+    async fn project_and_settle_pending_approval(
+        &self,
+        snapshot: &mut ChatSurfaceSnapshot,
+    ) -> Result<()> {
+        let pending = self.pending_approval.lock().await.clone();
+        let Some(pending) = pending else {
+            return Ok(());
+        };
+        let now = unix_time_ms()?;
+        let same_conversation =
+            snapshot.conversation_fingerprint.as_ref() == Some(&pending.conversation_fingerprint);
+        if now < pending.settlement_until_unix_ms {
+            snapshot.authorization_settlement = AuthorizationSettlementState::Settling;
+            return Ok(());
+        }
+        if !same_conversation {
+            snapshot.authorization_settlement = AuthorizationSettlementState::Settling;
+            return Ok(());
+        }
+        if !snapshot.authorization_surface_present
+            && snapshot.authorization_settlement == AuthorizationSettlementState::Inactive
+        {
+            {
+                let journal = self.journal.lock().await;
+                journal.settle_approval(
+                    pending.effect_id,
+                    &pending.fingerprint,
+                    "approval semantic postcondition observed after settlement window",
+                )?;
+            }
+            *self.pending_approval.lock().await = None;
+        }
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl ChatSurfacePort for DurableRunSurface {
     async fn observe(&self) -> Result<ChatSurfaceSnapshot> {
-        let snapshot = self.surface.observe().await?;
+        let mut snapshot = self.surface.observe().await?;
         self.settle_pending_reasoning_if_observed(&snapshot).await?;
         self.settle_pending_send_if_observed(&snapshot).await?;
+        self.project_and_settle_pending_approval(&mut snapshot)
+            .await?;
         Ok(snapshot)
     }
 
@@ -526,6 +646,7 @@ impl ChatSurfacePort for DurableRunSurface {
                 journal.begin(
                     "set_reasoning",
                     json!({"preset": preset.index()}).to_string(),
+                    None,
                     None,
                 )?
             };
@@ -565,6 +686,7 @@ impl ChatSurfacePort for DurableRunSurface {
                     dispatch_id: self.dispatch_id.clone(),
                     prepared_intent_json: prepared_intent.to_string(),
                 }),
+                None,
             )?
         };
         *self.pending_send.lock().await = Some(PendingSendSettlement {
@@ -581,12 +703,82 @@ impl ChatSurfacePort for DurableRunSurface {
     }
 
     async fn approve_current_conversation(&self) -> Result<bool> {
-        self.record_and_settle(
-            "approve_current_conversation",
-            json!({}),
-            self.surface.approve_current_conversation(),
-        )
-        .await
+        if self.pending_approval.lock().await.is_some() {
+            bail!("approval effect is already pending semantic settlement");
+        }
+
+        let snapshot = self.surface.observe().await?;
+        if !snapshot.authorization_surface_present || !snapshot.authorization_actionable {
+            return Ok(false);
+        }
+        let conversation_fingerprint = snapshot
+            .conversation_fingerprint
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("authorization requires a conversation fingerprint"))?;
+
+        let (task_id, run_id) = {
+            let journal = self.journal.lock().await;
+            (journal.task_id.clone(), journal.run_id.clone())
+        };
+        let phase = match self.phase {
+            Phase::Work => "work",
+            Phase::Review => "review",
+        };
+        let round_text = self.round.get().to_string();
+        let mut hasher = Sha256::new();
+        for part in [
+            task_id.as_str(),
+            run_id.as_str(),
+            phase,
+            round_text.as_str(),
+            conversation_fingerprint.as_str(),
+        ] {
+            hasher.update(part.as_bytes());
+            hasher.update([0]);
+        }
+        let fingerprint = format!("approval:{:x}", hasher.finalize());
+        let payload = json!({
+            "fingerprint": fingerprint,
+            "taskId": task_id.as_str(),
+            "runId": run_id.as_str(),
+            "phase": phase,
+            "round": self.round.get(),
+            "conversationFingerprint": conversation_fingerprint.as_str(),
+        });
+        let effect_id = {
+            let mut journal = self.journal.lock().await;
+            journal.begin(
+                "approve_current_conversation",
+                payload.to_string(),
+                None,
+                Some(PreparedApproval {
+                    fingerprint: fingerprint.clone(),
+                    phase: phase.to_owned(),
+                    round: i64::from(self.round.get()),
+                    conversation_fingerprint: conversation_fingerprint.as_str().to_owned(),
+                }),
+            )?
+        };
+
+        let accepted = self.surface.approve_current_conversation().await?;
+        if !accepted {
+            bail!(
+                "conversation-scoped approval action was not accepted; durable approval intent remains pending for semantic reconciliation"
+            );
+        }
+
+        let settlement_until_unix_ms = unix_time_ms()? + 12_000;
+        {
+            let journal = self.journal.lock().await;
+            journal.arm_approval_settlement(&fingerprint, settlement_until_unix_ms)?;
+        }
+        *self.pending_approval.lock().await = Some(PendingApprovalSettlement {
+            effect_id,
+            fingerprint,
+            conversation_fingerprint,
+            settlement_until_unix_ms,
+        });
+        Ok(true)
     }
 
     async fn dismiss_rate_limit_notice(&self) -> Result<bool> {
@@ -629,9 +821,19 @@ impl RunWorker {
         task_id: TaskId,
         run_id: RunId,
         dispatch_id: DispatchId,
+        phase: Phase,
+        round: Round,
     ) -> Result<Self> {
         Ok(Self {
-            surface: DurableRunSurface::new(surface, state_db_path, task_id, run_id, dispatch_id)?,
+            surface: DurableRunSurface::new(
+                surface,
+                state_db_path,
+                task_id,
+                run_id,
+                dispatch_id,
+                phase,
+                round,
+            )?,
         })
     }
 
@@ -778,7 +980,8 @@ impl DesktopRuntime {
             match reconcile_pending_effect(&mut store, &snapshot, &effect)? {
                 StartupReconcileOutcome::Clear => {}
                 StartupReconcileOutcome::SettledObservedSend
-                | StartupReconcileOutcome::SettledObservedReasoning => {
+                | StartupReconcileOutcome::SettledObservedReasoning
+                | StartupReconcileOutcome::SettledObservedApproval => {
                     settled_any = true;
                 }
             }
@@ -815,6 +1018,13 @@ impl DesktopRuntime {
         self.ensure_ready().await?;
         self.reconcile_unsettled_effects_before_run().await?;
 
+        let phase = options
+            .run_phase
+            .ok_or_else(|| anyhow::anyhow!("desktop run requires explicit run_phase"))?;
+        let round = options
+            .run_round
+            .ok_or_else(|| anyhow::anyhow!("desktop run requires explicit run_round"))?;
+
         let marker = dispatch_marker()?;
         let dispatch_id = DispatchId::new(marker.clone());
         let task_id = TaskId::new(format!("task-{marker}"));
@@ -825,6 +1035,8 @@ impl DesktopRuntime {
             task_id,
             run_id,
             dispatch_id.clone(),
+            phase,
+            round,
         )?;
         self.ensure_reasoning_preset(&worker.surface, requested_reasoning)
             .await?;
@@ -841,6 +1053,56 @@ fn reconcile_pending_effect(
     snapshot: &ChatSurfaceSnapshot,
     effect: &fabushi_chatgpt_sqlite_store::PendingEffect,
 ) -> Result<StartupReconcileOutcome> {
+    if effect.effect_kind == "approve_current_conversation" {
+        let payload: serde_json::Value = serde_json::from_str(&effect.effect_payload_json)
+            .context("parse pending approval effect payload during startup reconciliation")?;
+        let fingerprint = payload
+            .get("fingerprint")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("pending approval effect is missing fingerprint"))?;
+        let conversation_fingerprint = payload
+            .get("conversationFingerprint")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!("pending approval effect is missing conversationFingerprint")
+            })?;
+        let record = store.approval_fingerprint(fingerprint)?.ok_or_else(|| {
+            anyhow::anyhow!("pending approval effect has no durable approval fingerprint")
+        })?;
+
+        let same_conversation = snapshot
+            .conversation_fingerprint
+            .as_ref()
+            .map(|value| value.as_str())
+            == Some(conversation_fingerprint);
+        let now = unix_time_ms()?;
+        let settlement_expired = record
+            .settlement_until_unix_ms
+            .is_some_and(|until| until <= now);
+        if settlement_expired
+            && same_conversation
+            && !snapshot.authorization_surface_present
+            && snapshot.authorization_settlement == AuthorizationSettlementState::Inactive
+        {
+            store.settle_effect(
+                effect.id,
+                &json!({
+                    "ok": true,
+                    "detail": "startup reconciliation observed approval postcondition after durable settlement window",
+                    "conversationFingerprint": conversation_fingerprint,
+                })
+                .to_string(),
+                now,
+            )?;
+            store.settle_approval_fingerprint(fingerprint)?;
+            return Ok(StartupReconcileOutcome::SettledObservedApproval);
+        }
+
+        return Ok(StartupReconcileOutcome::Clear);
+    }
+
     if effect.effect_kind == "set_reasoning" {
         let payload: serde_json::Value = serde_json::from_str(&effect.effect_payload_json)
             .context("parse pending reasoning effect payload during startup reconciliation")?;
@@ -1119,6 +1381,8 @@ mod actor_tests {
             TaskId::new("task-reasoning-journal"),
             RunId::new("run-reasoning-journal"),
             DispatchId::new("dispatch-reasoning-journal"),
+            Phase::Work,
+            Round::new(1),
         )
         .unwrap();
         let selecting = {
@@ -1139,6 +1403,143 @@ mod actor_tests {
         assert!(selecting.await.unwrap().unwrap());
         assert!(store.pending_effects(10).unwrap().is_empty());
         drop(surface);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[derive(Default)]
+    struct ApprovalAcceptingSurface;
+
+    #[async_trait]
+    impl ChatSurfacePort for ApprovalAcceptingSurface {
+        async fn observe(&self) -> Result<ChatSurfaceSnapshot> {
+            Ok(ChatSurfaceSnapshot {
+                conversation_fingerprint: Some(ConversationFingerprint::new(
+                    "conversation-approval",
+                )),
+                authorization_surface_present: true,
+                authorization_actionable: true,
+                ..Default::default()
+            })
+        }
+
+        async fn send_prompt(&self, _prompt: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn approve_current_conversation(&self) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn dismiss_rate_limit_notice(&self) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn recover_current_surface(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn start_fresh_conversation(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn adapter_true_does_not_settle_approval_effect_and_persists_identity_latch() {
+        let actor_surface: Arc<dyn ChatSurfacePort> = Arc::new(ApprovalAcceptingSurface);
+        let actor = DesktopSessionActorHandle::spawn(actor_surface);
+        let path = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-approval-journal-{}-{}.sqlite3",
+            std::process::id(),
+            dispatch_marker().unwrap()
+        ));
+        let surface = DurableRunSurface::new(
+            actor,
+            &path,
+            TaskId::new("task-approval"),
+            RunId::new("run-approval"),
+            DispatchId::new("dispatch-approval"),
+            Phase::Review,
+            Round::new(9),
+        )
+        .unwrap();
+
+        assert!(surface.approve_current_conversation().await.unwrap());
+
+        let store = SqliteStore::open(&path).unwrap();
+        let pending = store.pending_effects(10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].effect_kind, "approve_current_conversation");
+        let payload: serde_json::Value =
+            serde_json::from_str(&pending[0].effect_payload_json).unwrap();
+        assert_eq!(payload["taskId"], "task-approval");
+        assert_eq!(payload["runId"], "run-approval");
+        assert_eq!(payload["phase"], "review");
+        assert_eq!(payload["round"], 9);
+        assert_eq!(payload["conversationFingerprint"], "conversation-approval");
+        let fingerprint = payload["fingerprint"].as_str().unwrap();
+        let approval = store.approval_fingerprint(fingerprint).unwrap().unwrap();
+        assert_eq!(approval.state, "settling");
+        assert!(approval.settlement_until_unix_ms.unwrap() > unix_time_ms().unwrap());
+
+        let projected = surface.observe().await.unwrap();
+        assert_eq!(
+            projected.authorization_settlement,
+            AuthorizationSettlementState::Settling
+        );
+        assert_eq!(store.pending_effects(10).unwrap().len(), 1);
+
+        drop(surface);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[tokio::test]
+    async fn durable_approval_latch_restores_settling_after_run_surface_restart() {
+        let actor_surface: Arc<dyn ChatSurfacePort> = Arc::new(ApprovalAcceptingSurface);
+        let actor = DesktopSessionActorHandle::spawn(actor_surface);
+        let path = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-approval-restart-{}-{}.sqlite3",
+            std::process::id(),
+            dispatch_marker().unwrap()
+        ));
+        let task_id = TaskId::new("task-approval-restart");
+        let run_id = RunId::new("run-approval-restart");
+
+        let first = DurableRunSurface::new(
+            actor.clone(),
+            &path,
+            task_id.clone(),
+            run_id.clone(),
+            DispatchId::new("dispatch-approval-restart"),
+            Phase::Work,
+            Round::new(4),
+        )
+        .unwrap();
+        assert!(first.approve_current_conversation().await.unwrap());
+        drop(first);
+
+        let restored = DurableRunSurface::new(
+            actor,
+            &path,
+            task_id,
+            run_id,
+            DispatchId::new("dispatch-approval-restart"),
+            Phase::Work,
+            Round::new(4),
+        )
+        .unwrap();
+        let snapshot = restored.observe().await.unwrap();
+        assert_eq!(
+            snapshot.authorization_settlement,
+            AuthorizationSettlementState::Settling
+        );
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(store.pending_effects(10).unwrap().len(), 1);
+
+        drop(restored);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
@@ -1211,6 +1612,8 @@ mod actor_tests {
             task_id.clone(),
             run_id.clone(),
             DispatchId::new("dispatch-journal"),
+            Phase::Work,
+            Round::new(1),
         )
         .unwrap();
         let sending = {
@@ -1284,6 +1687,7 @@ mod actor_tests {
                         })
                         .to_string(),
                     }),
+                    prepared_approval: None,
                 },
                 100,
             )
@@ -1312,12 +1716,128 @@ mod actor_tests {
                     effect_payload_json: json!({"preset": preset.index()}).to_string(),
                     idempotency_key: format!("reasoning-{}", preset.index()),
                     prepared_dispatch: None,
+                    prepared_approval: None,
                 },
                 100,
             )
             .unwrap();
         let pending = store.pending_effects(10).unwrap();
         store.mark_effect_attempted(pending[0].id).unwrap();
+    }
+
+    fn create_pending_approval(
+        store: &mut SqliteStore,
+        task_id: &TaskId,
+        run_id: &RunId,
+        fingerprint: &str,
+        conversation_fingerprint: &str,
+        settlement_until_unix_ms: i64,
+    ) {
+        store
+            .record_transition(
+                &TransitionRecord {
+                    task_id: task_id.clone(),
+                    run_id: run_id.clone(),
+                    expected_revision: 0,
+                    next_revision: 1,
+                    event_kind: "approve_current_conversation_prepared".into(),
+                    event_payload_json: json!({
+                        "fingerprint": fingerprint,
+                        "taskId": task_id.as_str(),
+                        "runId": run_id.as_str(),
+                        "phase": "work",
+                        "round": 2,
+                        "conversationFingerprint": conversation_fingerprint,
+                    })
+                    .to_string(),
+                    materialized_state_json: json!({"revision": 1}).to_string(),
+                    effect_kind: "approve_current_conversation".into(),
+                    effect_payload_json: json!({
+                        "fingerprint": fingerprint,
+                        "taskId": task_id.as_str(),
+                        "runId": run_id.as_str(),
+                        "phase": "work",
+                        "round": 2,
+                        "conversationFingerprint": conversation_fingerprint,
+                    })
+                    .to_string(),
+                    idempotency_key: format!("approval-{fingerprint}"),
+                    prepared_dispatch: None,
+                    prepared_approval: Some(PreparedApproval {
+                        fingerprint: fingerprint.to_owned(),
+                        phase: "work".into(),
+                        round: 2,
+                        conversation_fingerprint: conversation_fingerprint.to_owned(),
+                    }),
+                },
+                100,
+            )
+            .unwrap();
+        store
+            .arm_approval_settlement(fingerprint, settlement_until_unix_ms)
+            .unwrap();
+        let effect = store.pending_effects(10).unwrap().remove(0);
+        store.mark_effect_attempted(effect.id).unwrap();
+    }
+
+    #[test]
+    fn startup_reconciliation_never_replays_or_settles_ambiguous_active_approval() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        let task_id = TaskId::new("task-approval-ambiguous");
+        let run_id = RunId::new("run-approval-ambiguous");
+        let now = unix_time_ms().unwrap();
+        create_pending_approval(
+            &mut store,
+            &task_id,
+            &run_id,
+            "fp-active",
+            "conversation-active",
+            now + 12_000,
+        );
+        let snapshot = ChatSurfaceSnapshot {
+            conversation_fingerprint: Some(ConversationFingerprint::new("conversation-active")),
+            ..Default::default()
+        };
+        let effect = store.pending_effects(10).unwrap().remove(0);
+
+        assert_eq!(
+            reconcile_pending_effect(&mut store, &snapshot, &effect).unwrap(),
+            StartupReconcileOutcome::Clear
+        );
+        assert_eq!(store.pending_effects(10).unwrap().len(), 1);
+        let record = store.approval_fingerprint("fp-active").unwrap().unwrap();
+        assert_eq!(record.state, "settling");
+    }
+
+    #[test]
+    fn startup_reconciliation_settles_expired_approval_only_from_semantic_postcondition() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        let task_id = TaskId::new("task-approval-settle");
+        let run_id = RunId::new("run-approval-settle");
+        let now = unix_time_ms().unwrap();
+        create_pending_approval(
+            &mut store,
+            &task_id,
+            &run_id,
+            "fp-expired",
+            "conversation-expired",
+            now - 1,
+        );
+        let snapshot = ChatSurfaceSnapshot {
+            conversation_fingerprint: Some(ConversationFingerprint::new("conversation-expired")),
+            authorization_surface_present: false,
+            authorization_settlement: AuthorizationSettlementState::Inactive,
+            ..Default::default()
+        };
+        let effect = store.pending_effects(10).unwrap().remove(0);
+
+        assert_eq!(
+            reconcile_pending_effect(&mut store, &snapshot, &effect).unwrap(),
+            StartupReconcileOutcome::SettledObservedApproval
+        );
+        assert!(store.pending_effects(10).unwrap().is_empty());
+        let record = store.approval_fingerprint("fp-expired").unwrap().unwrap();
+        assert_eq!(record.state, "settled");
     }
 
     #[test]

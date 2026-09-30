@@ -59,12 +59,14 @@
       "status": "partial",
       "evidence": [
         "crates/application/src/lib.rs",
+        "crates/runtime/src/lib.rs",
+        "crates/adapters/sqlite-store/src/lib.rs",
         "crates/adapters/chatgpt-desktop-atspi/src/bridge.py"
       ],
       "missing": [
-        "durable persisted latch",
-        "live disabled/remount authorization acceptance",
-        "acceptance"
+        "formal exact-artifact live disabled/remount authorization acceptance",
+        "formal exact-artifact crash/restart authorization acceptance",
+        "stable top-level task/run resume orchestration beyond the durable run-surface identity"
       ]
     },
     {

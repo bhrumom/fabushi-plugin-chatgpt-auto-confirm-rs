@@ -18,12 +18,33 @@ pub struct TransitionRecord {
     pub effect_payload_json: String,
     pub idempotency_key: String,
     pub prepared_dispatch: Option<PreparedDispatch>,
+    pub prepared_approval: Option<PreparedApproval>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedDispatch {
     pub dispatch_id: DispatchId,
     pub prepared_intent_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedApproval {
+    pub fingerprint: String,
+    pub phase: String,
+    pub round: i64,
+    pub conversation_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalFingerprintRecord {
+    pub fingerprint: String,
+    pub task_id: String,
+    pub run_id: String,
+    pub phase: String,
+    pub round: i64,
+    pub conversation_fingerprint: String,
+    pub settlement_until_unix_ms: Option<i64>,
+    pub state: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,6 +222,49 @@ impl SqliteStore {
         validate_json(&record.event_payload_json, "event payload")?;
         validate_json(&record.materialized_state_json, "materialized state")?;
         validate_json(&record.effect_payload_json, "effect payload")?;
+        if let Some(approval) = record.prepared_approval.as_ref() {
+            transaction.execute(
+                "INSERT INTO approval_fingerprints(
+                     fingerprint, task_id, run_id, phase, round,
+                     conversation_fingerprint, settlement_until_unix_ms, state
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, NULL, 'pending')
+                 ON CONFLICT(fingerprint) DO NOTHING",
+                params![
+                    approval.fingerprint,
+                    record.task_id.as_str(),
+                    record.run_id.as_str(),
+                    approval.phase,
+                    approval.round,
+                    approval.conversation_fingerprint,
+                ],
+            )?;
+
+            let stored: (String, String, String, i64, String) = transaction.query_row(
+                "SELECT task_id, run_id, phase, round, conversation_fingerprint
+                 FROM approval_fingerprints WHERE fingerprint=?1",
+                [approval.fingerprint.as_str()],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )?;
+            let expected = (
+                record.task_id.as_str().to_owned(),
+                record.run_id.as_str().to_owned(),
+                approval.phase.clone(),
+                approval.round,
+                approval.conversation_fingerprint.clone(),
+            );
+            if stored != expected {
+                bail!("approval fingerprint already exists with a different identity");
+            }
+        }
+
         if let Some(dispatch) = record.prepared_dispatch.as_ref() {
             validate_json(&dispatch.prepared_intent_json, "prepared dispatch intent")?;
         }
@@ -335,6 +399,63 @@ impl SqliteStore {
 
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("read pending effects")
+    }
+
+    pub fn approval_fingerprint(
+        &self,
+        fingerprint: &str,
+    ) -> Result<Option<ApprovalFingerprintRecord>> {
+        self.connection
+            .query_row(
+                "SELECT fingerprint, task_id, run_id, phase, round,
+                        conversation_fingerprint, settlement_until_unix_ms, state
+                 FROM approval_fingerprints WHERE fingerprint=?1",
+                [fingerprint],
+                |row| {
+                    Ok(ApprovalFingerprintRecord {
+                        fingerprint: row.get(0)?,
+                        task_id: row.get(1)?,
+                        run_id: row.get(2)?,
+                        phase: row.get(3)?,
+                        round: row.get(4)?,
+                        conversation_fingerprint: row.get(5)?,
+                        settlement_until_unix_ms: row.get(6)?,
+                        state: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .context("read approval fingerprint")
+    }
+
+    pub fn arm_approval_settlement(
+        &self,
+        fingerprint: &str,
+        settlement_until_unix_ms: i64,
+    ) -> Result<()> {
+        let changed = self.connection.execute(
+            "UPDATE approval_fingerprints
+             SET settlement_until_unix_ms=?2, state='settling'
+             WHERE fingerprint=?1 AND state IN ('pending','settling')",
+            params![fingerprint, settlement_until_unix_ms],
+        )?;
+        if changed != 1 {
+            bail!("approval fingerprint not found or already settled");
+        }
+        Ok(())
+    }
+
+    pub fn settle_approval_fingerprint(&self, fingerprint: &str) -> Result<()> {
+        let changed = self.connection.execute(
+            "UPDATE approval_fingerprints
+             SET state='settled'
+             WHERE fingerprint=?1 AND state IN ('pending','settling')",
+            [fingerprint],
+        )?;
+        if changed != 1 {
+            bail!("approval fingerprint not found or already settled");
+        }
+        Ok(())
     }
 
     pub fn mark_effect_attempted(&self, effect_id: i64) -> Result<()> {
@@ -627,6 +748,7 @@ mod tests {
             effect_payload_json: r#"{"prompt":"hello"}"#.into(),
             idempotency_key: key.into(),
             prepared_dispatch: None,
+            prepared_approval: None,
         }
     }
 
@@ -881,5 +1003,53 @@ mod tests {
                 .settle_effect(effect.id, r#"{"observed":true}"#, 300)
                 .is_err()
         );
+    }
+    #[test]
+    fn approval_intent_is_atomic_with_state_event_and_effect() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        let mut record = transition(0, "approval-effect");
+        record.effect_kind = "approve_current_conversation".into();
+        record.prepared_approval = Some(PreparedApproval {
+            fingerprint: "approval-fp".into(),
+            phase: "work".into(),
+            round: 3,
+            conversation_fingerprint: "conversation-fp".into(),
+        });
+
+        store.record_transition(&record, 100).unwrap();
+
+        let approval = store.approval_fingerprint("approval-fp").unwrap().unwrap();
+        assert_eq!(approval.task_id, "task-1");
+        assert_eq!(approval.run_id, "run-1");
+        assert_eq!(approval.phase, "work");
+        assert_eq!(approval.round, 3);
+        assert_eq!(approval.conversation_fingerprint, "conversation-fp");
+        assert_eq!(approval.state, "pending");
+        assert_eq!(approval.settlement_until_unix_ms, None);
+        assert_eq!(store.pending_effects(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn approval_settlement_window_is_persisted_and_readable() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        let mut record = transition(0, "approval-window-effect");
+        record.effect_kind = "approve_current_conversation".into();
+        record.prepared_approval = Some(PreparedApproval {
+            fingerprint: "approval-window".into(),
+            phase: "review".into(),
+            round: 7,
+            conversation_fingerprint: "conversation-7".into(),
+        });
+        store.record_transition(&record, 100).unwrap();
+
+        store
+            .arm_approval_settlement("approval-window", 12_345)
+            .unwrap();
+        let approval = store
+            .approval_fingerprint("approval-window")
+            .unwrap()
+            .unwrap();
+        assert_eq!(approval.state, "settling");
+        assert_eq!(approval.settlement_until_unix_ms, Some(12_345));
     }
 }

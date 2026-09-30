@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use fabushi_chatgpt_runtime::{
-    ChatGptCdp, DesktopRuntime, ReasoningPreset, RunOptions, find_chromium_binary, launch_chromium,
-    run_prompt,
+    ChatGptCdp, DesktopRuntime, Phase, ReasoningPreset, Round, RunOptions, find_chromium_binary,
+    launch_chromium, run_prompt,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -99,6 +99,8 @@ async fn main() -> Result<()> {
                 timeout: Duration::from_secs(timeout_seconds),
                 poll_interval: Duration::from_millis(poll_ms),
                 auto_confirm,
+                run_phase: Some(Phase::Work),
+                run_round: Some(Round::new(1)),
                 ..RunOptions::default()
             };
             let requested_reasoning = ReasoningPreset::from_index(reasoning)
