@@ -339,6 +339,10 @@ impl DurableRunJournal {
         )
     }
 
+    fn mark_attempted(&self, effect_id: i64) -> Result<()> {
+        self.store.mark_effect_attempted(effect_id)
+    }
+
     fn settle_confirmed_dispatch(
         &mut self,
         effect_id: i64,
@@ -357,6 +361,12 @@ impl DurableRunJournal {
 }
 
 #[derive(Debug, Clone)]
+struct PendingReasoningSettlement {
+    effect_id: i64,
+    target: ReasoningPreset,
+}
+
+#[derive(Debug, Clone)]
 struct PendingSendSettlement {
     effect_id: i64,
     baseline_user_turn: Option<UserTurnBoundary>,
@@ -367,6 +377,7 @@ struct DurableRunSurface {
     surface: DesktopSessionActorHandle,
     journal: Arc<Mutex<DurableRunJournal>>,
     dispatch_id: DispatchId,
+    pending_reasoning: Arc<Mutex<Option<PendingReasoningSettlement>>>,
     pending_send: Arc<Mutex<Option<PendingSendSettlement>>>,
 }
 
@@ -386,6 +397,7 @@ impl DurableRunSurface {
                 run_id,
             )?)),
             dispatch_id,
+            pending_reasoning: Arc::new(Mutex::new(None)),
             pending_send: Arc::new(Mutex::new(None)),
         })
     }
@@ -413,6 +425,29 @@ impl DurableRunSurface {
             journal.settle(effect_id, settlement.0, &settlement.1)?;
         }
         result
+    }
+
+    async fn settle_pending_reasoning_if_observed(
+        &self,
+        snapshot: &ChatSurfaceSnapshot,
+    ) -> Result<bool> {
+        let pending = self.pending_reasoning.lock().await.clone();
+        let Some(pending) = pending else {
+            return Ok(false);
+        };
+        if snapshot.selected_reasoning_preset != Some(pending.target) {
+            return Ok(false);
+        }
+        {
+            let journal = self.journal.lock().await;
+            journal.settle(
+                pending.effect_id,
+                true,
+                "reasoning preset re-observed after UI mutation",
+            )?;
+        }
+        *self.pending_reasoning.lock().await = None;
+        Ok(true)
     }
 
     async fn settle_pending_send_if_observed(
@@ -467,17 +502,46 @@ impl DurableRunSurface {
 impl ChatSurfacePort for DurableRunSurface {
     async fn observe(&self) -> Result<ChatSurfaceSnapshot> {
         let snapshot = self.surface.observe().await?;
+        self.settle_pending_reasoning_if_observed(&snapshot).await?;
         self.settle_pending_send_if_observed(&snapshot).await?;
         Ok(snapshot)
     }
 
     async fn set_reasoning_preset(&self, preset: ReasoningPreset) -> Result<bool> {
-        self.record_and_settle(
-            "set_reasoning",
-            json!({"preset": preset.index()}),
-            self.surface.set_reasoning_preset(preset),
-        )
-        .await
+        let existing = self.pending_reasoning.lock().await.clone();
+        if let Some(existing) = existing.as_ref()
+            && existing.target != preset
+        {
+            bail!("unsettled reasoning effect targets a different preset");
+        }
+
+        let effect_id = if let Some(existing) = existing {
+            let journal = self.journal.lock().await;
+            journal.mark_attempted(existing.effect_id)?;
+            existing.effect_id
+        } else {
+            let effect_id = {
+                let mut journal = self.journal.lock().await;
+                journal.begin(
+                    "set_reasoning",
+                    json!({"preset": preset.index()}).to_string(),
+                    None,
+                )?
+            };
+            *self.pending_reasoning.lock().await = Some(PendingReasoningSettlement {
+                effect_id,
+                target: preset,
+            });
+            effect_id
+        };
+
+        let result = self.surface.set_reasoning_preset(preset).await;
+        if result.is_ok() {
+            let snapshot = self.surface.observe().await?;
+            self.settle_pending_reasoning_if_observed(&snapshot).await?;
+        }
+        let _ = effect_id;
+        result
     }
 
     async fn send_prompt(&self, prompt: &str) -> Result<()> {
@@ -663,17 +727,21 @@ impl DesktopRuntime {
             .context("observe ChatGPT desktop semantic surface")
     }
 
-    async fn ensure_reasoning_preset(&self, target: ReasoningPreset) -> Result<()> {
+    async fn ensure_reasoning_preset(
+        &self,
+        surface: &dyn ChatSurfacePort,
+        target: ReasoningPreset,
+    ) -> Result<()> {
         let clock = TokioClock::default();
         let mut gate = ReasoningGateState::default();
-        let surface = self.desktop_session().await?;
         loop {
             let snapshot = surface.observe().await?;
             match gate.observe(&snapshot, target, clock.now()) {
                 ReasoningDecision::Ready => return Ok(()),
                 ReasoningDecision::Select(preset) => {
                     let changed = surface.set_reasoning_preset(preset).await?;
-                    if changed && self.surface.observed_reasoning_preset().await? == Some(target) {
+                    if changed && surface.observe().await?.selected_reasoning_preset == Some(target)
+                    {
                         gate.selection_succeeded();
                         return Ok(());
                     }
@@ -744,12 +812,9 @@ impl DesktopRuntime {
     ) -> Result<RunReport> {
         self.ensure_ready().await?;
         self.reconcile_unsettled_effects_before_run().await?;
-        self.ensure_reasoning_preset(requested_reasoning).await?;
 
         let marker = dispatch_marker()?;
-        let prepared = format!("{prompt}\n\n[Fabushi:{marker}]");
-        let mut options = options;
-        options.expected_dispatch_id = Some(DispatchId::new(marker.clone()));
+        let dispatch_id = DispatchId::new(marker.clone());
         let task_id = TaskId::new(format!("task-{marker}"));
         let run_id = RunId::new(format!("run-{marker}"));
         let worker = RunWorker::new(
@@ -757,8 +822,14 @@ impl DesktopRuntime {
             &self.state_db_path,
             task_id,
             run_id,
-            DispatchId::new(marker),
+            dispatch_id.clone(),
         )?;
+        self.ensure_reasoning_preset(&worker.surface, requested_reasoning)
+            .await?;
+
+        let prepared = format!("{prompt}\n\n[Fabushi:{marker}]");
+        let mut options = options;
+        options.expected_dispatch_id = Some(dispatch_id);
         worker.execute(&prepared, options).await
     }
 }
@@ -954,6 +1025,88 @@ mod actor_tests {
         drop(third);
         tokio::time::sleep(Duration::from_millis(50)).await;
 
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[derive(Default)]
+    struct BlockingReasoningSurface {
+        entered: Notify,
+        release: Notify,
+        selected: AtomicBool,
+    }
+
+    #[async_trait]
+    impl ChatSurfacePort for BlockingReasoningSurface {
+        async fn observe(&self) -> Result<ChatSurfaceSnapshot> {
+            Ok(ChatSurfaceSnapshot {
+                reasoning_picker_available: true,
+                selected_reasoning_preset: self
+                    .selected
+                    .load(Ordering::SeqCst)
+                    .then_some(ReasoningPreset::ExtraHigh),
+                ..Default::default()
+            })
+        }
+
+        async fn set_reasoning_preset(&self, preset: ReasoningPreset) -> Result<bool> {
+            assert_eq!(preset, ReasoningPreset::ExtraHigh);
+            self.entered.notify_one();
+            self.release.notified().await;
+            self.selected.store(true, Ordering::SeqCst);
+            Ok(true)
+        }
+
+        async fn send_prompt(&self, _prompt: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn approve_current_conversation(&self) -> Result<bool> {
+            Ok(false)
+        }
+        async fn dismiss_rate_limit_notice(&self) -> Result<bool> {
+            Ok(false)
+        }
+        async fn recover_current_surface(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn start_fresh_conversation(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_reasoning_selection_is_journaled_before_ui_mutation() {
+        let fake = Arc::new(BlockingReasoningSurface::default());
+        let actor_surface: Arc<dyn ChatSurfacePort> = fake.clone();
+        let actor = DesktopSessionActorHandle::spawn(actor_surface);
+        let path = temp_state_db_path("reasoning-journal");
+        let surface = DurableRunSurface::new(
+            actor,
+            &path,
+            TaskId::new("task-reasoning-journal"),
+            RunId::new("run-reasoning-journal"),
+            DispatchId::new("dispatch-reasoning-journal"),
+        )
+        .unwrap();
+        let selecting = {
+            let surface = surface.clone();
+            tokio::spawn(async move {
+                surface
+                    .set_reasoning_preset(ReasoningPreset::ExtraHigh)
+                    .await
+            })
+        };
+        fake.entered.notified().await;
+        let store = SqliteStore::open(&path).unwrap();
+        let pending = store.pending_effects(10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].effect_kind, "set_reasoning");
+        assert_eq!(pending[0].attempt_count, 1);
+        fake.release.notify_one();
+        assert!(selecting.await.unwrap().unwrap());
+        assert!(store.pending_effects(10).unwrap().is_empty());
+        drop(surface);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
