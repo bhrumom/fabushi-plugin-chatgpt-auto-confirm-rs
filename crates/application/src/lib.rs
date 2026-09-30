@@ -693,6 +693,12 @@ pub struct ContinuousTaskState {
 }
 
 impl ContinuousTaskState {
+    pub fn edit_goal(mut self, goal: String) -> Self {
+        self.goal = goal;
+        self.goal_revision = GoalRevision::new(self.goal_revision.get() + 1);
+        self
+    }
+
     pub fn after_work_result(mut self, result: String) -> Self {
         self.previous_work_result = Some(result);
         self.phase = Phase::Review;
@@ -810,6 +816,222 @@ mod tests {
             state.decide(&snapshot, Duration::ZERO, None),
             RecoveryDecision::FreshConversationWithCarry
         );
+    }
+
+    #[test]
+    fn reasoning_gate_never_sends_on_unknown_default_and_recovers_without_cap() {
+        let missing = ChatSurfaceSnapshot::default();
+        let mut state = ReasoningGateState::default();
+        assert_eq!(
+            state.observe(&missing, ReasoningPreset::ExtraHigh, Duration::ZERO),
+            ReasoningDecision::Wait
+        );
+        assert_eq!(
+            state.observe(
+                &missing,
+                ReasoningPreset::ExtraHigh,
+                Duration::from_secs(60)
+            ),
+            ReasoningDecision::RecoverCurrentSurface
+        );
+        assert_eq!(
+            state.observe(
+                &missing,
+                ReasoningPreset::ExtraHigh,
+                Duration::from_secs(120)
+            ),
+            ReasoningDecision::RecoverCurrentSurface
+        );
+        assert_eq!(state.recovery_count, 2);
+
+        let wrong = ChatSurfaceSnapshot {
+            reasoning_picker_available: true,
+            selected_reasoning_preset: Some(ReasoningPreset::High),
+            ..Default::default()
+        };
+        assert_eq!(
+            state.observe(&wrong, ReasoningPreset::ExtraHigh, Duration::from_secs(121)),
+            ReasoningDecision::Select(ReasoningPreset::ExtraHigh)
+        );
+
+        let ready = ChatSurfaceSnapshot {
+            reasoning_picker_available: true,
+            selected_reasoning_preset: Some(ReasoningPreset::ExtraHigh),
+            ..Default::default()
+        };
+        assert_eq!(
+            state.observe(&ready, ReasoningPreset::ExtraHigh, Duration::from_secs(122)),
+            ReasoningDecision::Ready
+        );
+    }
+
+    #[test]
+    fn hydration_exhaustion_does_not_reset_just_because_time_passes() {
+        let loading = ChatSurfaceSnapshot {
+            hydration: HydrationState::Loading,
+            ..Default::default()
+        };
+        let mut state = HydrationRecoveryState::default();
+
+        assert_eq!(
+            state.observe(&loading, false, Duration::ZERO),
+            HydrationDecision::Wait
+        );
+        assert_eq!(
+            state.observe(&loading, false, Duration::from_secs(30)),
+            HydrationDecision::RecoverCurrentSurface
+        );
+        assert_eq!(
+            state.observe(&loading, false, Duration::from_secs(60)),
+            HydrationDecision::RecoverCurrentSurface
+        );
+        assert_eq!(
+            state.observe(&loading, false, Duration::from_secs(90)),
+            HydrationDecision::Exhausted
+        );
+        assert_eq!(
+            state.observe(&loading, false, Duration::from_secs(600)),
+            HydrationDecision::Exhausted
+        );
+
+        assert_eq!(
+            state.observe(&loading, true, Duration::from_secs(601)),
+            HydrationDecision::Ready
+        );
+        assert!(!state.is_exhausted());
+    }
+
+    #[test]
+    fn strict_review_report_can_finish_before_copy_hydrates() {
+        let boundary = AssistantResponseBoundary::new("review-response");
+        let snapshot = ChatSurfaceSnapshot {
+            app_healthy: true,
+            assistant_response_boundary: Some(boundary.clone()),
+            assistant_response_ownership: OwnershipConfidence::Strong,
+            response_local_copy: false,
+            strict_review_report: Some(StrictReviewReportEvidence {
+                task_id: task_id(),
+                round: Round::new(4),
+                status: ReviewStatus::Complete,
+                summary: "evidence is complete".into(),
+                next: None,
+                response_boundary: boundary,
+            }),
+            ..Default::default()
+        };
+        let mut tracker = ReviewSettlementTracker::default();
+        let decision = tracker.observe(&snapshot, &task_id(), Round::new(4), Duration::ZERO);
+        assert!(matches!(
+            decision,
+            ReviewSettlementDecision::Final(ReviewReport {
+                status: ReviewStatus::Complete,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn review_without_final_or_progress_waits_two_minutes_before_recovery() {
+        let snapshot = ChatSurfaceSnapshot {
+            assistant_response_boundary: Some(AssistantResponseBoundary::new("review-response")),
+            assistant_response_ownership: OwnershipConfidence::Strong,
+            ..Default::default()
+        };
+        let mut tracker = ReviewSettlementTracker::default();
+        assert_eq!(
+            tracker.observe(&snapshot, &task_id(), Round::new(1), Duration::ZERO),
+            ReviewSettlementDecision::Wait
+        );
+        assert_eq!(
+            tracker.observe(
+                &snapshot,
+                &task_id(),
+                Round::new(1),
+                Duration::from_secs(119)
+            ),
+            ReviewSettlementDecision::Wait
+        );
+        assert_eq!(
+            tracker.observe(
+                &snapshot,
+                &task_id(),
+                Round::new(1),
+                Duration::from_secs(120)
+            ),
+            ReviewSettlementDecision::RecoverReviewConversation
+        );
+    }
+
+    #[test]
+    fn recovery_envelope_is_versioned_bounded_and_carries_visible_work() {
+        let snapshot = ChatSurfaceSnapshot {
+            assistant_visible_prose: "prose".repeat(3_000),
+            assistant_visible_work_trace: vec!["checking repository".into(), "running tests".into()],
+            ..Default::default()
+        };
+        let envelope = build_recovery_envelope(
+            task_id(),
+            RunId::new("run-1"),
+            Phase::Work,
+            Round::new(3),
+            GoalRevision::new(2),
+            &"instruction".repeat(2_000),
+            &snapshot,
+            Some(&"previous".repeat(2_000)),
+            Some("next"),
+            &"goal".repeat(3_000),
+            &["done".repeat(2_000)],
+            &["remaining".repeat(2_000)],
+            &["blocked".repeat(1_000)],
+        );
+
+        let RecoveryEnvelope::V1(payload) = envelope;
+        assert_eq!(payload.task_id, task_id());
+        assert_eq!(payload.round, Round::new(3));
+        assert!(!payload.visible_work_trace.is_empty());
+        let serialized = serde_json::to_string(&payload).unwrap();
+        assert!(serialized.chars().count() < 80_000);
+    }
+
+    #[test]
+    fn conversation_length_carry_keeps_only_latest_sixty_four_thousand_chars() {
+        let source = format!("{}{}", "a".repeat(10), "b".repeat(70_000));
+        let carry = bounded_conversation_carry(&source);
+        assert_eq!(carry.chars().count(), MAX_CONVERSATION_CARRY_CHARS);
+        assert!(carry.chars().all(|value| value == 'b'));
+    }
+
+    #[test]
+    fn popup_policy_is_fail_closed() {
+        assert!(may_auto_dismiss_popup(PopupClass::HarmlessClose));
+        assert!(may_auto_dismiss_popup(PopupClass::HarmlessLater));
+        assert!(may_auto_dismiss_popup(PopupClass::HarmlessSkip));
+        assert!(!may_auto_dismiss_popup(PopupClass::Login));
+        assert!(!may_auto_dismiss_popup(PopupClass::Authorization));
+        assert!(!may_auto_dismiss_popup(PopupClass::Consent));
+        assert!(!may_auto_dismiss_popup(PopupClass::AccountSelection));
+        assert!(!may_auto_dismiss_popup(PopupClass::SecurityVerification));
+        assert!(!may_auto_dismiss_popup(PopupClass::Payment));
+        assert!(!may_auto_dismiss_popup(PopupClass::Unknown));
+    }
+
+    #[test]
+    fn edit_goal_increments_revision_for_future_rounds() {
+        let state = ContinuousTaskState {
+            task_id: task_id(),
+            phase: Phase::Work,
+            round: Round::new(2),
+            goal_revision: GoalRevision::new(7),
+            goal: "old".into(),
+            previous_work_result: None,
+            current_next: None,
+            reasoning_preset: ReasoningPreset::ExtraHigh,
+        }
+        .edit_goal("new".into());
+
+        assert_eq!(state.goal, "new");
+        assert_eq!(state.goal_revision, GoalRevision::new(8));
+        assert_eq!(state.round, Round::new(2));
     }
 
     #[test]
