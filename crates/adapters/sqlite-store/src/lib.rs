@@ -406,9 +406,10 @@ impl SqliteStore {
                 "SELECT settlement_json FROM dispatch_attempts
                  WHERE task_id=?1 AND run_id=?2 AND dispatch_id=?3",
                 params![task_id.as_str(), run_id.as_str(), dispatch_id.as_str()],
-                |row| row.get(0),
+                |row| row.get::<_, Option<String>>(0),
             )
             .optional()
+            .map(Option::flatten)
             .context("read dispatch attempt settlement")
     }
 
@@ -655,6 +656,33 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some(r#"{"confirmed":true}"#)
+        );
+    }
+
+    #[test]
+    fn same_dispatch_identity_can_be_retried_with_new_effect_baseline() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        let stable_intent = PreparedDispatch {
+            dispatch_id: DispatchId::new("dispatch-retry"),
+            prepared_intent_json: r#"{"prompt":"hello","dispatchId":"dispatch-retry"}"#.into(),
+        };
+        let mut first = transition(0, "retry-effect-1");
+        first.effect_payload_json =
+            r#"{"prompt":"hello","dispatchId":"dispatch-retry","baseline":"u0"}"#.into();
+        first.prepared_dispatch = Some(stable_intent.clone());
+        store.record_transition(&first, 100).unwrap();
+
+        let mut second = transition(1, "retry-effect-2");
+        second.effect_payload_json =
+            r#"{"prompt":"hello","dispatchId":"dispatch-retry","baseline":"u1"}"#.into();
+        second.prepared_dispatch = Some(stable_intent);
+        store.record_transition(&second, 200).unwrap();
+
+        assert_eq!(store.count_rows("dispatch_attempts").unwrap(), 1);
+        assert_eq!(store.count_rows("effect_outbox").unwrap(), 2);
+        assert_eq!(
+            store.task_revision(&TaskId::new("task-1")).unwrap(),
+            Some(2)
         );
     }
 

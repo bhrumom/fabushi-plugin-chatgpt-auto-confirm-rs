@@ -478,13 +478,17 @@ impl ChatSurfacePort for DurableRunSurface {
         let prepared_intent = json!({
             "preparedPrompt": prompt,
             "dispatchId": self.dispatch_id.as_str(),
+        });
+        let effect_payload = json!({
+            "preparedPrompt": prompt,
+            "dispatchId": self.dispatch_id.as_str(),
             "baselineUserTurnBoundary": baseline.as_ref().map(|value| value.as_str()),
         });
         let effect_id = {
             let mut journal = self.journal.lock().await;
             journal.begin(
                 "send_prompt",
-                prepared_intent.to_string(),
+                effect_payload.to_string(),
                 Some(PreparedDispatch {
                     dispatch_id: self.dispatch_id.clone(),
                     prepared_intent_json: prepared_intent.to_string(),
