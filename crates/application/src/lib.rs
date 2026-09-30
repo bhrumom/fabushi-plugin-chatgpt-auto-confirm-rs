@@ -543,44 +543,52 @@ fn validated_snapshot_review_report(
     task_id: &TaskId,
     round: Round,
 ) -> Option<ReviewReport> {
-    let StrictReviewReportEvidence {
-        task_id: evidence_task,
-        round: evidence_round,
-        status,
-        summary,
-        next,
-        response_boundary,
-    } = snapshot.strict_review_report.as_ref()?;
-
-    if evidence_task != task_id
-        || *evidence_round != round
-        || snapshot.assistant_response_boundary.as_ref() != Some(response_boundary)
-        || snapshot.assistant_response_ownership != OwnershipConfidence::Strong
-        || summary.trim().is_empty()
-        || (*status == ReviewStatus::Next
-            && next.as_deref().is_none_or(|value| value.trim().is_empty()))
-        || snapshot.streaming_or_busy
-        || snapshot.stop_available
-        || snapshot.authorization_surface_present
-        || snapshot.authorization_settlement == AuthorizationSettlementState::Settling
-        || snapshot.rate_limit
-        || snapshot.retryable_error
-        || snapshot.blocker_or_modal
-    {
+    if !review_snapshot_is_safe_final_candidate(snapshot) {
         return None;
     }
 
-    Some(ReviewReport {
-        task_id: evidence_task.clone(),
-        round: *evidence_round,
-        status: *status,
-        summary: summary.trim().to_owned(),
-        next: next
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned),
-    })
+    if let Some(evidence) = snapshot.strict_review_report.as_ref() {
+        let StrictReviewReportEvidence {
+            task_id: evidence_task,
+            round: evidence_round,
+            status,
+            summary,
+            next,
+            response_boundary,
+        } = evidence;
+
+        if evidence_task != task_id
+            || *evidence_round != round
+            || snapshot.assistant_response_boundary.as_ref() != Some(response_boundary)
+            || summary.trim().is_empty()
+            || (*status == ReviewStatus::Next
+                && next.as_deref().is_none_or(|value| value.trim().is_empty()))
+        {
+            return None;
+        }
+
+        return Some(ReviewReport {
+            task_id: evidence_task.clone(),
+            round: *evidence_round,
+            status: *status,
+            summary: summary.clone(),
+            next: next.clone(),
+        });
+    }
+
+    parse_strict_review_report(&snapshot.assistant_visible_prose, task_id, round).ok()
+}
+
+fn review_snapshot_is_safe_final_candidate(snapshot: &ChatSurfaceSnapshot) -> bool {
+    snapshot.assistant_response_boundary.is_some()
+        && snapshot.assistant_response_ownership == OwnershipConfidence::Strong
+        && !snapshot.streaming_or_busy
+        && !snapshot.stop_available
+        && !snapshot.authorization_surface_present
+        && snapshot.authorization_settlement != AuthorizationSettlementState::Settling
+        && !snapshot.rate_limit
+        && !snapshot.retryable_error
+        && !snapshot.blocker_or_modal
 }
 
 pub fn bounded_conversation_carry(value: &str) -> String {
@@ -1200,6 +1208,32 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn review_tracker_parses_current_owned_visible_prose_before_copy_hydrates() {
+        let snapshot = ChatSurfaceSnapshot {
+            assistant_response_boundary: Some(AssistantResponseBoundary::new("review-response")),
+            assistant_response_ownership: OwnershipConfidence::Strong,
+            assistant_visible_prose: r#"验收结果如下：
+```json
+{"taskId":"task-1","round":2,"status":"next","summary":"当前轮仍需继续","next":"补齐真实桌面验收"}
+```"#
+                .into(),
+            response_local_copy: false,
+            ..Default::default()
+        };
+        let mut tracker = ReviewSettlementTracker::default();
+        assert_eq!(
+            tracker.observe(&snapshot, &task_id(), Round::new(2), Duration::ZERO),
+            ReviewSettlementDecision::Final(ReviewReport {
+                task_id: task_id(),
+                round: Round::new(2),
+                status: ReviewStatus::Next,
+                summary: "当前轮仍需继续".into(),
+                next: Some("补齐真实桌面验收".into()),
+            })
+        );
     }
 
     #[test]
