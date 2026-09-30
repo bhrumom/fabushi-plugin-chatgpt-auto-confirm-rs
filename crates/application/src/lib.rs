@@ -33,6 +33,18 @@ pub trait ChatSurfacePort: Send + Sync {
     async fn start_fresh_conversation(&self) -> Result<()>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatProcessHealth {
+    Running,
+    NotRunning,
+}
+
+#[async_trait]
+pub trait ChatProcessPort: Send + Sync {
+    async fn health(&self) -> Result<ChatProcessHealth>;
+    async fn ensure_running(&self) -> Result<()>;
+}
+
 #[async_trait]
 pub trait Clock: Send + Sync {
     fn now(&self) -> Duration;
