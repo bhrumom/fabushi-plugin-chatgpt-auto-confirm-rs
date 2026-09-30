@@ -4,8 +4,8 @@
 2. Treat `docs/specs/rust-linux-chatgpt-auto-confirm.md` and browser/CDP-specific architecture text as historical migration context wherever they conflict with the authoritative desktop spec.
 3. Before changing behavior or structure, also read `docs/architecture.md` and the ADRs under `docs/adr/`; reconcile/update them to the authoritative desktop spec before implementing conflicting production topology.
 4. Preserve the dependency direction: `cli -> runtime -> application -> domain`; adapters point inward and never own policy.
-5. All automated build/test/format/clippy/architecture validation runs in GitHub Actions. Do not run Rust builds or tests locally or on `htch-runtime`.
-6. `htch-runtime` is the real-device acceptance host. Test only exact-HEAD packaged GitHub Actions artifacts there. During acceptance, device-control may start/inspect the app as an independent oracle, but must not perform Send, reasoning selection, approval, attachment, or other product actions instead of the Rust CLI.
+5. Development build/test/format/clippy/architecture validation may run directly on `htch-runtime`. GitHub Actions remains mandatory on the exact candidate commit for merge/release qualification; device-side results do not replace CI evidence.
+6. `htch-runtime` is both the preferred desktop development/test host and the real-device acceptance host. Development may compile/test the intended commit directly on-device. Formal release acceptance must use the exact-HEAD packaged GitHub Actions artifact. During product acceptance, device-control may start/inspect the app as an independent oracle, but must not perform Send, reasoning selection, approval, attachment, or other product actions instead of the Rust CLI.
 7. Keep `./scripts/check-architecture.sh` as a required GitHub Actions structural gate and update it when architecture boundaries change.
 8. Do not claim full source replacement while any required migration-ledger item remains partial, pending, or blocked.
 9. Do not weaken terminal completion to Stop-button disappearance.
