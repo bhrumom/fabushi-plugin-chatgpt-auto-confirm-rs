@@ -701,7 +701,7 @@ The ledger must be updated as implementation proceeds. `partial` means useful Ru
 | One-shot task mode | application | partial browser-era implementation only |
 | Continuous Work -> Review loop | application | partial: deterministic phase/round transition exists; durable runtime wiring pending |
 | Strict MAHAYANA_TASK_REPORT_V1 parser | application/domain | partial: exact taskId/round/status/summary/next validation has deterministic tests; production Review settlement wiring pending |
-| Userscript durable workbench state | sqlite-store | pending |
+| Userscript durable workbench state | sqlite-store | partial: WAL schema and atomic state/event/outbox transaction exist with rollback/idempotency tests; application/runtime wiring and full task CRUD pending |
 | Tab/workspace ownership | DesktopSessionActor + UI lease | pending |
 | Multi-task fair supervision | runtime Supervisor/RunWorker | pending |
 | Prompt marker and ownership boundary | domain + ChatSurfacePort | partial: opaque dispatch/conversation/user/assistant boundary types exist; desktop projection and durable confirmation pending |
@@ -732,7 +732,7 @@ The ledger must be updated as implementation proceeds. `partial` means useful Ru
 | Hot update/restart continuity | runtime + durable store/outbox | pending |
 | Memory diagnostic-only policy | runtime/observability | pending |
 | Web URL identity | redesigned as ConversationRef/fingerprint | partial: opaque ConversationRef/fingerprint and semantic boundaries replace URL types in domain/application; production desktop binding pending |
-| localStorage/IndexedDB | redesigned as SQLite + attachment store | pending |
+| localStorage/IndexedDB | redesigned as SQLite + attachment store | partial: SQLite WAL schema covers required durable tables and atomic effect outbox; attachment-store/runtime migration pending |
 | Browser/CDP host capability glue | not applicable; replace with runtime ports | partial: core port is now ChatSurfacePort and architecture gate rejects BrowserPort/PageSnapshot in domain/application; default runtime is still legacy CDP |
 | Real desktop ChatGPT acceptance | htch-runtime exact-HEAD artifact gate | pending |
 
