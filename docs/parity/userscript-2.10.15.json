@@ -30,7 +30,8 @@
         "crates/adapters/chatgpt-desktop-atspi/src/bridge.py"
       ],
       "missing": [
-        "response-boundary/activity-trace hardening on live conversations",
+        "live positive assistant activity/remount acceptance",
+        "response-boundary hardening on virtualized/live conversations",
         "real desktop acceptance"
       ]
     },

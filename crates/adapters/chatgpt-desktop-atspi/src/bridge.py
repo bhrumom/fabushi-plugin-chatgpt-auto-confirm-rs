@@ -277,6 +277,89 @@ def authorization_cards(items):
     return cards
 
 
+ACTIVITY_TEXT_ROLES = ("static", "paragraph", "text", "status", "notification", "alert")
+INTERACTIVE_ACTIVITY_ROLES = (
+    "push button", "button", "toggle button", "entry", "menu item", "link", "check box", "radio button"
+)
+
+
+def attribute_map(node):
+    try:
+        raw = node.getAttributes()
+    except Exception:
+        return {}
+    result = {}
+    for entry in raw or []:
+        value = str(entry)
+        if ":" in value:
+            key, item = value.split(":", 1)
+        elif "=" in value:
+            key, item = value.split("=", 1)
+        else:
+            continue
+        result[key.strip().lower()] = item.strip().lower()
+    return result
+
+
+def assistant_activity_scope(node, max_depth=7):
+    current = node
+    for _ in range(max_depth + 1):
+        if current is None:
+            return None
+        attrs = attribute_map(current)
+        blob = " ".join(f"{key}:{value}" for key, value in attrs.items())
+        style = attrs.get("data-markdown-text-style", "")
+        tone = attrs.get("data-markdown-text-tone", "")
+        css_class = attrs.get("class", "")
+        explicit = style == "assistant-message" and tone == "tertiary"
+        preserved = (
+            "assistant-message" in blob
+            and "tertiary" in blob
+        )
+        class_fallback = (
+            "assistant" in css_class
+            and "tertiary" in css_class
+            and "message" in css_class
+        )
+        if explicit or preserved or class_fallback:
+            return current
+        current = parent_of(current)
+    return None
+
+
+def assistant_activity_trace(items):
+    entries = []
+    seen_scopes = []
+    seen_text = set()
+    remaining = 12000
+    for item in items:
+        if remaining <= 0:
+            break
+        if not item["visible"] or item["role"] in INTERACTIVE_ACTIVITY_ROLES:
+            continue
+        if item["role"] not in ACTIVITY_TEXT_ROLES:
+            continue
+        scope = assistant_activity_scope(item["node"])
+        if scope is None:
+            continue
+        value = (item["text"] or item["name"]).strip()
+        if not value:
+            continue
+        normalized_value = " ".join(value.split())
+        if not normalized_value or normalized_value in seen_text:
+            continue
+        # A tertiary scope can expose both a paragraph and its static child.
+        # Keep the first bounded semantic text per scope to avoid duplicates.
+        if any(same_node(scope, existing) for existing in seen_scopes):
+            continue
+        seen_scopes.append(scope)
+        seen_text.add(normalized_value)
+        bounded = value[-min(len(value), remaining, 4000):]
+        entries.append(bounded)
+        remaining -= len(bounded)
+    return entries
+
+
 def marker_info(items):
     marker_re = re.compile(r"\[Fabushi:([0-9a-fA-F-]{8,})\]")
     latest = None
@@ -325,9 +408,12 @@ def snapshot():
 
     marker, marker_index = marker_info(items)
     after = items[marker_index + 1 :] if marker_index >= 0 else []
+    work_trace = assistant_activity_trace(after) if marker_index >= 0 else []
     after_text = []
     for item in after:
         if item["role"] in ("static", "paragraph", "text") and item["visible"]:
+            if assistant_activity_scope(item["node"]) is not None:
+                continue
             value = (item["text"] or item["name"]).strip()
             if value and len(value) <= 12000 and "fabushi:" not in value.lower():
                 after_text.append(value)
@@ -373,7 +459,8 @@ def snapshot():
         draft = composer["text"] or ""
     response_boundary = hash_text(prose) if marker and prose else None
     conversation_fingerprint = hash_text((marker or "") + "|" + (response_boundary or "")) if marker else None
-    progress = hash_text(prose + "|" + str(stop) + "|" + str(auth_present)) if marker else None
+    progress_material = prose + "|" + "\n".join(work_trace) + "|" + str(stop) + "|" + str(auth_present)
+    progress = hash_text(progress_material) if marker else None
 
     return {
         "app_healthy": True,
@@ -387,7 +474,7 @@ def snapshot():
         "conversation_ref": None,
         "conversation_fingerprint": conversation_fingerprint,
         "assistant_visible_prose": prose,
-        "assistant_visible_work_trace": [],
+        "assistant_visible_work_trace": work_trace,
         "streaming_or_busy": stop,
         "stop_available": stop,
         "authorization_surface_present": auth_present,

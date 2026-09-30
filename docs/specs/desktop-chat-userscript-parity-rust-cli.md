@@ -717,7 +717,7 @@ The ledger must be updated as implementation proceeds. `partial` means useful Ru
 | Final latest-response Copy evidence | domain + desktop adapter | partial: strong response ownership + response-local Copy + 4s/8s stability modeled; desktop projection pending |
 | Review two-minute final settlement | application | partial: deterministic 120s tracker accepts only a safe current-response candidate and can parse strict current task/round evidence directly from owned assistant visible prose before Copy hydration; compatibility runner now enforces Review identity and performs the 120s fresh-Review recovery; durable continuous orchestration/state persistence still pending |
 | Virtualized/missing task marker recovery | conversation fingerprint + response boundary | pending |
-| Visible assistant activity progress fingerprint | desktop adapter + application | pending |
+| Visible assistant activity progress fingerprint | desktop adapter + application | partial: production AT-SPI bridge projects bounded current-marker assistant tertiary activity separately from assistant prose, excludes it from terminal prose, and includes it in the progress fingerprint; live positive activity/remount acceptance remains pending |
 | Abnormal visible-work carry | RecoveryEnvelope | pending |
 | Generic 15m stall recovery | application | partial browser-era implementation only |
 | Generic hydration bounded recovery | application + desktop process/adapter | pending |

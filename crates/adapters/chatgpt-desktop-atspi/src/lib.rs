@@ -141,6 +141,16 @@ mod tests {
     }
 
     #[test]
+    fn bridge_projects_activity_separately_from_terminal_prose() {
+        assert!(BRIDGE.contains("def assistant_activity_scope(node"));
+        assert!(BRIDGE.contains("def assistant_activity_trace(items):"));
+        assert!(BRIDGE.contains("style == \"assistant-message\" and tone == \"tertiary\""));
+        assert!(BRIDGE.contains("if assistant_activity_scope(item[\"node\"]) is not None:"));
+        assert!(BRIDGE.contains("\"assistant_visible_work_trace\": work_trace"));
+        assert!(BRIDGE.contains("progress_material = prose + \"|\" + \"\\n\".join(work_trace)"));
+    }
+
+    #[test]
     fn bridge_binds_terminal_copy_after_fabushi_marker() {
         assert!(BRIDGE.contains("marker_info"));
         assert!(BRIDGE.contains("copy_after"));
