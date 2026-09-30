@@ -50,12 +50,11 @@ impl DesktopRuntime {
     pub async fn ensure_ready(&self) -> Result<()> {
         self.process.ensure_running().await?;
         for _ in 0..40 {
-            if self.process.health().await? == ChatProcessHealth::Running {
-                if let Ok(snapshot) = self.surface.observe().await
-                    && snapshot.app_healthy
-                {
-                    return Ok(());
-                }
+            if self.process.health().await? == ChatProcessHealth::Running
+                && let Ok(snapshot) = self.surface.observe().await
+                && snapshot.app_healthy
+            {
+                return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
