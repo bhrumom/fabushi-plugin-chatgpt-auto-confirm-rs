@@ -16,6 +16,7 @@ DOMAIN_CARGO="crates/domain/Cargo.toml"
 APP_CARGO="crates/application/Cargo.toml"
 CDP_CARGO="crates/adapters/chatgpt-cdp/Cargo.toml"
 LINUX_CARGO="crates/adapters/linux-browser/Cargo.toml"
+SQLITE_CARGO="crates/adapters/sqlite-store/Cargo.toml"
 CLI_CARGO="crates/cli/Cargo.toml"
 
 if contains "$DOMAIN_CARGO" 'fabushi-chatgpt-(application|cdp|runtime|linux-browser)|tokio|reqwest|tungstenite|rusqlite|sqlx'; then
@@ -32,6 +33,10 @@ fi
 
 if contains "$LINUX_CARGO" 'fabushi-chatgpt-(runtime|cdp|auto-confirm)'; then
   fail "Linux browser adapter depends on another outer adapter/runtime"
+fi
+
+if contains "$SQLITE_CARGO" 'fabushi-chatgpt-(runtime|cdp|linux-browser|auto-confirm)'; then
+  fail "SQLite adapter depends on runtime, another outer adapter, or CLI"
 fi
 
 if contains "$CLI_CARGO" 'fabushi-chatgpt-(application|domain|cdp|linux-browser)'; then
