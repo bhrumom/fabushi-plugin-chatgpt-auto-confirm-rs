@@ -208,10 +208,11 @@
       "destination": "Supervisor/DesktopSessionActor/RunWorker",
       "status": "partial",
       "evidence": [
-        "crates/runtime/src/lib.rs"
+        "crates/runtime/src/lib.rs",
+        "crates/adapters/sqlite-store/src/lib.rs"
       ],
       "missing": [
-        "durable ui_session_leases ownership",
+        "runtime acquisition/renewal/release wiring for durable ui_session_leases",
         "fair multi-task next-wake scheduler",
         "SQLite/outbox crash recovery wiring",
         "pause/resume/cancel worker lifecycle",

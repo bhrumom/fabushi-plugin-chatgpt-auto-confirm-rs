@@ -30,6 +30,14 @@ pub struct PendingEffect {
     pub attempt_count: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UiSessionLease {
+    pub lease_name: String,
+    pub owner_id: String,
+    pub generation: i64,
+    pub expires_at_unix_ms: i64,
+}
+
 pub struct SqliteStore {
     connection: Connection,
 }
@@ -331,6 +339,87 @@ impl SqliteStore {
             .context("read task revision")
     }
 
+    pub fn acquire_ui_session_lease(
+        &mut self,
+        lease_name: &str,
+        owner_id: &str,
+        now_unix_ms: i64,
+        ttl_ms: i64,
+    ) -> Result<Option<UiSessionLease>> {
+        if lease_name.trim().is_empty() || owner_id.trim().is_empty() {
+            bail!("lease name and owner id must be non-empty");
+        }
+        if ttl_ms <= 0 {
+            bail!("lease ttl must be positive");
+        }
+        let expires_at = now_unix_ms
+            .checked_add(ttl_ms)
+            .ok_or_else(|| anyhow::anyhow!("lease expiry overflow"))?;
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO ui_session_leases(lease_name, owner_id, generation, expires_at_unix_ms)
+             VALUES(?1, ?2, 1, ?3)
+             ON CONFLICT(lease_name) DO UPDATE SET
+                 owner_id=excluded.owner_id,
+                 generation=CASE
+                     WHEN ui_session_leases.expires_at_unix_ms <= ?4
+                         THEN ui_session_leases.generation + 1
+                     WHEN ui_session_leases.owner_id = excluded.owner_id
+                         THEN ui_session_leases.generation
+                     ELSE ui_session_leases.generation + 1
+                 END,
+                 expires_at_unix_ms=excluded.expires_at_unix_ms
+             WHERE ui_session_leases.owner_id = excluded.owner_id
+                OR ui_session_leases.expires_at_unix_ms <= ?4",
+            params![lease_name, owner_id, expires_at, now_unix_ms],
+        )?;
+        let lease = query_ui_session_lease(&transaction, lease_name)?;
+        transaction.commit()?;
+        Ok(lease
+            .filter(|lease| lease.owner_id == owner_id && lease.expires_at_unix_ms > now_unix_ms))
+    }
+
+    pub fn renew_ui_session_lease(
+        &self,
+        lease: &UiSessionLease,
+        now_unix_ms: i64,
+        ttl_ms: i64,
+    ) -> Result<bool> {
+        if ttl_ms <= 0 {
+            bail!("lease ttl must be positive");
+        }
+        let expires_at = now_unix_ms
+            .checked_add(ttl_ms)
+            .ok_or_else(|| anyhow::anyhow!("lease expiry overflow"))?;
+        let changed = self.connection.execute(
+            "UPDATE ui_session_leases
+             SET expires_at_unix_ms=?4
+             WHERE lease_name=?1 AND owner_id=?2 AND generation=?3
+               AND expires_at_unix_ms>?5",
+            params![
+                lease.lease_name,
+                lease.owner_id,
+                lease.generation,
+                expires_at,
+                now_unix_ms
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn release_ui_session_lease(&self, lease: &UiSessionLease) -> Result<bool> {
+        let changed = self.connection.execute(
+            "DELETE FROM ui_session_leases
+             WHERE lease_name=?1 AND owner_id=?2 AND generation=?3",
+            params![lease.lease_name, lease.owner_id, lease.generation],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn ui_session_lease(&self, lease_name: &str) -> Result<Option<UiSessionLease>> {
+        query_ui_session_lease(&self.connection, lease_name)
+    }
+
     #[cfg(test)]
     fn count_rows(&self, table: &str) -> Result<i64> {
         let sql = format!("SELECT COUNT(*) FROM {table}");
@@ -338,6 +427,28 @@ impl SqliteStore {
             .query_row(&sql, [], |row| row.get(0))
             .context("count rows")
     }
+}
+
+fn query_ui_session_lease(
+    connection: &Connection,
+    lease_name: &str,
+) -> Result<Option<UiSessionLease>> {
+    connection
+        .query_row(
+            "SELECT lease_name, owner_id, generation, expires_at_unix_ms
+             FROM ui_session_leases WHERE lease_name=?1",
+            [lease_name],
+            |row| {
+                Ok(UiSessionLease {
+                    lease_name: row.get(0)?,
+                    owner_id: row.get(1)?,
+                    generation: row.get(2)?,
+                    expires_at_unix_ms: row.get(3)?,
+                })
+            },
+        )
+        .optional()
+        .context("read UI session lease")
 }
 
 fn ensure_task_revision(
@@ -456,6 +567,55 @@ mod tests {
         );
         assert_eq!(store.count_rows("run_events").unwrap(), 1);
         assert_eq!(store.count_rows("effect_outbox").unwrap(), 1);
+    }
+
+    #[test]
+    fn ui_session_lease_fences_other_owner_until_expiry() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        let first = store
+            .acquire_ui_session_lease("chatgpt-desktop", "owner-a", 100, 1_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.generation, 1);
+        assert!(
+            store
+                .acquire_ui_session_lease("chatgpt-desktop", "owner-b", 500, 1_000)
+                .unwrap()
+                .is_none()
+        );
+        let takeover = store
+            .acquire_ui_session_lease("chatgpt-desktop", "owner-b", 1_100, 1_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(takeover.generation, 2);
+        assert_eq!(takeover.owner_id, "owner-b");
+        assert!(!store.release_ui_session_lease(&first).unwrap());
+        assert_eq!(
+            store.ui_session_lease("chatgpt-desktop").unwrap(),
+            Some(takeover)
+        );
+    }
+
+    #[test]
+    fn ui_session_lease_renewal_requires_live_fencing_token() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        let first = store
+            .acquire_ui_session_lease("chatgpt-desktop", "owner-a", 100, 1_000)
+            .unwrap()
+            .unwrap();
+        assert!(store.renew_ui_session_lease(&first, 500, 1_000).unwrap());
+        let renewed = store.ui_session_lease("chatgpt-desktop").unwrap().unwrap();
+        assert_eq!(renewed.generation, first.generation);
+        assert_eq!(renewed.expires_at_unix_ms, 1_500);
+
+        let reacquired = store
+            .acquire_ui_session_lease("chatgpt-desktop", "owner-a", 1_500, 1_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reacquired.generation, first.generation + 1);
+        assert!(!store.renew_ui_session_lease(&first, 1_600, 1_000).unwrap());
+        assert!(store.release_ui_session_lease(&reacquired).unwrap());
+        assert!(store.ui_session_lease("chatgpt-desktop").unwrap().is_none());
     }
 
     #[test]
