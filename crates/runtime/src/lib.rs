@@ -34,6 +34,7 @@ const STARTUP_PENDING_EFFECT_LIMIT: usize = 256;
 enum StartupReconcileOutcome {
     Clear,
     SettledObservedSend,
+    SettledObservedReasoning,
 }
 
 struct DurableUiLease {
@@ -776,7 +777,8 @@ impl DesktopRuntime {
         for effect in pending {
             match reconcile_pending_effect(&mut store, &snapshot, &effect)? {
                 StartupReconcileOutcome::Clear => {}
-                StartupReconcileOutcome::SettledObservedSend => {
+                StartupReconcileOutcome::SettledObservedSend
+                | StartupReconcileOutcome::SettledObservedReasoning => {
                     settled_any = true;
                 }
             }
@@ -839,6 +841,32 @@ fn reconcile_pending_effect(
     snapshot: &ChatSurfaceSnapshot,
     effect: &fabushi_chatgpt_sqlite_store::PendingEffect,
 ) -> Result<StartupReconcileOutcome> {
+    if effect.effect_kind == "set_reasoning" {
+        let payload: serde_json::Value = serde_json::from_str(&effect.effect_payload_json)
+            .context("parse pending reasoning effect payload during startup reconciliation")?;
+        let preset_index = payload
+            .get("preset")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok())
+            .ok_or_else(|| anyhow::anyhow!("pending reasoning effect is missing preset"))?;
+        let target = ReasoningPreset::from_index(preset_index)
+            .ok_or_else(|| anyhow::anyhow!("pending reasoning effect has invalid preset"))?;
+        if snapshot.selected_reasoning_preset != Some(target) {
+            return Ok(StartupReconcileOutcome::Clear);
+        }
+        store.settle_effect(
+            effect.id,
+            &json!({
+                "ok": true,
+                "detail": "startup reconciliation re-observed requested reasoning preset",
+                "preset": preset_index,
+            })
+            .to_string(),
+            unix_time_ms()?,
+        )?;
+        return Ok(StartupReconcileOutcome::SettledObservedReasoning);
+    }
+
     if effect.effect_kind != "send_prompt" {
         return Ok(StartupReconcileOutcome::Clear);
     }
@@ -1262,6 +1290,72 @@ mod actor_tests {
             .unwrap();
         let pending = store.pending_effects(10).unwrap();
         store.mark_effect_attempted(pending[0].id).unwrap();
+    }
+
+    fn create_pending_reasoning(
+        store: &mut SqliteStore,
+        task_id: &TaskId,
+        run_id: &RunId,
+        preset: ReasoningPreset,
+    ) {
+        store
+            .record_transition(
+                &TransitionRecord {
+                    task_id: task_id.clone(),
+                    run_id: run_id.clone(),
+                    expected_revision: 0,
+                    next_revision: 1,
+                    event_kind: "set_reasoning_prepared".into(),
+                    event_payload_json: json!({"preset": preset.index()}).to_string(),
+                    materialized_state_json: json!({"revision": 1}).to_string(),
+                    effect_kind: "set_reasoning".into(),
+                    effect_payload_json: json!({"preset": preset.index()}).to_string(),
+                    idempotency_key: format!("reasoning-{}", preset.index()),
+                    prepared_dispatch: None,
+                },
+                100,
+            )
+            .unwrap();
+        let pending = store.pending_effects(10).unwrap();
+        store.mark_effect_attempted(pending[0].id).unwrap();
+    }
+
+    #[test]
+    fn startup_reconciliation_settles_reasoning_only_when_target_is_observed() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        let task_id = TaskId::new("task-reasoning-reconcile");
+        let run_id = RunId::new("run-reasoning-reconcile");
+        create_pending_reasoning(&mut store, &task_id, &run_id, ReasoningPreset::ExtraHigh);
+        let snapshot = ChatSurfaceSnapshot {
+            reasoning_picker_available: true,
+            selected_reasoning_preset: Some(ReasoningPreset::ExtraHigh),
+            ..Default::default()
+        };
+        let effect = store.pending_effects(10).unwrap().remove(0);
+        assert_eq!(
+            reconcile_pending_effect(&mut store, &snapshot, &effect).unwrap(),
+            StartupReconcileOutcome::SettledObservedReasoning
+        );
+        assert!(store.pending_effects(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn startup_reconciliation_keeps_ambiguous_reasoning_pending() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        let task_id = TaskId::new("task-reasoning-ambiguous");
+        let run_id = RunId::new("run-reasoning-ambiguous");
+        create_pending_reasoning(&mut store, &task_id, &run_id, ReasoningPreset::ExtraHigh);
+        let snapshot = ChatSurfaceSnapshot {
+            reasoning_picker_available: true,
+            selected_reasoning_preset: Some(ReasoningPreset::High),
+            ..Default::default()
+        };
+        let effect = store.pending_effects(10).unwrap().remove(0);
+        assert_eq!(
+            reconcile_pending_effect(&mut store, &snapshot, &effect).unwrap(),
+            StartupReconcileOutcome::Clear
+        );
+        assert_eq!(store.pending_effects(10).unwrap().len(), 1);
     }
 
     #[test]

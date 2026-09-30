@@ -163,7 +163,7 @@
         "crates/runtime/src/lib.rs"
       ],
       "missing": [
-        "semantic startup reconciliation for non-Send destructive effects",
+        "semantic startup reconciliation for approval/attachment/new-conversation/reload destructive effects",
         "stable durable task/run identity across CLI restart and full task CRUD/control",
         "resumable supervision after fail-closed ambiguous pending effects",
         "real crash/restart acceptance"
