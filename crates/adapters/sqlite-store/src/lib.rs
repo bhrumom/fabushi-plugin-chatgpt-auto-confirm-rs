@@ -99,49 +99,6 @@ impl SqliteStore {
 
     fn migrate(&mut self) -> Result<()> {
         let transaction = self.connection.transaction()?;
-        if let Some(approval) = record.prepared_approval.as_ref() {
-            transaction.execute(
-                "INSERT INTO approval_fingerprints(
-                     fingerprint, task_id, run_id, phase, round,
-                     conversation_fingerprint, settlement_until_unix_ms, state
-                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, NULL, 'pending')
-                 ON CONFLICT(fingerprint) DO NOTHING",
-                params![
-                    approval.fingerprint,
-                    record.task_id.as_str(),
-                    record.run_id.as_str(),
-                    approval.phase,
-                    approval.round,
-                    approval.conversation_fingerprint,
-                ],
-            )?;
-
-            let stored: (String, String, String, i64, String) = transaction.query_row(
-                "SELECT task_id, run_id, phase, round, conversation_fingerprint
-                 FROM approval_fingerprints WHERE fingerprint=?1",
-                [approval.fingerprint.as_str()],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )?;
-            let expected = (
-                record.task_id.as_str().to_owned(),
-                record.run_id.as_str().to_owned(),
-                approval.phase.clone(),
-                approval.round,
-                approval.conversation_fingerprint.clone(),
-            );
-            if stored != expected {
-                bail!("approval fingerprint already exists with a different identity");
-            }
-        }
-
         transaction.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS schema_meta (
@@ -274,6 +231,49 @@ impl SqliteStore {
         }
 
         let transaction = self.connection.transaction()?;
+        if let Some(approval) = record.prepared_approval.as_ref() {
+            transaction.execute(
+                "INSERT INTO approval_fingerprints(
+                     fingerprint, task_id, run_id, phase, round,
+                     conversation_fingerprint, settlement_until_unix_ms, state
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, NULL, 'pending')
+                 ON CONFLICT(fingerprint) DO NOTHING",
+                params![
+                    approval.fingerprint,
+                    record.task_id.as_str(),
+                    record.run_id.as_str(),
+                    approval.phase,
+                    approval.round,
+                    approval.conversation_fingerprint,
+                ],
+            )?;
+
+            let stored: (String, String, String, i64, String) = transaction.query_row(
+                "SELECT task_id, run_id, phase, round, conversation_fingerprint
+                 FROM approval_fingerprints WHERE fingerprint=?1",
+                [approval.fingerprint.as_str()],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )?;
+            let expected = (
+                record.task_id.as_str().to_owned(),
+                record.run_id.as_str().to_owned(),
+                approval.phase.clone(),
+                approval.round,
+                approval.conversation_fingerprint.clone(),
+            );
+            if stored != expected {
+                bail!("approval fingerprint already exists with a different identity");
+            }
+        }
+
         ensure_task_revision(
             &transaction,
             record.task_id.as_str(),
