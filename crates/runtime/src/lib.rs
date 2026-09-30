@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 pub use fabushi_chatgpt_application::RunOptions;
 pub use fabushi_chatgpt_cdp::ChatGptCdp;
-pub use fabushi_chatgpt_domain::{PageSnapshot, RunReport, RunState};
+pub use fabushi_chatgpt_domain::{ChatSurfaceSnapshot, RunReport, RunState};
 pub use fabushi_chatgpt_linux_browser::{BrowserLaunch, find_chromium_binary, launch_chromium};
 
 pub struct TokioClock {
