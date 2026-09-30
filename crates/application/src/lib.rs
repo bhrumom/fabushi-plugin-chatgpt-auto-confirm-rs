@@ -126,6 +126,7 @@ impl<'a> RunPrompt<'a> {
             .review_identity
             .as_ref()
             .map(|_| ReviewSettlementTracker::default());
+        let mut no_approval_confirmation = NoApprovalConfirmation::default();
 
         loop {
             let now = self.clock.now();
@@ -177,7 +178,30 @@ impl<'a> RunPrompt<'a> {
                 && self.surface.approve_current_conversation().await?
             {
                 approvals += 1;
+                no_approval_confirmation.reset();
+                terminal_since = None;
                 self.clock.sleep(AUTHORIZATION_SETTLEMENT_WINDOW).await;
+                continue;
+            }
+
+            if snapshot.authorization_surface_present
+                || snapshot.authorization_settlement == AuthorizationSettlementState::Settling
+            {
+                no_approval_confirmation.reset();
+                terminal_since = None;
+                self.clock.sleep(options.poll_interval).await;
+                continue;
+            }
+
+            let no_approval_stable = if snapshot.stop_available {
+                no_approval_confirmation.reset();
+                false
+            } else {
+                no_approval_confirmation.observe(&snapshot, now)
+            };
+            if !snapshot.stop_available && !no_approval_stable {
+                terminal_since = None;
+                self.clock.sleep(options.poll_interval).await;
                 continue;
             }
 
@@ -278,6 +302,10 @@ pub struct NoApprovalConfirmation {
 }
 
 impl NoApprovalConfirmation {
+    pub fn reset(&mut self) {
+        self.first_absent_at = None;
+    }
+
     pub fn observe(&mut self, snapshot: &ChatSurfaceSnapshot, now: Duration) -> bool {
         if snapshot.authorization_surface_present
             || snapshot.authorization_settlement == AuthorizationSettlementState::Settling
@@ -1188,6 +1216,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_prompt_waits_for_disabled_authorization_and_stable_absence() {
+        let before = ChatSurfaceSnapshot {
+            user_turn_boundary: Some(UserTurnBoundary::new("u0")),
+            ..Default::default()
+        };
+        let mut disabled_authorization = terminal();
+        disabled_authorization.user_turn_boundary = Some(UserTurnBoundary::new("u1"));
+        disabled_authorization.user_turn_ownership = OwnershipConfidence::Strong;
+        disabled_authorization.authorization_surface_present = true;
+        disabled_authorization.authorization_actionable = false;
+
+        let mut terminal_after_card = terminal();
+        terminal_after_card.user_turn_boundary = Some(UserTurnBoundary::new("u1"));
+        terminal_after_card.user_turn_ownership = OwnershipConfidence::Strong;
+
+        let surface = ScriptedSurface::new(vec![
+            before,
+            disabled_authorization,
+            terminal_after_card.clone(),
+        ]);
+        let clock = FakeClock::new();
+        let options = RunOptions {
+            poll_interval: Duration::from_secs(1),
+            timeout: Duration::from_secs(30),
+            stale_reload_after: Duration::from_secs(1_000),
+            ..RunOptions::default()
+        };
+
+        let report = RunPrompt::new(&surface, &clock)
+            .execute("prepared prompt", options)
+            .await
+            .unwrap();
+
+        assert_eq!(report.state, RunState::Complete);
+        assert_eq!(report.recoveries, 0);
+        assert_eq!(surface.fresh_count(), 0);
+        assert!(clock.now() >= NO_APPROVAL_RECHECK_WINDOW + ORDINARY_TERMINAL_STABILITY);
+    }
+
+    #[tokio::test]
     async fn review_run_requires_strict_current_report_even_when_copy_is_present() {
         let before = ChatSurfaceSnapshot {
             user_turn_boundary: Some(UserTurnBoundary::new("u0")),
@@ -1289,6 +1357,19 @@ mod tests {
         assert!(!confirmation.observe(&snapshot, Duration::ZERO));
         assert!(!confirmation.observe(&snapshot, Duration::from_secs(7)));
         assert!(confirmation.observe(&snapshot, Duration::from_secs(8)));
+    }
+
+    #[test]
+    fn no_approval_reset_discards_old_absence_window() {
+        let snapshot = ChatSurfaceSnapshot::default();
+        let mut confirmation = NoApprovalConfirmation::default();
+        assert!(!confirmation.observe(&snapshot, Duration::ZERO));
+        confirmation.reset();
+        assert!(!confirmation.observe(&snapshot, NO_APPROVAL_RECHECK_WINDOW));
+        assert!(confirmation.observe(
+            &snapshot,
+            NO_APPROVAL_RECHECK_WINDOW + NO_APPROVAL_RECHECK_WINDOW
+        ));
     }
 
     #[test]

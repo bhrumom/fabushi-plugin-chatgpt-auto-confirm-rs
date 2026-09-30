@@ -64,7 +64,6 @@
       "missing": [
         "durable persisted latch",
         "live disabled/remount authorization acceptance",
-        "production effect wiring",
         "acceptance"
       ]
     },
