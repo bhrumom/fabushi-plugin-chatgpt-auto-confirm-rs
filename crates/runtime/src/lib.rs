@@ -56,6 +56,7 @@ enum StartupReconcileOutcome {
     SettledObservedReasoning,
     SettledObservedApproval,
     SettledObservedFreshConversation,
+    SettledObservedRebind,
     SettledObservedRecovery,
     SettledAmbiguousExplicitLoadRecovery,
 }
@@ -3653,6 +3654,39 @@ fn reconcile_pending_effect(
         return Ok(StartupReconcileOutcome::SettledObservedFreshConversation);
     }
 
+    if effect.effect_kind == "rebind_conversation" {
+        let payload: serde_json::Value = serde_json::from_str(&effect.effect_payload_json)
+            .context(
+                "parse pending conversation-rebind effect payload during startup reconciliation",
+            )?;
+        let target = payload
+            .get("conversationRef")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!("pending conversation rebind effect is missing conversationRef")
+            })?;
+        if snapshot
+            .conversation_ref
+            .as_ref()
+            .map(|value| value.as_str())
+            != Some(target)
+        {
+            return Ok(StartupReconcileOutcome::Clear);
+        }
+        store.settle_effect(
+            effect.id,
+            &json!({
+                "ok": true,
+                "detail": "startup reconciliation observed exact ConversationRef rebind postcondition",
+                "conversationRef": target,
+            })
+            .to_string(),
+            unix_time_ms()?,
+        )?;
+        return Ok(StartupReconcileOutcome::SettledObservedRebind);
+    }
+
     if effect.effect_kind == "set_reasoning" {
         let payload: serde_json::Value = serde_json::from_str(&effect.effect_payload_json)
             .context("parse pending reasoning effect payload during startup reconciliation")?;
@@ -4435,6 +4469,36 @@ mod actor_tests {
         store.mark_effect_attempted(effect.id).unwrap();
     }
 
+    fn create_pending_rebind(
+        store: &mut SqliteStore,
+        task_id: &TaskId,
+        run_id: &RunId,
+        conversation_ref: &ConversationRef,
+    ) {
+        let payload = json!({"conversationRef": conversation_ref.as_str()}).to_string();
+        store
+            .record_transition(
+                &TransitionRecord {
+                    task_id: task_id.clone(),
+                    run_id: run_id.clone(),
+                    expected_revision: 0,
+                    next_revision: 1,
+                    event_kind: "rebind_conversation_prepared".into(),
+                    event_payload_json: payload.clone(),
+                    materialized_state_json: json!({"revision": 1}).to_string(),
+                    effect_kind: "rebind_conversation".into(),
+                    effect_payload_json: payload,
+                    idempotency_key: "rebind-conversation-test".into(),
+                    prepared_dispatch: None,
+                    prepared_approval: None,
+                },
+                100,
+            )
+            .unwrap();
+        let effect = store.pending_effects(10).unwrap().remove(0);
+        store.mark_effect_attempted(effect.id).unwrap();
+    }
+
     fn create_pending_reasoning(
         store: &mut SqliteStore,
         task_id: &TaskId,
@@ -4744,6 +4808,43 @@ mod actor_tests {
             StartupReconcileOutcome::Clear
         );
         assert_eq!(store.pending_effects(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn startup_reconciliation_settles_rebind_only_from_exact_conversation_ref() {
+        let task_id = TaskId::new("task-rebind-reconcile");
+        let run_id = RunId::new("run-rebind-reconcile");
+        let target = ConversationRef::new(
+            "atspi:4444444444444444444444444444444444444444444444444444444444444444",
+        );
+
+        let mut exact_store = SqliteStore::in_memory().unwrap();
+        create_pending_rebind(&mut exact_store, &task_id, &run_id, &target);
+        let effect = exact_store.pending_effects(10).unwrap().remove(0);
+        let exact = ChatSurfaceSnapshot {
+            conversation_ref: Some(target.clone()),
+            ..Default::default()
+        };
+        assert_eq!(
+            reconcile_pending_effect(&mut exact_store, &exact, &effect).unwrap(),
+            StartupReconcileOutcome::SettledObservedRebind
+        );
+        assert!(exact_store.pending_effects(10).unwrap().is_empty());
+
+        let mut mismatch_store = SqliteStore::in_memory().unwrap();
+        create_pending_rebind(&mut mismatch_store, &task_id, &run_id, &target);
+        let effect = mismatch_store.pending_effects(10).unwrap().remove(0);
+        let mismatch = ChatSurfaceSnapshot {
+            conversation_ref: Some(ConversationRef::new(
+                "atspi:5555555555555555555555555555555555555555555555555555555555555555",
+            )),
+            ..Default::default()
+        };
+        assert_eq!(
+            reconcile_pending_effect(&mut mismatch_store, &mismatch, &effect).unwrap(),
+            StartupReconcileOutcome::Clear
+        );
+        assert_eq!(mismatch_store.pending_effects(10).unwrap().len(), 1);
     }
 
     #[test]

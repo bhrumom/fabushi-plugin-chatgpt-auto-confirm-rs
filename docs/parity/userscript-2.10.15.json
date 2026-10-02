@@ -151,7 +151,8 @@
         "DurableRunSurface now captures the current ConversationRef during an in-flight phase as soon as the exact durable dispatch marker has strong user-turn ownership; the state-only transition is idempotent and wrong-dispatch/weak-ownership observations cannot overwrite it",
         "in_flight_owned_observation_durably_binds_conversation_ref_once proves pre-terminal crash-survivable binding without poll-time revision churn",
         "macOS AX adapter hashes the unique selected AXLink AXURL into an opaque ConversationRef and exact-matches the same opaque identity for AXPress rebinding; ambiguous/missing links and sensitive dialog/sheet surfaces fail closed",
-        "DurableRunSurface observe() now rebinds to the task's persisted ConversationRef before projection, startup reconciliation is task-scoped, and fresh-conversation journaling atomically clears the stale bound ref"
+        "DurableRunSurface observe() now rebinds to the task's persisted ConversationRef before projection, startup reconciliation is task-scoped, and fresh-conversation journaling atomically clears the stale bound ref",
+        "crash-left rebind_conversation effects settle only when startup observation exactly matches the durable target ConversationRef; mismatch remains pending and fail-closed"
       ],
       "missing": [
         "exact-artifact real acceptance",
