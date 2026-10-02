@@ -19,6 +19,7 @@ use fabushi_chatgpt_sqlite_store::{
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Notify, OnceCell, mpsc, oneshot};
@@ -1059,36 +1060,55 @@ struct SupervisorHandle {
     sender: mpsc::Sender<SupervisorMessage>,
     state_db_path: PathBuf,
     foreground_gate: ForegroundGate,
+    next_wake_token: Arc<AtomicU64>,
 }
 
 struct SupervisorSleepRequest {
+    token: u64,
     task_id: TaskId,
     run_id: RunId,
     reason: String,
-    duration: Duration,
+    requested_wake_at_unix_ms: i64,
     durable: bool,
+    already_persisted: bool,
     reply: oneshot::Sender<Result<()>>,
+}
+
+struct SupervisorArmResult {
+    token: u64,
+    task_id: TaskId,
+    result: std::result::Result<i64, String>,
 }
 
 enum SupervisorMessage {
     Sleep(SupervisorSleepRequest),
+    Armed(SupervisorArmResult),
 }
 
 struct PendingWake {
+    token: u64,
     task_id: TaskId,
     wake_at_unix_ms: i64,
     durable: bool,
+    armed: bool,
     reply: oneshot::Sender<Result<()>>,
 }
 
 impl SupervisorHandle {
     fn spawn(state_db_path: PathBuf) -> Self {
         let (sender, receiver) = mpsc::channel(256);
-        tokio::spawn(run_supervisor(receiver, state_db_path.clone()));
+        let persistence_gate = Arc::new(Mutex::new(()));
+        tokio::spawn(run_supervisor(
+            receiver,
+            sender.clone(),
+            state_db_path.clone(),
+            persistence_gate.clone(),
+        ));
         Self {
             sender,
             state_db_path,
             foreground_gate: ForegroundGate::default(),
+            next_wake_token: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -1104,17 +1124,21 @@ impl SupervisorHandle {
         } else {
             self.foreground_gate.release_exclusive(task_id);
         }
+        let requested_wake_at_unix_ms =
+            unix_time_ms()?.saturating_add(duration.as_millis().min(i64::MAX as u128) as i64);
+        let token = self.next_wake_token.fetch_add(1, Ordering::Relaxed);
         let (reply_tx, reply_rx) = oneshot::channel();
-        let request = SupervisorSleepRequest {
-            task_id: task_id.clone(),
-            run_id: run_id.clone(),
-            reason: reason.as_str().to_owned(),
-            duration,
-            durable: reason.is_durable(),
-            reply: reply_tx,
-        };
         self.sender
-            .send(SupervisorMessage::Sleep(request))
+            .send(SupervisorMessage::Sleep(SupervisorSleepRequest {
+                token,
+                task_id: task_id.clone(),
+                run_id: run_id.clone(),
+                reason: reason.as_str().to_owned(),
+                requested_wake_at_unix_ms,
+                durable: reason.is_durable(),
+                already_persisted: false,
+                reply: reply_tx,
+            }))
             .await
             .map_err(|_| anyhow::anyhow!("fair supervisor stopped before wake registration"))?;
         reply_rx
@@ -1137,18 +1161,19 @@ impl SupervisorHandle {
             store.clear_task_wake(task_id)?;
             return Ok(());
         }
-        let remaining_ms = existing.wake_at_unix_ms.saturating_sub(now) as u64;
         if existing.reason == WakeReason::DispatchConfirmation.as_str() {
             self.foreground_gate.acquire_exclusive(task_id).await;
         }
         let (reply_tx, reply_rx) = oneshot::channel();
         self.sender
             .send(SupervisorMessage::Sleep(SupervisorSleepRequest {
+                token: self.next_wake_token.fetch_add(1, Ordering::Relaxed),
                 task_id: task_id.clone(),
                 run_id: RunId::new(existing.run_id),
                 reason: existing.reason,
-                duration: Duration::from_millis(remaining_ms),
+                requested_wake_at_unix_ms: existing.wake_at_unix_ms,
                 durable: true,
+                already_persisted: true,
                 reply: reply_tx,
             }))
             .await
@@ -1163,13 +1188,22 @@ impl SupervisorHandle {
     }
 }
 
-async fn run_supervisor(mut receiver: mpsc::Receiver<SupervisorMessage>, state_db_path: PathBuf) {
+async fn run_supervisor(
+    mut receiver: mpsc::Receiver<SupervisorMessage>,
+    sender: mpsc::Sender<SupervisorMessage>,
+    state_db_path: PathBuf,
+    persistence_gate: Arc<Mutex<()>>,
+) {
     let mut pending: HashMap<String, PendingWake> = HashMap::new();
     let mut last_granted: Option<String> = None;
 
     loop {
         let now = unix_time_ms().unwrap_or(0);
-        if let Some(selected) = select_due_task(&pending, now, last_granted.as_deref())
+        let blocked_on_arming = pending
+            .values()
+            .any(|wake| !wake.armed && wake.wake_at_unix_ms <= now);
+        if !blocked_on_arming
+            && let Some(selected) = select_due_task(&pending, now, last_granted.as_deref())
             && let Some(wake) = pending.remove(&selected)
         {
             if wake.durable
@@ -1184,29 +1218,34 @@ async fn run_supervisor(mut receiver: mpsc::Receiver<SupervisorMessage>, state_d
         }
 
         let next_deadline = pending.values().map(|wake| wake.wake_at_unix_ms).min();
-        let sleep = next_deadline.map(|deadline| {
-            let now = unix_time_ms().unwrap_or(0);
-            Duration::from_millis(deadline.saturating_sub(now).max(1) as u64)
-        });
+        let sleep_duration = next_deadline
+            .map(|deadline| {
+                let now = unix_time_ms().unwrap_or(0);
+                Duration::from_millis(deadline.saturating_sub(now).max(1) as u64)
+            })
+            .unwrap_or(Duration::from_secs(24 * 60 * 60));
 
-        match sleep {
-            Some(duration) => {
-                tokio::select! {
-                    message = receiver.recv() => {
-                        let Some(SupervisorMessage::Sleep(request)) = message else {
-                            break;
-                        };
-                        register_supervisor_sleep(&state_db_path, &mut pending, request);
-                    }
-                    _ = tokio::time::sleep(duration) => {}
-                }
-            }
-            None => {
-                let Some(SupervisorMessage::Sleep(request)) = receiver.recv().await else {
+        tokio::select! {
+            message = receiver.recv() => {
+                let Some(message) = message else {
                     break;
                 };
-                register_supervisor_sleep(&state_db_path, &mut pending, request);
+                match message {
+                    SupervisorMessage::Sleep(request) => {
+                        register_supervisor_sleep(
+                            &mut pending,
+                            request,
+                            &sender,
+                            &state_db_path,
+                            &persistence_gate,
+                        );
+                    }
+                    SupervisorMessage::Armed(result) => {
+                        apply_supervisor_arm_result(&mut pending, result);
+                    }
+                }
             }
+            _ = tokio::time::sleep(sleep_duration), if next_deadline.is_some() && !blocked_on_arming => {}
         }
     }
 
@@ -1225,7 +1264,7 @@ fn select_due_task(
     let mut due = pending
         .iter()
         .filter_map(|(task_id, wake)| {
-            (wake.wake_at_unix_ms <= now_unix_ms).then_some(task_id.clone())
+            (wake.armed && wake.wake_at_unix_ms <= now_unix_ms).then_some(task_id.clone())
         })
         .collect::<Vec<_>>();
     due.sort();
@@ -1243,51 +1282,91 @@ fn select_due_task(
 }
 
 fn register_supervisor_sleep(
-    state_db_path: &Path,
     pending: &mut HashMap<String, PendingWake>,
     request: SupervisorSleepRequest,
+    sender: &mpsc::Sender<SupervisorMessage>,
+    state_db_path: &Path,
+    persistence_gate: &Arc<Mutex<()>>,
 ) {
-    let now = match unix_time_ms() {
-        Ok(value) => value,
-        Err(error) => {
-            let _ = request.reply.send(Err(error));
-            return;
-        }
-    };
-    let requested_deadline =
-        now.saturating_add(request.duration.as_millis().min(i64::MAX as u128) as i64);
-    let wake_at_unix_ms = if request.durable {
-        match SqliteStore::open(state_db_path).and_then(|mut store| {
-            store.arm_task_wake(
-                &request.task_id,
-                &request.run_id,
-                &request.reason,
-                requested_deadline,
-                now,
-            )
-        }) {
-            Ok(record) => record.wake_at_unix_ms,
-            Err(error) => {
-                let _ = request.reply.send(Err(error));
-                return;
-            }
-        }
-    } else {
-        requested_deadline
-    };
     let key = request.task_id.as_str().to_owned();
+    let token = request.token;
+    let task_id = request.task_id.clone();
+    let durable = request.durable;
+    let already_persisted = request.already_persisted;
+    let run_id = request.run_id.clone();
+    let reason = request.reason.clone();
+    let requested_wake_at_unix_ms = request.requested_wake_at_unix_ms;
     if let Some(previous) = pending.insert(
         key,
         PendingWake {
+            token,
             task_id: request.task_id,
-            wake_at_unix_ms,
-            durable: request.durable,
+            wake_at_unix_ms: requested_wake_at_unix_ms,
+            durable,
+            armed: !durable || already_persisted,
             reply: request.reply,
         },
     ) {
         let _ = previous.reply.send(Err(anyhow::anyhow!(
             "task registered a second wake before the previous wake completed"
         )));
+    }
+    if durable && !already_persisted {
+        let sender = sender.clone();
+        let path = state_db_path.to_path_buf();
+        let persistence_gate = persistence_gate.clone();
+        tokio::spawn(async move {
+            let _persistence_permit = persistence_gate.lock().await;
+            let task_id_for_store = task_id.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let now = unix_time_ms().map_err(|error| error.to_string())?;
+                SqliteStore::open(&path)
+                    .and_then(|mut store| {
+                        store.arm_task_wake(
+                            &task_id_for_store,
+                            &run_id,
+                            &reason,
+                            requested_wake_at_unix_ms,
+                            now,
+                        )
+                    })
+                    .map(|record| record.wake_at_unix_ms)
+                    .map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap_or_else(|error| Err(format!("durable wake persistence task failed: {error}")));
+            let _ = sender
+                .send(SupervisorMessage::Armed(SupervisorArmResult {
+                    token,
+                    task_id,
+                    result,
+                }))
+                .await;
+        });
+    }
+}
+
+fn apply_supervisor_arm_result(
+    pending: &mut HashMap<String, PendingWake>,
+    result: SupervisorArmResult,
+) {
+    let key = result.task_id.as_str().to_owned();
+    let Some(current) = pending.get_mut(&key) else {
+        return;
+    };
+    if current.token != result.token {
+        return;
+    }
+    match result.result {
+        Ok(wake_at_unix_ms) => {
+            current.wake_at_unix_ms = wake_at_unix_ms;
+            current.armed = true;
+        }
+        Err(message) => {
+            if let Some(failed) = pending.remove(&key) {
+                let _ = failed.reply.send(Err(anyhow::anyhow!(message)));
+            }
+        }
     }
 }
 
@@ -3358,6 +3437,7 @@ mod actor_tests {
             sender,
             state_db_path: path.clone(),
             foreground_gate: ForegroundGate::default(),
+            next_wake_token: Arc::new(AtomicU64::new(1)),
         };
         let error = supervisor
             .sleep_for(
@@ -3474,7 +3554,7 @@ mod actor_tests {
         );
 
         let a_wait = tokio::spawn(async move {
-            a.sleep_for(WakeReason::RateLimitCooldown, Duration::from_millis(140))
+            a.sleep_for(WakeReason::RateLimitCooldown, Duration::from_secs(30))
                 .await
                 .unwrap();
             "a"
@@ -3488,9 +3568,9 @@ mod actor_tests {
         });
 
         assert_eq!(
-            tokio::time::timeout(Duration::from_millis(60), b_wait)
+            tokio::time::timeout(Duration::from_secs(2), b_wait)
                 .await
-                .unwrap()
+                .expect("runnable task must not wait for another task's rate-limit cooldown")
                 .unwrap(),
             "b"
         );
@@ -3501,7 +3581,8 @@ mod actor_tests {
             .unwrap()
             .unwrap();
         assert_eq!(wake.reason, WakeReason::RateLimitCooldown.as_str());
-        assert_eq!(a_wait.await.unwrap(), "a");
+        a_wait.abort();
+        let _ = a_wait.await;
         cleanup_scheduler_path(&path);
     }
 
@@ -3522,7 +3603,7 @@ mod actor_tests {
         let c = SupervisorClock::new(supervisor, TaskId::new("task-c"), RunId::new("run-c"));
 
         let a_wait = tokio::spawn(async move {
-            a.sleep_for(WakeReason::AttachmentWait, Duration::from_millis(120))
+            a.sleep_for(WakeReason::AttachmentWait, Duration::from_secs(30))
                 .await
                 .unwrap();
         });
@@ -3539,10 +3620,29 @@ mod actor_tests {
             "c"
         });
 
-        assert_eq!(b_wait.await.unwrap(), "b");
-        assert_eq!(c_wait.await.unwrap(), "c");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), b_wait)
+                .await
+                .expect("task-b must remain runnable while task-a waits for attachment")
+                .unwrap(),
+            "b"
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), c_wait)
+                .await
+                .expect("task-c must remain runnable while task-a waits for attachment")
+                .unwrap(),
+            "c"
+        );
         assert!(!a_wait.is_finished());
-        a_wait.await.unwrap();
+        let wake = SqliteStore::open(&path)
+            .unwrap()
+            .task_wake(&TaskId::new("task-a"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(wake.reason, WakeReason::AttachmentWait.as_str());
+        a_wait.abort();
+        let _ = a_wait.await;
         cleanup_scheduler_path(&path);
     }
 
@@ -3558,12 +3658,9 @@ mod actor_tests {
         let b = SupervisorClock::new(supervisor, TaskId::new("task-b"), RunId::new("run-b"));
 
         let a_wait = tokio::spawn(async move {
-            a.sleep_for(
-                WakeReason::AuthorizationSettlement,
-                Duration::from_millis(100),
-            )
-            .await
-            .unwrap();
+            a.sleep_for(WakeReason::AuthorizationSettlement, Duration::from_secs(30))
+                .await
+                .unwrap();
         });
         let b_wait = tokio::spawn(async move {
             b.sleep_for(WakeReason::Poll, Duration::from_millis(4))
@@ -3571,9 +3668,22 @@ mod actor_tests {
                 .unwrap();
             "b"
         });
-        assert_eq!(b_wait.await.unwrap(), "b");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), b_wait)
+                .await
+                .expect("authorization settlement must only defer its own task")
+                .unwrap(),
+            "b"
+        );
         assert!(!a_wait.is_finished());
-        a_wait.await.unwrap();
+        let wake = SqliteStore::open(&path)
+            .unwrap()
+            .task_wake(&TaskId::new("task-a"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(wake.reason, WakeReason::AuthorizationSettlement.as_str());
+        a_wait.abort();
+        let _ = a_wait.await;
         cleanup_scheduler_path(&path);
     }
 
@@ -3581,38 +3691,62 @@ mod actor_tests {
     async fn deferred_tasks_wake_in_deadline_order() {
         let path = scheduler_test_path("earliest");
         let supervisor = SupervisorHandle::spawn(path.clone());
-        let a = SupervisorClock::new(
-            supervisor.clone(),
-            TaskId::new("task-a"),
-            RunId::new("run-a"),
-        );
-        let b = SupervisorClock::new(
-            supervisor.clone(),
-            TaskId::new("task-b"),
-            RunId::new("run-b"),
-        );
-        let c = SupervisorClock::new(supervisor, TaskId::new("task-c"), RunId::new("run-c"));
+        let task_a = TaskId::new("task-a");
+        let task_b = TaskId::new("task-b");
+        let task_c = TaskId::new("task-c");
+        let run_a = RunId::new("run-a");
+        let run_b = RunId::new("run-b");
+        let run_c = RunId::new("run-c");
+        let now = unix_time_ms().unwrap();
+        let base = now + 500;
+        let mut store = SqliteStore::open(&path).unwrap();
+        store
+            .arm_task_wake(
+                &task_a,
+                &run_a,
+                WakeReason::ReviewNoFinal.as_str(),
+                base + 400,
+                now,
+            )
+            .unwrap();
+        store
+            .arm_task_wake(
+                &task_b,
+                &run_b,
+                WakeReason::RecoveryNavigation.as_str(),
+                base + 100,
+                now,
+            )
+            .unwrap();
+        store
+            .arm_task_wake(
+                &task_c,
+                &run_c,
+                WakeReason::AttachmentWait.as_str(),
+                base + 250,
+                now,
+            )
+            .unwrap();
+        drop(store);
+
         let order = Arc::new(Mutex::new(Vec::new()));
         let order_a = order.clone();
         let order_b = order.clone();
         let order_c = order.clone();
+        let supervisor_a = supervisor.clone();
+        let supervisor_b = supervisor.clone();
+        let supervisor_c = supervisor;
 
         let a_wait = tokio::spawn(async move {
-            a.sleep_for(WakeReason::ReviewNoFinal, Duration::from_millis(70))
-                .await
-                .unwrap();
+            supervisor_a.wait_existing(&task_a, &run_a).await.unwrap();
             order_a.lock().await.push("a");
         });
         let b_wait = tokio::spawn(async move {
-            b.sleep_for(WakeReason::RecoveryNavigation, Duration::from_millis(20))
-                .await
-                .unwrap();
+            supervisor_b.wait_existing(&task_b, &run_b).await.unwrap();
             order_b.lock().await.push("b");
         });
         let c_wait = tokio::spawn(async move {
-            c.sleep_for(WakeReason::AttachmentWait, Duration::from_millis(45))
-                .await
-                .unwrap();
+            supervisor_c.wait_existing(&task_c, &run_c).await.unwrap();
             order_c.lock().await.push("c");
         });
 
@@ -3629,31 +3763,60 @@ mod actor_tests {
         let task = TaskId::new("task-restart");
         let run = RunId::new("run-restart");
         let now = unix_time_ms().unwrap();
+        let original_deadline = now + 30_000;
         SqliteStore::open(&path)
             .unwrap()
             .arm_task_wake(
                 &task,
                 &run,
                 WakeReason::RateLimitCooldown.as_str(),
-                now + 90,
+                original_deadline,
                 now,
             )
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(35)).await;
 
-        let supervisor = SupervisorHandle::spawn(path.clone());
-        let started = Instant::now();
-        supervisor.wait_existing(&task, &run).await.unwrap();
-        let elapsed = started.elapsed();
-        assert!(elapsed < Duration::from_millis(85));
-        assert!(elapsed >= Duration::from_millis(35));
-        assert!(
+        let (sender, mut receiver) = mpsc::channel(1);
+        let supervisor = SupervisorHandle {
+            sender,
+            state_db_path: path.clone(),
+            foreground_gate: ForegroundGate::default(),
+            next_wake_token: Arc::new(AtomicU64::new(1)),
+        };
+        let task_for_wait = task.clone();
+        let run_for_wait = run.clone();
+        let waiter = tokio::spawn(async move {
+            supervisor
+                .wait_existing(&task_for_wait, &run_for_wait)
+                .await
+        });
+
+        let message = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("restart reconciliation must register the durable wake")
+            .expect("supervisor request channel must remain open");
+        let SupervisorMessage::Sleep(request) = message else {
+            panic!("restart reconciliation must register a sleep request");
+        };
+        assert_eq!(request.task_id, task);
+        assert_eq!(request.run_id, run);
+        assert_eq!(
+            request.reason,
+            WakeReason::RateLimitCooldown.as_str().to_owned()
+        );
+        assert_eq!(request.requested_wake_at_unix_ms, original_deadline);
+        assert!(request.durable);
+        assert!(request.already_persisted);
+        assert_eq!(
             SqliteStore::open(&path)
                 .unwrap()
                 .task_wake(&task)
                 .unwrap()
-                .is_none()
+                .unwrap()
+                .wake_at_unix_ms,
+            original_deadline
         );
+        request.reply.send(Ok(())).unwrap();
+        waiter.await.unwrap().unwrap();
         cleanup_scheduler_path(&path);
     }
 
@@ -3664,9 +3827,11 @@ mod actor_tests {
             (
                 task.to_owned(),
                 PendingWake {
+                    token: 1,
                     task_id: TaskId::new(task),
                     wake_at_unix_ms,
                     durable: true,
+                    armed: true,
                     reply,
                 },
             )

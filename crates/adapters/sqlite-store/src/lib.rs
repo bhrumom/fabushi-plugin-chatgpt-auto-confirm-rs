@@ -120,14 +120,14 @@ impl SqliteStore {
 
     fn from_connection(connection: Connection) -> Result<Self> {
         connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .context("configure SQLite busy timeout")?;
+        connection
             .pragma_update(None, "journal_mode", "WAL")
             .context("enable SQLite WAL")?;
         connection
             .pragma_update(None, "foreign_keys", "ON")
             .context("enable SQLite foreign keys")?;
-        connection
-            .busy_timeout(std::time::Duration::from_secs(5))
-            .context("configure SQLite busy timeout")?;
 
         let mut store = Self { connection };
         store.migrate()?;
