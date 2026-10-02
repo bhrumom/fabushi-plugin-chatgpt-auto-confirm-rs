@@ -131,7 +131,8 @@ impl<'a> RunPrompt<'a> {
     }
 
     pub async fn execute(&self, prompt: &str, options: RunOptions) -> Result<RunReport> {
-        self.execute_with_dispatch_state(prompt, options, false).await
+        self.execute_with_dispatch_state(prompt, options, false)
+            .await
     }
 
     pub async fn resume_confirmed_dispatch(
@@ -142,7 +143,8 @@ impl<'a> RunPrompt<'a> {
         if options.expected_dispatch_id.is_none() {
             bail!("resuming a confirmed dispatch requires expected_dispatch_id");
         }
-        self.execute_with_dispatch_state(prompt, options, true).await
+        self.execute_with_dispatch_state(prompt, options, true)
+            .await
     }
 
     async fn execute_with_dispatch_state(

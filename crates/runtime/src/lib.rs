@@ -1196,8 +1196,9 @@ impl DesktopRuntime {
         }
 
         if resumed_existing
-            && let Some((run_id, report)) =
-                self.resume_incomplete_continuous_phase(&state, &options).await?
+            && let Some((run_id, report)) = self
+                .resume_incomplete_continuous_phase(&state, &options)
+                .await?
         {
             if report.state != RunState::Complete {
                 return Ok(report);
