@@ -3176,7 +3176,7 @@ impl DesktopRuntime {
                 task_id,
                 run_id,
                 start_fresh: false,
-                task_scoped_reconciliation: false,
+                task_scoped_reconciliation: true,
             },
         )
         .await
@@ -5136,6 +5136,115 @@ mod actor_tests {
         async fn ensure_running(&self) -> Result<()> {
             Ok(())
         }
+    }
+
+    #[derive(Default)]
+    struct OneShotProbeSurface;
+
+    #[async_trait]
+    impl ChatSurfacePort for OneShotProbeSurface {
+        async fn observe(&self) -> Result<ChatSurfaceSnapshot> {
+            Ok(ChatSurfaceSnapshot {
+                app_healthy: true,
+                composer_ready: true,
+                hydration: HydrationState::Ready,
+                reasoning_picker_available: true,
+                selected_reasoning_preset: Some(ReasoningPreset::ExtraHigh),
+                ..Default::default()
+            })
+        }
+
+        async fn set_reasoning_preset(&self, _preset: ReasoningPreset) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn send_prompt(&self, _prompt: &str) -> Result<()> {
+            bail!("one-shot probe reached send")
+        }
+
+        async fn approve_current_conversation(&self) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn dismiss_rate_limit_notice(&self) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn recover_current_surface(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn start_fresh_conversation(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn one_shot_startup_reconciliation_does_not_block_on_other_task_effect() {
+        let root = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-one-shot-task-scope-{}-{}",
+            std::process::id(),
+            dispatch_marker().unwrap()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let state_db = root.join("state.sqlite3");
+        let other_task = TaskId::new("task-unrelated-pending-send");
+        let other_run = RunId::new("run-unrelated-pending-send");
+        let mut journal =
+            DurableRunJournal::open(&state_db, other_task.clone(), other_run.clone()).unwrap();
+        journal
+            .begin(
+                "send_prompt",
+                json!({
+                    "dispatchId": "dispatch-unrelated-pending-send",
+                    "baselineUserTurnBoundary": null,
+                })
+                .to_string(),
+                Some(PreparedDispatch {
+                    dispatch_id: DispatchId::new("dispatch-unrelated-pending-send"),
+                    prepared_intent_json: json!({"prompt":"old unrelated task"}).to_string(),
+                }),
+                None,
+            )
+            .unwrap();
+        drop(journal);
+
+        let runtime = DesktopRuntime::new(LifecycleTestProcess, OneShotProbeSurface)
+            .with_state_db_path(state_db.clone());
+        let error = runtime
+            .run_prompt(
+                "new independent one-shot",
+                ReasoningPreset::ExtraHigh,
+                RunOptions {
+                    timeout: Duration::from_secs(1),
+                    poll_interval: Duration::from_millis(10),
+                    run_phase: Some(Phase::Work),
+                    run_round: Some(Round::new(1)),
+                    ..RunOptions::default()
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("one-shot probe reached send"),
+            "new task must advance past unrelated pending effect: {error:#}"
+        );
+        assert!(
+            !error
+                .to_string()
+                .contains("unsettled destructive effects remain"),
+            "unrelated task effect must not globally block a new one-shot"
+        );
+        let pending = SqliteStore::open(&state_db)
+            .unwrap()
+            .pending_effects(10)
+            .unwrap();
+        assert!(pending.iter().any(|effect| {
+            effect.task_id == other_task.as_str() && effect.run_id == other_run.as_str()
+        }));
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
