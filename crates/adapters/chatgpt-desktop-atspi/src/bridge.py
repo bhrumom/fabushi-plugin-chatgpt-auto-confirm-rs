@@ -1021,9 +1021,19 @@ def set_composer_text(entry, prompt):
             raise RuntimeError("ChatGPT composer lacks a safe editable keyboard surface")
         try:
             entry.queryComponent().grabFocus()
-        except Exception as exc:
-            raise RuntimeError("ChatGPT composer could not receive keyboard focus") from exc
-        time.sleep(0.04)
+        except Exception:
+            pass
+        for _ in range(4):
+            if state(entry, pyatspi.STATE_FOCUSED):
+                break
+            time.sleep(0.025)
+        if not state(entry, pyatspi.STATE_FOCUSED):
+            if not action(entry):
+                raise RuntimeError("ChatGPT composer could not receive keyboard focus")
+            for _ in range(12):
+                if state(entry, pyatspi.STATE_FOCUSED):
+                    break
+                time.sleep(0.025)
         if not state(entry, pyatspi.STATE_FOCUSED):
             raise RuntimeError("ChatGPT composer did not acquire keyboard focus")
         pyatspi.Registry.generateKeyboardEvent(
@@ -1468,6 +1478,12 @@ def composer_write_contract_self_test():
             return which == pyatspi.STATE_FOCUSED and values["focused"]
     class FakeComponent:
         def grabFocus(self):
+            return True
+    class FakeAction:
+        nActions = 1
+        def getName(self, index):
+            return "activate"
+        def doAction(self, index):
             values["focused"] = True
             return True
     class FakeText:
@@ -1480,6 +1496,8 @@ def composer_write_contract_self_test():
             raise NotImplementedError()
         def queryComponent(self):
             return FakeComponent()
+        def queryAction(self):
+            return FakeAction()
         def queryText(self):
             return FakeText()
     class FakeRegistry:
