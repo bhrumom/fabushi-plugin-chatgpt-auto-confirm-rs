@@ -122,12 +122,14 @@
         "pre-scheduler exact-head run 36990315718 passed architecture/fmt/workspace tests/clippy/release packaging on Linux and both macOS targets at 4e24b107315827c1c398be809f5726d5c73cb0f1",
         "shared production SupervisorClock + durable task_wakes scheduling in crates/runtime/src/lib.rs and sqlite-store",
         "rate_limit_deferred_task_does_not_block_runnable_task, due_task_selection_round_robins_only_due_tasks, scheduler_rotation_keeps_ui_single_writer_without_duplicate_send, durable_wait_fails_closed_when_supervisor_is_unavailable, dispatch_confirmation_holds_foreground_until_owner_yields, authorization_settlement_releases_foreground_for_other_tasks, and restart_wait_uses_original_durable_deadline",
-        "two-phase durable wake arming fixes SQLite-latency ordering while preserving absolute deadlines; supervisor shutdown after final external handle is deterministic"
+        "two-phase durable wake arming fixes SQLite-latency ordering while preserving absolute deadlines; supervisor shutdown after final external handle is deterministic",
+        "CLI daemon + DesktopRuntime::resume_active_continuous_tasks enumerate durable active incomplete tasks and resume the sole safe task",
+        "startup_scan_enumerates_only_active_incomplete_continuous_tasks and startup_daemon_fails_closed_before_desktop_mutation_with_multiple_active_tasks prove startup orchestration and fail-closed multi-task behavior before ConversationRef rebinding exists"
       ],
       "missing": [
         "exact-artifact real acceptance",
-        "desktop opaque ConversationRef navigation/rebinding and a production multi-RunWorker daemon",
-        "native attachment-wait wiring and live concurrent-task acceptance"
+        "desktop opaque ConversationRef navigation/rebinding for safe rotation across independently running server-side conversations",
+        "live concurrent-task acceptance"
       ]
     },
     {
@@ -173,10 +175,12 @@
         "rate_limit_deferred_task_does_not_block_runnable_task",
         "desktop AT-SPI rate-limit projection requires alert/notification/status/dialog provenance instead of scanning the conversation transcript",
         "dismiss_rate_limit scopes Got it/明白了 to the same semantic notice container, preventing unrelated page controls from being clicked",
-        "rate_limit_contract_rejects_transcript_text_and_accepts_alert_notice plus rate_limit_detection_requires_semantic_notice_provenance"
+        "rate_limit_contract_rejects_transcript_text_and_accepts_alert_notice plus rate_limit_detection_requires_semantic_notice_provenance",
+        "source-2.10.15 history-access-only request-frequency popup is classified separately, acknowledged in its own bounded semantic container, and excluded from rate-limit cooldown",
+        "shipping_run_prompt_acknowledges_history_only_popup_without_rate_limit_cooldown plus adapter popup fixtures prove history-only acknowledgement while authorization/sensitive dialogs fail closed"
       ],
       "missing": [
-        "acceptance"
+        "exact-artifact live rate-limit/history-popup acceptance"
       ]
     },
     {
@@ -217,12 +221,14 @@
         "popup_contract_executes_safe_sensitive_and_authorization_fixtures plus shipping RunPrompt harmless/sensitive popup behavioral contracts",
         "Stream cache expired is projected only from the latest assistant response scope owned by the current Fabushi user turn; page-global or historical text cannot trigger recovery",
         "shipping RunPrompt invokes response-local Retry through DesktopSessionActor/DurableRunSurface, journals failureIdentity before UI mutation, and effect_identity_seen prevents a second Retry for the same failure identity across restart",
-        "shipping_run_prompt_retries_same_stream_cache_failure_once_then_fresh_handoffs, effect_identity_guard_survives_settlement, and stream_cache_expired_projection_and_retry_are_response_local"
+        "shipping_run_prompt_retries_same_stream_cache_failure_once_then_fresh_handoffs, effect_identity_guard_survives_settlement, and stream_cache_expired_projection_and_retry_are_response_local",
+        "strict Review report projection is bounded to the current owned assistant response and emits structured MAHAYANA_TASK_REPORT_V1 evidence before Copy hydration",
+        "review_report_projection_is_response_local_and_structured plus application Copy-before-hydration contracts",
+        "macOS AXUIElement attachment path stages content-addressed bytes, requires unique ChatGPT attachment and native Open-panel actions, uses system-wide focused Accessibility for the out-of-process NSOpenPanel, writes/re-reads the exact path, and binds readiness to the exact filename"
       ],
       "missing": [
-        "macOS native attachment parity",
-        "review-report projection hardening",
-        "real authorization and terminal acceptance"
+        "exact-head macOS compile/test evidence for native attachment path",
+        "real authorization, attachment and terminal acceptance"
       ]
     },
     {
@@ -316,6 +322,20 @@
         "current exact-head packaged-artifact reasoning/Send/terminal journey",
         "current exact-head packaged-artifact Linux attachment journey",
         "current exact-head packaged-artifact authorization journey when a real conversation-scoped authorization card can be safely observed"
+      ]
+    },
+    {
+      "id": "generic-hydration",
+      "source": "~30s initial hydration window; max 2 recoveries per continuously missing identity",
+      "destination": "application/runtime durable recovery",
+      "status": "partial",
+      "evidence": [
+        "HydrationRecoveryState is wired into shipping RunPrompt after higher-priority authorization/error/rate-limit handling",
+        "recover_current_surface is routed through DurableRunSurface so the desktop mutation is journaled/outboxed first",
+        "shipping_run_prompt_stops_generic_hydration_recovery_after_two_attempts and hydration_exhaustion_does_not_reset_just_because_time_passes"
+      ],
+      "missing": [
+        "exact-artifact live hydration/remount acceptance"
       ]
     }
   ]
