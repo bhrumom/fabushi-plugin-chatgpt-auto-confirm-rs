@@ -956,6 +956,29 @@ impl RunWorker {
         })
     }
 
+    async fn lifecycle_report(&self) -> Result<Option<RunReport>> {
+        let (state, message) = match self.run_control.lifecycle().await? {
+            ContinuousTaskLifecycle::Active => return Ok(None),
+            ContinuousTaskLifecycle::Paused => {
+                (RunState::Paused, "continuous task paused in durable state")
+            }
+            ContinuousTaskLifecycle::Cancelled => (
+                RunState::Cancelled,
+                "continuous task cancelled in durable state",
+            ),
+        };
+        Ok(Some(RunReport {
+            state,
+            conversation_ref: None,
+            assistant_text: String::new(),
+            approvals_clicked: 0,
+            recoveries: 0,
+            rate_limit_pauses: 0,
+            dispatch_retries: 0,
+            message: message.into(),
+        }))
+    }
+
     async fn execute(&self, prompt: &str, options: RunOptions) -> Result<RunReport> {
         let clock = TokioClock::default();
         RunPrompt::with_durable_ports(
@@ -1084,21 +1107,25 @@ impl DesktopRuntime {
 
     async fn ensure_reasoning_preset(
         &self,
-        surface: &dyn ChatSurfacePort,
+        worker: &RunWorker,
         target: ReasoningPreset,
-    ) -> Result<()> {
+    ) -> Result<Option<RunReport>> {
+        let surface = &worker.surface;
         let clock = TokioClock::default();
         let mut gate = ReasoningGateState::default();
         loop {
+            if let Some(report) = worker.lifecycle_report().await? {
+                return Ok(Some(report));
+            }
             let snapshot = surface.observe().await?;
             match gate.observe(&snapshot, target, clock.now()) {
-                ReasoningDecision::Ready => return Ok(()),
+                ReasoningDecision::Ready => return Ok(None),
                 ReasoningDecision::Select(preset) => {
                     let changed = surface.set_reasoning_preset(preset).await?;
                     if changed && surface.observe().await?.selected_reasoning_preset == Some(target)
                     {
                         gate.selection_succeeded();
-                        return Ok(());
+                        return Ok(None);
                     }
                     if gate.selection_failed(clock.now())
                         == ReasoningDecision::RecoverCurrentSurface
@@ -1619,11 +1646,18 @@ impl DesktopRuntime {
             phase,
             round,
         )?;
+        if let Some(report) = worker.lifecycle_report().await? {
+            return Ok(report);
+        }
         if start_fresh {
             worker.surface.start_fresh_conversation().await?;
         }
-        self.ensure_reasoning_preset(&worker.surface, requested_reasoning)
-            .await?;
+        if let Some(report) = self
+            .ensure_reasoning_preset(&worker, requested_reasoning)
+            .await?
+        {
+            return Ok(report);
+        }
 
         options.expected_dispatch_id = Some(dispatch_id);
         worker.execute(prompt, options).await
