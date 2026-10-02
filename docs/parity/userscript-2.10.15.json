@@ -183,10 +183,12 @@
       "evidence": [
         "crates/adapters/sqlite-store/src/lib.rs",
         "crates/adapters/sqlite-store/Cargo.toml",
-        "crates/runtime/src/lib.rs"
+        "crates/runtime/src/lib.rs",
+        "start_fresh_conversation persists baseline user-turn/conversation identity, re-observes a clean fresh-surface postcondition before settlement, and startup reconciliation can settle crash-left fresh effects without replay",
+        "startup_reconciliation_settles_fresh_conversation_only_from_clean_postcondition and startup_reconciliation_keeps_fresh_conversation_pending_when_old_owned_turn_remains"
       ],
       "missing": [
-        "semantic startup reconciliation for attachment/new-conversation/reload destructive effects",
+        "semantic startup reconciliation for recover/reload destructive effects",
         "full task CRUD/control",
         "resumable supervision after fail-closed ambiguous pending effects",
         "real crash/restart acceptance"

@@ -52,6 +52,7 @@ enum StartupReconcileOutcome {
     SettledObservedSend,
     SettledObservedReasoning,
     SettledObservedApproval,
+    SettledObservedFreshConversation,
 }
 
 struct DurableUiLease {
@@ -1112,12 +1113,49 @@ impl ChatSurfacePort for DurableRunSurface {
     async fn start_fresh_conversation(&self) -> Result<()> {
         self.foreground_gate.acquire_exclusive(&self.task_id).await;
         self.settle_pending_send_for_recovery().await?;
-        self.record_and_settle(
-            "start_fresh_conversation",
-            json!({}),
-            self.surface.start_fresh_conversation(),
-        )
-        .await?;
+        let _mutation_permit = self.mutation_permit().await;
+        let baseline = self.surface.observe().await?;
+        let baseline_user_turn_boundary = baseline
+            .user_turn_boundary
+            .as_ref()
+            .map(|value| value.as_str().to_owned());
+        let baseline_conversation_fingerprint = baseline
+            .conversation_fingerprint
+            .as_ref()
+            .map(|value| value.as_str().to_owned());
+        let payload = json!({
+            "baselineUserTurnBoundary": baseline_user_turn_boundary,
+            "baselineConversationFingerprint": baseline_conversation_fingerprint,
+        });
+        let effect_id = {
+            let mut journal = self.journal.lock().await;
+            journal.begin("start_fresh_conversation", payload.to_string(), None, None)?
+        };
+
+        if let Err(error) = self.surface.start_fresh_conversation().await {
+            let journal = self.journal.lock().await;
+            journal.settle(effect_id, false, &error.to_string())?;
+            return Err(error);
+        }
+
+        let observed = self.surface.observe().await?;
+        if !fresh_conversation_postcondition(
+            &observed,
+            baseline_user_turn_boundary.as_deref(),
+            baseline_conversation_fingerprint.as_deref(),
+        ) {
+            bail!(
+                "fresh conversation action returned successfully but its semantic postcondition was not observed; durable effect remains pending for startup reconciliation"
+            );
+        }
+        {
+            let journal = self.journal.lock().await;
+            journal.settle(
+                effect_id,
+                true,
+                "fresh conversation semantic postcondition observed",
+            )?;
+        }
         *self.dispatch_id.lock().await = DispatchId::new(dispatch_marker()?);
         Ok(())
     }
@@ -1997,7 +2035,8 @@ impl DesktopRuntime {
                 StartupReconcileOutcome::Clear | StartupReconcileOutcome::DeferredToRunWorker => {}
                 StartupReconcileOutcome::SettledObservedSend
                 | StartupReconcileOutcome::SettledObservedReasoning
-                | StartupReconcileOutcome::SettledObservedApproval => {
+                | StartupReconcileOutcome::SettledObservedApproval
+                | StartupReconcileOutcome::SettledObservedFreshConversation => {
                     settled_any = true;
                 }
             }
@@ -2615,6 +2654,42 @@ fn merge_task_orchestration_state(
     Ok(serde_json::Value::Object(root).to_string())
 }
 
+fn fresh_conversation_postcondition(
+    snapshot: &ChatSurfaceSnapshot,
+    baseline_user_turn_boundary: Option<&str>,
+    baseline_conversation_fingerprint: Option<&str>,
+) -> bool {
+    if !snapshot.app_healthy
+        || !snapshot.composer_ready
+        || snapshot.current_dispatch_id.is_some()
+        || snapshot.user_turn_boundary.is_some()
+        || snapshot.assistant_response_boundary.is_some()
+        || snapshot.streaming_or_busy
+        || snapshot.stop_available
+        || snapshot.authorization_surface_present
+    {
+        return false;
+    }
+
+    let current_conversation = snapshot
+        .conversation_fingerprint
+        .as_ref()
+        .map(|value| value.as_str());
+    if baseline_conversation_fingerprint.is_some()
+        && current_conversation == baseline_conversation_fingerprint
+    {
+        return false;
+    }
+    let current_user_turn = snapshot
+        .user_turn_boundary
+        .as_ref()
+        .map(|value| value.as_str());
+    if baseline_user_turn_boundary.is_some() && current_user_turn == baseline_user_turn_boundary {
+        return false;
+    }
+    true
+}
+
 fn reconcile_pending_effect(
     store: &mut SqliteStore,
     snapshot: &ChatSurfaceSnapshot,
@@ -2685,6 +2760,38 @@ fn reconcile_pending_effect(
                 anyhow::anyhow!("pending attachment effect is missing durable readiness deadline")
             })?;
         return Ok(StartupReconcileOutcome::DeferredToRunWorker);
+    }
+
+    if effect.effect_kind == "start_fresh_conversation" {
+        let payload: serde_json::Value = serde_json::from_str(&effect.effect_payload_json)
+            .context(
+                "parse pending fresh-conversation effect payload during startup reconciliation",
+            )?;
+        let baseline_user_turn_boundary = payload
+            .get("baselineUserTurnBoundary")
+            .and_then(serde_json::Value::as_str);
+        let baseline_conversation_fingerprint = payload
+            .get("baselineConversationFingerprint")
+            .and_then(serde_json::Value::as_str);
+        if !fresh_conversation_postcondition(
+            snapshot,
+            baseline_user_turn_boundary,
+            baseline_conversation_fingerprint,
+        ) {
+            return Ok(StartupReconcileOutcome::Clear);
+        }
+        store.settle_effect(
+            effect.id,
+            &json!({
+                "ok": true,
+                "detail": "startup reconciliation observed fresh-conversation postcondition",
+                "baselineUserTurnBoundary": baseline_user_turn_boundary,
+                "baselineConversationFingerprint": baseline_conversation_fingerprint,
+            })
+            .to_string(),
+            unix_time_ms()?,
+        )?;
+        return Ok(StartupReconcileOutcome::SettledObservedFreshConversation);
     }
 
     if effect.effect_kind == "set_reasoning" {
@@ -3193,15 +3300,26 @@ mod actor_tests {
     #[derive(Default)]
     struct DispatchRotationSurface {
         prompts: std::sync::Mutex<Vec<String>>,
+        fresh: AtomicBool,
     }
 
     #[async_trait]
     impl ChatSurfacePort for DispatchRotationSurface {
         async fn observe(&self) -> Result<ChatSurfaceSnapshot> {
-            Ok(ChatSurfaceSnapshot {
-                user_turn_boundary: Some(UserTurnBoundary::new("baseline")),
-                ..Default::default()
-            })
+            if self.fresh.load(Ordering::SeqCst) {
+                Ok(ChatSurfaceSnapshot {
+                    app_healthy: true,
+                    composer_ready: true,
+                    ..Default::default()
+                })
+            } else {
+                Ok(ChatSurfaceSnapshot {
+                    app_healthy: true,
+                    composer_ready: true,
+                    user_turn_boundary: Some(UserTurnBoundary::new("baseline")),
+                    ..Default::default()
+                })
+            }
         }
 
         async fn send_prompt(&self, prompt: &str) -> Result<()> {
@@ -3222,6 +3340,7 @@ mod actor_tests {
         }
 
         async fn start_fresh_conversation(&self) -> Result<()> {
+            self.fresh.store(true, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -3387,6 +3506,41 @@ mod actor_tests {
         store.mark_effect_attempted(pending[0].id).unwrap();
     }
 
+    fn create_pending_fresh_conversation(
+        store: &mut SqliteStore,
+        task_id: &TaskId,
+        run_id: &RunId,
+        baseline_user_turn: Option<&str>,
+        baseline_conversation: Option<&str>,
+    ) {
+        let payload = json!({
+            "baselineUserTurnBoundary": baseline_user_turn,
+            "baselineConversationFingerprint": baseline_conversation,
+        })
+        .to_string();
+        store
+            .record_transition(
+                &TransitionRecord {
+                    task_id: task_id.clone(),
+                    run_id: run_id.clone(),
+                    expected_revision: 0,
+                    next_revision: 1,
+                    event_kind: "start_fresh_conversation_prepared".into(),
+                    event_payload_json: payload.clone(),
+                    materialized_state_json: json!({"revision": 1}).to_string(),
+                    effect_kind: "start_fresh_conversation".into(),
+                    effect_payload_json: payload,
+                    idempotency_key: "fresh-conversation-test".into(),
+                    prepared_dispatch: None,
+                    prepared_approval: None,
+                },
+                100,
+            )
+            .unwrap();
+        let effect = store.pending_effects(10).unwrap().remove(0);
+        store.mark_effect_attempted(effect.id).unwrap();
+    }
+
     fn create_pending_reasoning(
         store: &mut SqliteStore,
         task_id: &TaskId,
@@ -3469,6 +3623,58 @@ mod actor_tests {
             .unwrap();
         let effect = store.pending_effects(10).unwrap().remove(0);
         store.mark_effect_attempted(effect.id).unwrap();
+    }
+
+    #[test]
+    fn startup_reconciliation_settles_fresh_conversation_only_from_clean_postcondition() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        let task_id = TaskId::new("task-fresh-reconcile");
+        let run_id = RunId::new("run-fresh-reconcile");
+        create_pending_fresh_conversation(
+            &mut store,
+            &task_id,
+            &run_id,
+            Some("u-before"),
+            Some("conversation-before"),
+        );
+        let snapshot = ChatSurfaceSnapshot {
+            app_healthy: true,
+            composer_ready: true,
+            ..Default::default()
+        };
+        let effect = store.pending_effects(10).unwrap().remove(0);
+        assert_eq!(
+            reconcile_pending_effect(&mut store, &snapshot, &effect).unwrap(),
+            StartupReconcileOutcome::SettledObservedFreshConversation
+        );
+        assert!(store.pending_effects(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn startup_reconciliation_keeps_fresh_conversation_pending_when_old_owned_turn_remains() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        let task_id = TaskId::new("task-fresh-ambiguous");
+        let run_id = RunId::new("run-fresh-ambiguous");
+        create_pending_fresh_conversation(
+            &mut store,
+            &task_id,
+            &run_id,
+            Some("u-before"),
+            Some("conversation-before"),
+        );
+        let snapshot = ChatSurfaceSnapshot {
+            app_healthy: true,
+            composer_ready: true,
+            user_turn_boundary: Some(UserTurnBoundary::new("u-before")),
+            conversation_fingerprint: Some(ConversationFingerprint::new("conversation-before")),
+            ..Default::default()
+        };
+        let effect = store.pending_effects(10).unwrap().remove(0);
+        assert_eq!(
+            reconcile_pending_effect(&mut store, &snapshot, &effect).unwrap(),
+            StartupReconcileOutcome::Clear
+        );
+        assert_eq!(store.pending_effects(10).unwrap().len(), 1);
     }
 
     #[test]
@@ -3725,7 +3931,11 @@ mod actor_tests {
     #[async_trait]
     impl ChatSurfacePort for AttachmentReadySurface {
         async fn observe(&self) -> Result<ChatSurfaceSnapshot> {
-            Ok(ChatSurfaceSnapshot::default())
+            Ok(ChatSurfaceSnapshot {
+                app_healthy: true,
+                composer_ready: true,
+                ..Default::default()
+            })
         }
 
         async fn set_reasoning_preset(&self, _preset: ReasoningPreset) -> Result<bool> {
