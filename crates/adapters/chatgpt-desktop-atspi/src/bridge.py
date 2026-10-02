@@ -755,6 +755,39 @@ def latest_owned_response(items, marker_index):
     latest = max(groups, key=lambda entry: entry["last_index"])
     return latest["scope"], latest["items"], latest["values"]
 
+def latest_owned_activity_trace(items, marker_index, response_scope=None):
+    if marker_index < 0:
+        return []
+    marker_node = items[marker_index]["node"]
+    groups = []
+    for absolute_index, item in enumerate(items[marker_index + 1:], start=marker_index + 1):
+        if not item["visible"] or item["role"] in INTERACTIVE_ACTIVITY_ROLES:
+            continue
+        if item["role"] not in ACTIVITY_TEXT_ROLES:
+            continue
+        activity_scope = assistant_activity_scope(item["node"])
+        if activity_scope is None:
+            continue
+        owner_scope = owned_response_scope(activity_scope, marker_node)
+        if owner_scope is None:
+            continue
+        group = next((entry for entry in groups if same_node(owner_scope, entry["scope"])), None)
+        if group is None:
+            group = {"scope": owner_scope, "items": [], "last_index": -1}
+            groups.append(group)
+        group["items"].append(item)
+        group["last_index"] = absolute_index
+    if response_scope is not None:
+        current = next(
+            (entry for entry in groups if same_node(entry["scope"], response_scope)),
+            None,
+        )
+        return assistant_activity_trace(current["items"]) if current is not None else []
+    if not groups:
+        return []
+    latest = max(groups, key=lambda entry: entry["last_index"])
+    return assistant_activity_trace(latest["items"])
+
 def response_local_copy_evidence(items, marker_index, response_scope):
     if marker_index < 0 or response_scope is None:
         return False
@@ -864,8 +897,8 @@ def snapshot():
 
     marker, marker_index = marker_info(items)
     after = items[marker_index + 1 :] if marker_index >= 0 else []
-    work_trace = assistant_activity_trace(after) if marker_index >= 0 else []
     response_scope, response_text_items, response_values = latest_owned_response(items, marker_index)
+    work_trace = latest_owned_activity_trace(items, marker_index, response_scope)
     prose = "\n".join(response_values[-80:])[-16000:]
     copy_after = response_local_copy_evidence(items, marker_index, response_scope)
     stop = any(
@@ -1509,39 +1542,92 @@ def popup_contract_self_test():
 
 def response_boundary_contract_self_test():
     class FakeNode:
-        def __init__(self, node_role, name, parent=None):
+        def __init__(self, node_role, name, parent=None, attributes=None):
             self._role = node_role
             self.name = name
             self.parent = parent
+            self._attributes = attributes or []
         def getRoleName(self):
             return self._role
+        def getAttributes(self):
+            return self._attributes
 
+    def item(node, role_name=None, text=None):
+        return {
+            "node": node,
+            "role": role_name or node.getRoleName(),
+            "name": node.name,
+            "text": node.name if text is None else text,
+            "visible": True,
+            "enabled": True,
+        }
+
+    tertiary = [
+        "data-markdown-text-style:assistant-message",
+        "data-markdown-text-tone:tertiary",
+    ]
     document = FakeNode("document web", "ChatGPT")
     conversation = FakeNode("section", "conversation", document)
     user = FakeNode("section", "user", conversation)
     marker = FakeNode("static", "[Fabushi:12345678]", user)
+
     old_response = FakeNode("section", "old response", conversation)
+    old_activity = FakeNode("section", "old activity", old_response, tertiary)
+    old_activity_text = FakeNode("status", "old work", old_activity)
     old_text = FakeNode("paragraph", "old answer", old_response)
     old_copy = FakeNode("push button", "Copy", old_response)
+
     latest_response = FakeNode("section", "latest response", conversation)
+    latest_activity = FakeNode("section", "latest activity", latest_response, tertiary)
+    latest_activity_text = FakeNode("status", "latest work", latest_activity)
     latest_text = FakeNode("paragraph", "latest answer", latest_response)
     latest_copy = FakeNode("push button", "Copy", latest_response)
+
     items = [
-        {"node": marker, "role": "static", "name": marker.name, "text": marker.name, "visible": True, "enabled": True},
-        {"node": old_text, "role": "paragraph", "name": old_text.name, "text": old_text.name, "visible": True, "enabled": True},
-        {"node": old_copy, "role": "push button", "name": "Copy", "text": "", "visible": True, "enabled": True},
-        {"node": latest_text, "role": "paragraph", "name": latest_text.name, "text": latest_text.name, "visible": True, "enabled": True},
-        {"node": latest_copy, "role": "push button", "name": "Copy", "text": "", "visible": True, "enabled": True},
+        item(marker),
+        item(old_activity_text, "status"),
+        item(old_text, "paragraph"),
+        item(old_copy, "push button", ""),
+        item(latest_activity_text, "status"),
+        item(latest_text, "paragraph"),
+        item(latest_copy, "push button", ""),
     ]
     scope, _, values = latest_owned_response(items, 0)
     if not same_node(scope, latest_response) or values != ["latest answer"]:
         return False
+    if latest_owned_activity_trace(items, 0, scope) != ["latest work"]:
+        return False
     if not response_local_copy_evidence(items, 0, scope):
         return False
+
+    boundary_before = hash_text("\n".join(values[-80:])[-16000:])
     items[-1]["visible"] = False
     if response_local_copy_evidence(items, 0, scope):
         return False
-    return True
+
+    remounted_response = FakeNode("section", "latest response remount", conversation)
+    remounted_activity = FakeNode("section", "latest activity remount", remounted_response, tertiary)
+    remounted_activity_text = FakeNode("status", "latest work", remounted_activity)
+    remounted_text = FakeNode("paragraph", "latest answer", remounted_response)
+    remounted_copy = FakeNode("push button", "Copy", remounted_response)
+    remounted_items = [
+        item(marker),
+        item(old_activity_text, "status"),
+        item(old_text, "paragraph"),
+        item(old_copy, "push button", ""),
+        item(remounted_activity_text, "status"),
+        item(remounted_text, "paragraph"),
+        item(remounted_copy, "push button", ""),
+    ]
+    remounted_scope, _, remounted_values = latest_owned_response(remounted_items, 0)
+    if not same_node(remounted_scope, remounted_response):
+        return False
+    if latest_owned_activity_trace(remounted_items, 0, remounted_scope) != ["latest work"]:
+        return False
+    boundary_after = hash_text("\n".join(remounted_values[-80:])[-16000:])
+    if boundary_before != boundary_after:
+        return False
+    return response_local_copy_evidence(remounted_items, 0, remounted_scope)
 
 def conversation_ref_contract_self_test():
     class FakeHyperlink:

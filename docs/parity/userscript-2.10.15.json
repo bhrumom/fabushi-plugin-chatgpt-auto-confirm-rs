@@ -8,31 +8,31 @@
   "target": {
     "repository": "bhrumom/fabushi-plugin-chatgpt-auto-confirm-rs",
     "spec": "docs/specs/desktop-chat-userscript-parity-rust-cli.md",
-    "lastVerifiedExactHead": "31107dbfeb3f26a36a619796dabbbd22a1d66695",
-    "lastVerifiedCiRun": 37013206361,
+    "lastVerifiedExactHead": "e640695525b129a87e26cdcf4e8a9dcae7405f53",
+    "lastVerifiedCiRun": 37041949091,
     "lastVerifiedArtifact": {
-      "id": 11228483897,
+      "id": 11242309531,
       "name": "fabushi-chatgpt-auto-confirm-linux-x86_64",
-      "sha256": "7b6ea6bb19d856dd49fd2964f1237cf7edbc3d0121833703f11afa321f83d21b"
+      "sha256": "9ccc257313edc82f6b45ddda4d086f800c552571ed35cabae7b14169c22fcfe5"
     },
     "lastVerifiedArtifacts": [
       {
-        "id": 11228483897,
+        "id": 11242309531,
         "name": "fabushi-chatgpt-auto-confirm-linux-x86_64",
-        "headSha": "31107dbfeb3f26a36a619796dabbbd22a1d66695",
-        "sha256": "7b6ea6bb19d856dd49fd2964f1237cf7edbc3d0121833703f11afa321f83d21b"
+        "headSha": "e640695525b129a87e26cdcf4e8a9dcae7405f53",
+        "sha256": "9ccc257313edc82f6b45ddda4d086f800c552571ed35cabae7b14169c22fcfe5"
       },
       {
-        "id": 11228934358,
+        "id": 11242834095,
         "name": "fabushi-chatgpt-auto-confirm-macos-aarch64-apple-darwin",
-        "headSha": "31107dbfeb3f26a36a619796dabbbd22a1d66695",
-        "sha256": "c155e3248ee61fae804d92c6c4fb8e09ee2c9600c83abb6fb2144149cd9f6c05"
+        "headSha": "e640695525b129a87e26cdcf4e8a9dcae7405f53",
+        "sha256": "2fafb31e801e00d925339bf873ae3282cdb8158e51bdc7b343fa29a12c6260a9"
       },
       {
-        "id": 11228739458,
+        "id": 11244060724,
         "name": "fabushi-chatgpt-auto-confirm-macos-x86_64-apple-darwin",
-        "headSha": "31107dbfeb3f26a36a619796dabbbd22a1d66695",
-        "sha256": "09f18d1436bd423d0b2ea06d06307111767a66cb022b1eb24cf7dede94c15f3f"
+        "headSha": "e640695525b129a87e26cdcf4e8a9dcae7405f53",
+        "sha256": "6b991119e012598d133a2eae0a77ea1aeee9376779ae516f6751526b0181ace2"
       }
     ]
   },
@@ -54,12 +54,13 @@
         "crates/domain/src/lib.rs",
         "crates/application/src/lib.rs",
         "crates/adapters/chatgpt-desktop-atspi/src/lib.rs",
-        "crates/adapters/chatgpt-desktop-atspi/src/bridge.py"
+        "crates/adapters/chatgpt-desktop-atspi/src/bridge.py",
+        "Linux AT-SPI latest_owned_activity_trace groups tertiary assistant activity by owned response scope and, once current prose exists, accepts activity only from that same current response scope; the executable response-boundary contract keeps a stale virtualized sibling mounted, remounts the current response, and proves stale activity/Copy cannot contaminate current progress/terminal evidence while the response boundary remains stable for unchanged prose"
       ],
       "missing": [
         "live positive assistant activity/remount acceptance",
-        "response-boundary hardening on virtualized/live conversations",
-        "real desktop acceptance"
+        "live virtualized/remount assistant response-boundary acceptance",
+        "real desktop Gate E acceptance"
       ]
     },
     {
@@ -261,7 +262,7 @@
       "missing": [
         "exact-head macOS compile/test evidence for native attachment path",
         "real authorization, attachment and terminal acceptance",
-        "current-exact packaged Linux composer/Send acceptance after restoring a real ChatGPT desktop application on htch-runtime"
+        "current-exact packaged Linux composer/Send acceptance after the unrelated user draft no longer occupies the composer, or after a separately proven non-destructive independent surface mechanism exists"
       ]
     },
     {
