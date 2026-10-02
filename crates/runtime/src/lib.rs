@@ -1132,10 +1132,12 @@ impl DesktopRuntime {
                     .iter()
                     .map(|value| format!("previous Work result: {value}"))
                     .collect(),
-                remaining: vec![state
-                    .current_next
-                    .clone()
-                    .unwrap_or_else(|| state.goal.clone())],
+                remaining: vec![
+                    state
+                        .current_next
+                        .clone()
+                        .unwrap_or_else(|| state.goal.clone()),
+                ],
                 blockers: Vec::new(),
             });
 
