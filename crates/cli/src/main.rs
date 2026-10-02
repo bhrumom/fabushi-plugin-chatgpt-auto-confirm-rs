@@ -62,6 +62,12 @@ enum Commands {
         #[arg(long)]
         task_id: String,
     },
+    EditGoal {
+        #[arg(long)]
+        task_id: String,
+        #[arg(long)]
+        goal: String,
+    },
     LegacyBrowser {
         #[arg(long)]
         browser_binary: Option<PathBuf>,
@@ -189,6 +195,11 @@ async fn main() -> Result<()> {
         Commands::Cancel { task_id } => {
             let runtime = DesktopRuntime::default();
             let state = runtime.cancel_continuous_task(&TaskId::new(task_id))?;
+            println!("{}", serde_json::to_string_pretty(&state)?);
+        }
+        Commands::EditGoal { task_id, goal } => {
+            let runtime = DesktopRuntime::default();
+            let state = runtime.edit_continuous_task_goal(&TaskId::new(task_id), &goal)?;
             println!("{}", serde_json::to_string_pretty(&state)?);
         }
         Commands::LegacyBrowser {

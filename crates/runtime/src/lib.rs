@@ -2256,6 +2256,39 @@ impl DesktopRuntime {
         )
     }
 
+    pub fn edit_continuous_task_goal(
+        &self,
+        task_id: &TaskId,
+        goal: &str,
+    ) -> Result<ContinuousTaskState> {
+        let goal = goal.trim();
+        if goal.is_empty() {
+            bail!("continuous task goal cannot be empty");
+        }
+        let state = self
+            .load_continuous_task_state(task_id)?
+            .ok_or_else(|| anyhow::anyhow!("continuous task not found"))?;
+        if state.completed {
+            bail!("completed continuous task goal cannot be edited");
+        }
+        if state.lifecycle == ContinuousTaskLifecycle::Cancelled {
+            bail!("cancelled continuous task goal cannot be edited");
+        }
+        let previous_revision = state.goal_revision;
+        let state = state.edit_goal(goal.to_owned());
+        let control_run = RunId::new(format!("control-{}", dispatch_marker()?));
+        self.persist_continuous_task_state(
+            &state,
+            &control_run,
+            "continuous_task_goal_edited",
+            json!({
+                "previousGoalRevision": previous_revision.get(),
+                "goalRevision": state.goal_revision.get(),
+            }),
+        )?;
+        Ok(state)
+    }
+
     pub async fn run_continuous(
         &self,
         task_id: TaskId,
@@ -4158,6 +4191,47 @@ mod actor_tests {
             StartupReconcileOutcome::DeferredToRunWorker
         );
         assert_eq!(store.pending_effects(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn durable_edit_goal_updates_future_goal_revision() {
+        let path = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-edit-goal-{}-{}.sqlite3",
+            std::process::id(),
+            dispatch_marker().unwrap()
+        ));
+        let runtime = DesktopRuntime::new(LifecycleTestProcess, FakeSurface::default())
+            .with_state_db_path(path.clone());
+        let task_id = TaskId::new("task-edit-goal");
+        let initial = ContinuousTaskState::new(
+            task_id.clone(),
+            "old goal".into(),
+            ReasoningPreset::ExtraHigh,
+        );
+        runtime
+            .persist_continuous_task_state(
+                &initial,
+                &RunId::new("run-edit-goal"),
+                "continuous_task_created",
+                json!({}),
+            )
+            .unwrap();
+
+        let edited = runtime
+            .edit_continuous_task_goal(&task_id, "new goal")
+            .unwrap();
+        assert_eq!(edited.goal, "new goal");
+        assert_eq!(edited.goal_revision, GoalRevision::new(1));
+        let loaded = runtime
+            .load_continuous_task_state(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.goal, "new goal");
+        assert_eq!(loaded.goal_revision, GoalRevision::new(1));
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
     }
 
     #[tokio::test]
