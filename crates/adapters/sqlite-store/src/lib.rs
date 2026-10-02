@@ -929,9 +929,11 @@ mod tests {
             .execute(
                 "INSERT INTO run_events(
                      task_id, run_id, revision, event_kind, event_payload_json, created_at_unix_ms
-                 ) VALUES(?1, 'run-resume', 1, 'continuous_phase_started',
-                     '{"phase":"work","round":2,"goalRevision":0}', 1)",
-                [task_id.as_str()],
+                 ) VALUES(?1, 'run-resume', 1, 'continuous_phase_started', ?2, 1)",
+                params![
+                    task_id.as_str(),
+                    r#"{"phase":"work","round":2,"goalRevision":0}"#
+                ],
             )
             .unwrap();
         store
