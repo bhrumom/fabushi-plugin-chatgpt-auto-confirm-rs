@@ -8,13 +8,33 @@
   "target": {
     "repository": "bhrumom/fabushi-plugin-chatgpt-auto-confirm-rs",
     "spec": "docs/specs/desktop-chat-userscript-parity-rust-cli.md",
-    "lastVerifiedExactHead": "e914a11804c5ad623df6019f2f08365b0e543dd9",
-    "lastVerifiedCiRun": 37007291813,
+    "lastVerifiedExactHead": "31107dbfeb3f26a36a619796dabbbd22a1d66695",
+    "lastVerifiedCiRun": 37013206361,
     "lastVerifiedArtifact": {
-      "id": 11226720838,
+      "id": 11228483897,
       "name": "fabushi-chatgpt-auto-confirm-linux-x86_64",
-      "sha256": "0aba210f346752b8d9e3224bae409cda2cd0068e67fe0c37a722c111adff7337"
-    }
+      "sha256": "7b6ea6bb19d856dd49fd2964f1237cf7edbc3d0121833703f11afa321f83d21b"
+    },
+    "lastVerifiedArtifacts": [
+      {
+        "id": 11228483897,
+        "name": "fabushi-chatgpt-auto-confirm-linux-x86_64",
+        "headSha": "31107dbfeb3f26a36a619796dabbbd22a1d66695",
+        "sha256": "7b6ea6bb19d856dd49fd2964f1237cf7edbc3d0121833703f11afa321f83d21b"
+      },
+      {
+        "id": 11228934358,
+        "name": "fabushi-chatgpt-auto-confirm-macos-aarch64-apple-darwin",
+        "headSha": "31107dbfeb3f26a36a619796dabbbd22a1d66695",
+        "sha256": "c155e3248ee61fae804d92c6c4fb8e09ee2c9600c83abb6fb2144149cd9f6c05"
+      },
+      {
+        "id": 11228739458,
+        "name": "fabushi-chatgpt-auto-confirm-macos-x86_64-apple-darwin",
+        "headSha": "31107dbfeb3f26a36a619796dabbbd22a1d66695",
+        "sha256": "09f18d1436bd423d0b2ea06d06307111767a66cb022b1eb24cf7dede94c15f3f"
+      }
+    ]
   },
   "rules": {
     "implementedRequires": [
