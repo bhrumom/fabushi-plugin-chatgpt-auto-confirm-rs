@@ -188,7 +188,8 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "true");
         assert!(BRIDGE.contains("pyatspi.KEY_STRING"));
         assert!(BRIDGE.contains("pyatspi.STATE_EDITABLE"));
-        assert!(BRIDGE.contains("if not action(entry):"));
+        assert!(BRIDGE.contains("activated = action(entry)"));
+        assert!(BRIDGE.contains("if not activated and not focused:"));
         assert!(BRIDGE.contains("Chromium may retain AT-SPI focus on the document"));
         assert!(BRIDGE.contains("ChatGPT composer did not expose the exact prepared prompt"));
     }
