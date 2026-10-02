@@ -699,9 +699,9 @@ The ledger must be updated as implementation proceeds. `partial` means useful Ru
 |---|---|---|
 | Task/run/round/goal state | domain + sqlite-store | partial |
 | One-shot task mode | application | partial browser-era implementation only |
-| Continuous Work -> Review loop | application | partial: deterministic phase/round transition exists; durable runtime wiring pending |
+| Continuous Work -> Review loop | application/runtime + sqlite-store | partial: production CLI now exposes a durable `continuous --task-id` path; Work result is persisted before entering an independent Review conversation, strict Review stays bound to current taskId/round, `status=next` advances the durable round, and orchestration state survives later UI-effect journaling under a separate `orchestration` subtree. RecoveryEnvelope handoff, fair multi-task scheduling, task lifecycle controls, and the crash window where a remote phase may have finished before its result transition committed remain open. |
 | Strict MAHAYANA_TASK_REPORT_V1 parser | application/domain | partial: source-2.10.15-compatible fence/tolerant recovery, exact current taskId/round selection, strict valid-JSON type/status validation and status/summary/next rules have deterministic tests; compatibility runner settlement wiring now accepts an explicit Review identity; durable continuous Work -> Review orchestration still pending |
-| Userscript durable workbench state | sqlite-store | partial: WAL schema and atomic state/event/outbox transaction exist with rollback/idempotency tests; application/runtime wiring and full task CRUD pending |
+| Userscript durable workbench state | sqlite-store + runtime | partial: WAL schema and atomic state/event/outbox transaction exist with rollback/idempotency tests; state-only orchestration transitions now persist without manufacturing a pending UI effect, and UI-effect journaling preserves the durable `orchestration` subtree instead of overwriting task state. Full task CRUD/control, fair supervision, and remaining semantic restart reconciliation are still pending. |
 | Tab/workspace ownership | DesktopSessionActor + UI lease | partial: production runtime serializes mutations through one DesktopSessionActor and now owns a SQLite fencing lease with periodic heartbeat, pre-mutation verification and release-on-actor-stop; deterministic competing-owner coverage exists, while formal htch-runtime cross-process acceptance remains pending |
 | Multi-task fair supervision | runtime Supervisor/RunWorker | pending |
 | Prompt marker and ownership boundary | domain + ChatSurfacePort | partial: opaque dispatch/conversation/user/assistant boundary types exist; desktop projection and durable confirmation pending |
@@ -729,7 +729,7 @@ The ledger must be updated as implementation proceeds. `partial` means useful Ru
 | Conversation-length handoff / 64k carry | application/domain | pending |
 | Popup dismissal | desktop adapter + safety policy | pending |
 | Pause/resume/cancel/delete/edit goal | application + store + cli | pending |
-| Hot update/restart continuity | runtime + durable store/outbox | partial: startup reads pending outbox effects before a new mutation run, semantically settles a previously executed Send only from exact DispatchId + new strong user-turn evidence, and blocks ambiguous/unsupported pending effects instead of replaying them. Stable durable task identity, semantic reconciliation for non-Send effects, resumable supervision and real crash/restart acceptance remain pending |
+| Hot update/restart continuity | runtime + durable store/outbox | partial: startup reads pending outbox effects before a new mutation run, semantically settles previously executed Send/reasoning/approval only from their semantic postconditions, and blocks ambiguous/unsupported pending effects instead of replaying them. The production `continuous --task-id` path now reloads a stable durable orchestration identity and phase/round state across CLI restarts. Semantic recovery for the post-terminal/pre-state-commit crash window, attachment/new-conversation/reload effects, resumable supervision, and real crash/restart acceptance remain pending. |
 | Memory diagnostic-only policy | runtime/observability | pending |
 | Web URL identity | redesigned as ConversationRef/fingerprint | partial: opaque ConversationRef/fingerprint and semantic boundaries replace URL types in domain/application; production desktop binding pending |
 | localStorage/IndexedDB | redesigned as SQLite + attachment store | partial: SQLite WAL schema covers required durable tables and atomic effect outbox; attachment-store/runtime migration pending |
@@ -938,7 +938,7 @@ That implementation is **not** desktop ChatGPT userscript parity:
 - continuous Work -> Review parity is incomplete;
 - source 2.10.13-2.10.15 authorization/reasoning races are partially ported: durable approval identity/latch and destructive-only 8s safety-gate wiring now exist with deterministic coverage, but exact-artifact real desktop authorization acceptance and the remaining migration ledger are still open;
 - desktop attachment/model/recovery behavior is not proven;
-- no exact-HEAD real desktop acceptance artifact has passed on `htch-runtime`.
+- exact-HEAD GitHub Actions run 36712180584 produced packaged artifact 11095270394 (`fabushi-chatgpt-auto-confirm-linux-x86_64`, SHA-256 `f0dc64b86ad08d8cf61633dfdb851ded0ebb69b6f487897953cd6295603ad98d`) for head `95144a5e58af024750c90f79693957a5ce001759`; that artifact did not complete the formal real desktop acceptance run on `htch-runtime`. Every later candidate HEAD must regenerate its own artifact before formal acceptance, so Gates E/F remain unpassed.
 
 Current PR #2 migration progress on 2026-09-30:
 

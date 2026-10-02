@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use fabushi_chatgpt_runtime::{
-    ChatGptCdp, DesktopRuntime, Phase, ReasoningPreset, Round, RunOptions, find_chromium_binary,
-    launch_chromium, run_prompt,
+    ChatGptCdp, DesktopRuntime, Phase, ReasoningPreset, Round, RunOptions, TaskId,
+    find_chromium_binary, launch_chromium, run_prompt,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -23,6 +23,20 @@ enum Commands {
     Send {
         #[arg(long)]
         prompt: String,
+        #[arg(long, default_value_t = true)]
+        auto_confirm: bool,
+        #[arg(long, default_value_t = 3600)]
+        timeout_seconds: u64,
+        #[arg(long, default_value_t = 900)]
+        poll_ms: u64,
+        #[arg(long, default_value_t = 3)]
+        reasoning: u8,
+    },
+    Continuous {
+        #[arg(long)]
+        task_id: String,
+        #[arg(long)]
+        goal: String,
         #[arg(long, default_value_t = true)]
         auto_confirm: bool,
         #[arg(long, default_value_t = 3600)]
@@ -109,6 +123,34 @@ async fn main() -> Result<()> {
                 .run_prompt(&prompt, requested_reasoning, options)
                 .await
                 .context("ChatGPT desktop automation run failed")?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Commands::Continuous {
+            task_id,
+            goal,
+            auto_confirm,
+            timeout_seconds,
+            poll_ms,
+            reasoning,
+        } => {
+            let runtime = DesktopRuntime::default();
+            let options = RunOptions {
+                timeout: Duration::from_secs(timeout_seconds),
+                poll_interval: Duration::from_millis(poll_ms),
+                auto_confirm,
+                ..RunOptions::default()
+            };
+            let requested_reasoning = ReasoningPreset::from_index(reasoning)
+                .ok_or_else(|| anyhow::anyhow!("reasoning must be one of 0,1,2,3,4"))?;
+            let report = runtime
+                .run_continuous(
+                    TaskId::new(task_id),
+                    &goal,
+                    requested_reasoning,
+                    options,
+                )
+                .await
+                .context("ChatGPT desktop continuous automation run failed")?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Commands::LegacyBrowser {

@@ -1,13 +1,15 @@
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use fabushi_chatgpt_application::{
-    ChatProcessHealth, ChatProcessPort, ChatSurfacePort, Clock, ReasoningDecision,
-    ReasoningGateState, RunPrompt,
+    ChatProcessHealth, ChatProcessPort, ChatSurfacePort, Clock, ContinuousTaskState,
+    ReasoningDecision, ReasoningGateState, ReviewRunIdentity, RunPrompt,
+    parse_strict_review_report,
 };
 use fabushi_chatgpt_desktop_atspi::ChatGptDesktopAtspi;
 use fabushi_chatgpt_desktop_process::ChatGptDesktopProcess;
 use fabushi_chatgpt_sqlite_store::{
-    PreparedApproval, PreparedDispatch, SqliteStore, TransitionRecord, UiSessionLease,
+    PreparedApproval, PreparedDispatch, SqliteStore, StateTransitionRecord, TransitionRecord,
+    UiSessionLease,
 };
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -20,10 +22,10 @@ pub use fabushi_chatgpt_application::RunOptions;
 pub use fabushi_chatgpt_cdp::ChatGptCdp;
 use fabushi_chatgpt_domain::{
     AuthorizationSettlementState, ConversationFingerprint, DispatchId, OwnershipConfidence, RunId,
-    TaskId, UserTurnBoundary,
+    UserTurnBoundary,
 };
 pub use fabushi_chatgpt_domain::{
-    ChatSurfaceSnapshot, Phase, ReasoningPreset, Round, RunReport, RunState,
+    ChatSurfaceSnapshot, Phase, ReasoningPreset, Round, RunReport, RunState, TaskId,
 };
 pub use fabushi_chatgpt_linux_browser::{BrowserLaunch, find_chromium_binary, launch_chromium};
 use serde_json::json;
@@ -305,13 +307,14 @@ impl DurableRunJournal {
         hasher.update(effect_kind.as_bytes());
         hasher.update(effect_payload_json.as_bytes());
         let idempotency_key = format!("run-effect:{:x}", hasher.finalize());
-        let materialized_state_json = json!({
-            "taskId": self.task_id.as_str(),
-            "runId": self.run_id.as_str(),
-            "revision": next_revision,
-            "lastEffect": effect_kind,
-        })
-        .to_string();
+        let existing_state = self.store.task_state_json(&self.task_id)?;
+        let materialized_state_json = merge_task_runtime_state(
+            existing_state.as_deref(),
+            &self.task_id,
+            &self.run_id,
+            next_revision,
+            effect_kind,
+        )?;
         self.store.record_transition(
             &TransitionRecord {
                 task_id: self.task_id.clone(),
@@ -1009,11 +1012,196 @@ impl DesktopRuntime {
         Ok(())
     }
 
+    fn load_continuous_task_state(
+        &self,
+        task_id: &TaskId,
+    ) -> Result<Option<ContinuousTaskState>> {
+        let store = SqliteStore::open(&self.state_db_path)?;
+        let Some(raw) = store.task_state_json(task_id)? else {
+            return Ok(None);
+        };
+        let root: serde_json::Value =
+            serde_json::from_str(&raw).context("parse durable task state JSON")?;
+        let Some(orchestration) = root.get("orchestration") else {
+            return Ok(None);
+        };
+        serde_json::from_value(orchestration.clone())
+            .map(Some)
+            .context("parse durable continuous orchestration state")
+    }
+
+    fn persist_continuous_task_state(
+        &self,
+        state: &ContinuousTaskState,
+        run_id: &RunId,
+        event_kind: &str,
+        event_payload: serde_json::Value,
+    ) -> Result<()> {
+        let mut store = SqliteStore::open(&self.state_db_path)?;
+        let expected_revision = store.task_revision(&state.task_id)?.unwrap_or(0);
+        let existing_state = store.task_state_json(&state.task_id)?;
+        let materialized_state_json =
+            merge_task_orchestration_state(existing_state.as_deref(), state)?;
+        store.record_state_transition(
+            &StateTransitionRecord {
+                task_id: state.task_id.clone(),
+                run_id: run_id.clone(),
+                expected_revision,
+                next_revision: expected_revision + 1,
+                event_kind: event_kind.to_owned(),
+                event_payload_json: event_payload.to_string(),
+                materialized_state_json,
+            },
+            unix_time_ms()?,
+        )
+    }
+
+    pub async fn run_continuous(
+        &self,
+        task_id: TaskId,
+        goal: &str,
+        requested_reasoning: ReasoningPreset,
+        options: RunOptions,
+    ) -> Result<RunReport> {
+        let mut state = match self.load_continuous_task_state(&task_id)? {
+            Some(existing) => {
+                if existing.goal != goal {
+                    bail!(
+                        "durable task goal differs from the requested goal; edit-goal persistence must be used instead of silently replacing it"
+                    );
+                }
+                if existing.reasoning_preset != requested_reasoning {
+                    bail!(
+                        "durable task reasoning preset differs from the requested preset; resume must keep the persisted preset"
+                    );
+                }
+                existing
+            }
+            None => ContinuousTaskState::new(
+                task_id.clone(),
+                goal.to_owned(),
+                requested_reasoning,
+            ),
+        };
+
+        if state.completed {
+            return Ok(RunReport {
+                state: RunState::Complete,
+                conversation_ref: None,
+                assistant_text: state.previous_work_result.clone().unwrap_or_default(),
+                approvals_clicked: 0,
+                recoveries: 0,
+                rate_limit_pauses: 0,
+                dispatch_retries: 0,
+                message: "continuous task is already complete in durable state".into(),
+            });
+        }
+
+        loop {
+            let phase = state.phase;
+            let round = state.round;
+            let run_marker = dispatch_marker()?;
+            let run_id = RunId::new(format!("run-{run_marker}"));
+            self.persist_continuous_task_state(
+                &state,
+                &run_id,
+                "continuous_phase_started",
+                json!({
+                    "phase": phase,
+                    "round": round,
+                    "goalRevision": state.goal_revision,
+                }),
+            )?;
+
+            let prompt = match phase {
+                Phase::Work => state.work_instruction(),
+                Phase::Review => state.review_instruction()?,
+            };
+            let mut phase_options = options.clone();
+            phase_options.run_phase = Some(phase);
+            phase_options.run_round = Some(round);
+            phase_options.review_identity = (phase == Phase::Review).then(|| ReviewRunIdentity {
+                task_id: task_id.clone(),
+                round,
+            });
+
+            let report = self
+                .run_prompt_with_identity(
+                    &prompt,
+                    state.reasoning_preset,
+                    phase_options,
+                    task_id.clone(),
+                    run_id.clone(),
+                    true,
+                )
+                .await?;
+            if report.state != RunState::Complete {
+                return Ok(report);
+            }
+
+            match phase {
+                Phase::Work => {
+                    state = state.after_work_result(report.assistant_text.clone());
+                    self.persist_continuous_task_state(
+                        &state,
+                        &run_id,
+                        "continuous_work_result_saved",
+                        json!({
+                            "round": round,
+                            "resultChars": report.assistant_text.chars().count(),
+                        }),
+                    )?;
+                }
+                Phase::Review => {
+                    let review =
+                        parse_strict_review_report(&report.assistant_text, &task_id, round)?;
+                    let status = review.status;
+                    state = state.apply_review(review)?;
+                    self.persist_continuous_task_state(
+                        &state,
+                        &run_id,
+                        "continuous_review_applied",
+                        json!({
+                            "round": round,
+                            "status": status,
+                            "nextRound": state.round,
+                            "completed": state.completed,
+                        }),
+                    )?;
+                    if state.completed {
+                        return Ok(report);
+                    }
+                }
+            }
+        }
+    }
+
     pub async fn run_prompt(
         &self,
         prompt: &str,
         requested_reasoning: ReasoningPreset,
         options: RunOptions,
+    ) -> Result<RunReport> {
+        let identity_marker = dispatch_marker()?;
+        self.run_prompt_with_identity(
+            prompt,
+            requested_reasoning,
+            options,
+            TaskId::new(format!("task-{identity_marker}")),
+            RunId::new(format!("run-{identity_marker}")),
+            false,
+        )
+        .await
+    }
+
+    async fn run_prompt_with_identity(
+        &self,
+        prompt: &str,
+        requested_reasoning: ReasoningPreset,
+        options: RunOptions,
+        task_id: TaskId,
+        run_id: RunId,
+        start_fresh: bool,
     ) -> Result<RunReport> {
         self.ensure_ready().await?;
         self.reconcile_unsettled_effects_before_run().await?;
@@ -1027,8 +1215,6 @@ impl DesktopRuntime {
 
         let marker = dispatch_marker()?;
         let dispatch_id = DispatchId::new(marker.clone());
-        let task_id = TaskId::new(format!("task-{marker}"));
-        let run_id = RunId::new(format!("run-{marker}"));
         let worker = RunWorker::new(
             self.desktop_session().await?.clone(),
             &self.state_db_path,
@@ -1038,6 +1224,9 @@ impl DesktopRuntime {
             phase,
             round,
         )?;
+        if start_fresh {
+            worker.surface.start_fresh_conversation().await?;
+        }
         self.ensure_reasoning_preset(&worker.surface, requested_reasoning)
             .await?;
 
@@ -1046,6 +1235,50 @@ impl DesktopRuntime {
         options.expected_dispatch_id = Some(dispatch_id);
         worker.execute(&prepared, options).await
     }
+}
+
+fn merge_task_root(existing: Option<&str>) -> Result<serde_json::Map<String, serde_json::Value>> {
+    let value = match existing {
+        Some(raw) => serde_json::from_str::<serde_json::Value>(raw)
+            .context("parse existing durable task state")?,
+        None => json!({}),
+    };
+    value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("durable task state must be a JSON object"))
+}
+
+fn merge_task_runtime_state(
+    existing: Option<&str>,
+    task_id: &TaskId,
+    run_id: &RunId,
+    revision: i64,
+    effect_kind: &str,
+) -> Result<String> {
+    let mut root = merge_task_root(existing)?;
+    root.insert(
+        "runtime".into(),
+        json!({
+            "taskId": task_id.as_str(),
+            "runId": run_id.as_str(),
+            "revision": revision,
+            "lastEffect": effect_kind,
+        }),
+    );
+    Ok(serde_json::Value::Object(root).to_string())
+}
+
+fn merge_task_orchestration_state(
+    existing: Option<&str>,
+    state: &ContinuousTaskState,
+) -> Result<String> {
+    let mut root = merge_task_root(existing)?;
+    root.insert(
+        "orchestration".into(),
+        serde_json::to_value(state).context("serialize continuous task state")?,
+    );
+    Ok(serde_json::Value::Object(root).to_string())
 }
 
 fn reconcile_pending_effect(
@@ -1938,6 +2171,31 @@ mod actor_tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn runtime_effect_state_preserves_continuous_orchestration() {
+        let state = ContinuousTaskState::new(
+            TaskId::new("task-preserve"),
+            "goal".into(),
+            ReasoningPreset::ExtraHigh,
+        );
+        let durable = merge_task_orchestration_state(None, &state).unwrap();
+        let after_effect = merge_task_runtime_state(
+            Some(&durable),
+            &state.task_id,
+            &RunId::new("run-preserve"),
+            2,
+            "send_prompt",
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&after_effect).unwrap();
+        assert_eq!(
+            value["orchestration"]["task_id"].as_str(),
+            Some("task-preserve")
+        );
+        assert_eq!(value["orchestration"]["phase"].as_str(), Some("work"));
+        assert_eq!(value["runtime"]["lastEffect"].as_str(), Some("send_prompt"));
     }
 
     #[tokio::test]

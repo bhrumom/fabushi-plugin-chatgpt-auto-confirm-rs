@@ -90,11 +90,13 @@
       "destination": "application",
       "status": "partial",
       "evidence": [
-        "crates/application/src/lib.rs"
+        "crates/application/src/lib.rs",
+        "crates/runtime/src/lib.rs",
+        "crates/cli/src/main.rs"
       ],
       "missing": [
-        "durable continuous Work -> Review orchestration",
-        "continuous production orchestration",
+        "RecoveryEnvelope handoff wiring",
+        "crash-window semantic resume",
         "acceptance"
       ]
     },
@@ -104,13 +106,17 @@
       "destination": "application/runtime",
       "status": "partial",
       "evidence": [
-        "crates/application/src/lib.rs"
+        "crates/application/src/lib.rs",
+        "crates/adapters/sqlite-store/src/lib.rs",
+        "crates/runtime/src/lib.rs",
+        "crates/cli/src/main.rs"
       ],
       "missing": [
-        "durable store",
-        "runtime orchestration",
-        "production wiring",
-        "acceptance"
+        "RecoveryEnvelope handoff wiring",
+        "semantic resume when a phase finished remotely but its durable result transition did not commit",
+        "pause/resume/cancel lifecycle",
+        "fair multi-task supervision",
+        "exact-artifact real acceptance"
       ]
     },
     {
@@ -165,8 +171,8 @@
         "crates/runtime/src/lib.rs"
       ],
       "missing": [
-        "semantic startup reconciliation for approval/attachment/new-conversation/reload destructive effects",
-        "stable durable task/run identity across CLI restart and full task CRUD/control",
+        "semantic startup reconciliation for attachment/new-conversation/reload destructive effects",
+        "full task CRUD/control",
         "resumable supervision after fail-closed ambiguous pending effects",
         "real crash/restart acceptance"
       ]
@@ -244,12 +250,15 @@
       "source": "full parity",
       "destination": "htch-runtime exact-head Actions artifact",
       "status": "pending",
-      "evidence": [],
+      "evidence": [
+        ".github/workflows/ci.yml packages fabushi-chatgpt-auto-confirm-linux-x86_64 on every exact candidate HEAD",
+        "prior exact-head baseline run 36712180584 / artifact 11095270394 at 95144a5e58af024750c90f79693957a5ce001759",
+        "prior artifact sha256:f0dc64b86ad08d8cf61633dfdb851ded0ebb69b6f487897953cd6295603ad98d"
+      ],
       "missing": [
-        "packaged artifact",
-        "real canary",
-        "reasoning",
-        "terminal",
+        "current exact-head real canary on htch-runtime",
+        "reasoning journey",
+        "terminal journey",
         "approval journey"
       ]
     }

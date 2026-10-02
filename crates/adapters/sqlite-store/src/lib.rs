@@ -22,6 +22,17 @@ pub struct TransitionRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateTransitionRecord {
+    pub task_id: TaskId,
+    pub run_id: RunId,
+    pub expected_revision: i64,
+    pub next_revision: i64,
+    pub event_kind: String,
+    pub event_payload_json: String,
+    pub materialized_state_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedDispatch {
     pub dispatch_id: DispatchId,
     pub prepared_intent_json: String,
@@ -377,6 +388,74 @@ impl SqliteStore {
         Ok(())
     }
 
+    pub fn record_state_transition(
+        &mut self,
+        record: &StateTransitionRecord,
+        now_unix_ms: i64,
+    ) -> Result<()> {
+        validate_json(&record.event_payload_json, "event payload")?;
+        validate_json(&record.materialized_state_json, "materialized state")?;
+        if record.next_revision != record.expected_revision + 1 {
+            bail!("next revision must be expected revision + 1");
+        }
+
+        let transaction = self.connection.transaction()?;
+        ensure_task_revision(
+            &transaction,
+            record.task_id.as_str(),
+            record.expected_revision,
+            now_unix_ms,
+        )?;
+
+        let changed = transaction.execute(
+            "UPDATE tasks
+             SET revision=?2, state_json=?3, updated_at_unix_ms=?4
+             WHERE task_id=?1 AND revision=?5",
+            params![
+                record.task_id.as_str(),
+                record.next_revision,
+                record.materialized_state_json,
+                now_unix_ms,
+                record.expected_revision
+            ],
+        )?;
+        if changed != 1 {
+            bail!("task revision conflict");
+        }
+
+        transaction.execute(
+            "INSERT INTO runs(run_id, task_id, revision, state_json, updated_at_unix_ms)
+             VALUES(?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(run_id) DO UPDATE SET
+                 revision=excluded.revision,
+                 state_json=excluded.state_json,
+                 updated_at_unix_ms=excluded.updated_at_unix_ms",
+            params![
+                record.run_id.as_str(),
+                record.task_id.as_str(),
+                record.next_revision,
+                record.materialized_state_json,
+                now_unix_ms
+            ],
+        )?;
+
+        transaction.execute(
+            "INSERT INTO run_events(task_id, run_id, revision, event_kind, event_payload_json, created_at_unix_ms)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                record.task_id.as_str(),
+                record.run_id.as_str(),
+                record.next_revision,
+                record.event_kind,
+                record.event_payload_json,
+                now_unix_ms
+            ],
+        )?;
+
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn pending_effects(&self, limit: usize) -> Result<Vec<PendingEffect>> {
         let mut statement = self.connection.prepare(
             "SELECT id, task_id, run_id, effect_kind, effect_payload_json, idempotency_key, attempt_count
@@ -572,6 +651,17 @@ impl SqliteStore {
             .optional()
             .map(Option::flatten)
             .context("read dispatch attempt settlement")
+    }
+
+    pub fn task_state_json(&self, task_id: &TaskId) -> Result<Option<String>> {
+        self.connection
+            .query_row(
+                "SELECT state_json FROM tasks WHERE task_id=?1",
+                [task_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("read task state")
     }
 
     pub fn task_revision(&self, task_id: &TaskId) -> Result<Option<i64>> {
@@ -777,6 +867,36 @@ mod tests {
         let effects = store.pending_effects(10).unwrap();
         assert_eq!(effects.len(), 1);
         assert_eq!(effects[0].idempotency_key, "effect-1");
+    }
+
+    #[test]
+    fn state_only_transition_is_atomic_without_creating_an_effect() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        store
+            .record_state_transition(
+                &StateTransitionRecord {
+                    task_id: TaskId::new("task-state"),
+                    run_id: RunId::new("run-state"),
+                    expected_revision: 0,
+                    next_revision: 1,
+                    event_kind: "continuous_phase_started".into(),
+                    event_payload_json: r#"{"phase":"work","round":1}"#.into(),
+                    materialized_state_json:
+                        r#"{"orchestration":{"phase":"work","round":1}}"#.into(),
+                },
+                100,
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .task_state_json(&TaskId::new("task-state"))
+                .unwrap()
+                .as_deref(),
+            Some(r#"{"orchestration":{"phase":"work","round":1}}"#)
+        );
+        assert_eq!(store.count_rows("run_events").unwrap(), 1);
+        assert!(store.pending_effects(10).unwrap().is_empty());
     }
 
     #[test]
