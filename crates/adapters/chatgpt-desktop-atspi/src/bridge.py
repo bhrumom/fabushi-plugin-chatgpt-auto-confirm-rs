@@ -28,8 +28,21 @@ REMOVE_ATTACHMENT_WORDS = ("remove attachment", "remove file", "删除附件", "
 FILE_CHOOSER_WORDS = ("open", "choose", "select", "upload", "file", "打开", "选择", "上传", "文件")
 RETRY_WORDS = ("retry", "重试")
 GOT_IT_WORDS = ("got it", "明白了", "知道了")
+HISTORY_ACCESS_ACK_WORDS = (
+    "got it", "understood", "i understand", "ok", "okay",
+    "明白", "明白了", "知道了", "我知道了", "好的", "好", "确定", "确认", "收到",
+)
 RATE_LIMIT_TEXT = ("too many requests", "request too frequent", "请求过于频繁")
 RATE_LIMIT_NOTICE_ROLES = ("alert", "notification", "status", "dialog", "alert dialog", "alertdialog")
+HISTORY_ACCESS_CONTAINER_ROLES = RATE_LIMIT_NOTICE_ROLES + ("panel", "section")
+HISTORY_ACCESS_WORDS = (
+    "conversation history", "chat history", "previous conversation", "previous conversations",
+    "对话记录", "聊天记录", "历史记录", "历史会话",
+)
+HISTORY_ACCESS_RESTRICTION_WORDS = (
+    "access", "view", "load", "restrict", "restricted", "restriction", "limit", "limited", "limitation",
+    "访问", "查看", "读取", "限制", "无法", "不能",
+)
 UNABLE_LOAD_TEXT = ("unable to load", "无法加载此 chatgpt 对话", "无法加载此对话")
 INTERRUPTED_TEXT = ("connection interrupted", "连接中断")
 LENGTH_LIMIT_TEXT = ("conversation is too long", "maximum length", "对话过长", "达到对话长度")
@@ -301,6 +314,59 @@ def dialog_items(items, dialog):
     return [item for item in items if item["visible"] and is_descendant(item["node"], dialog["node"])]
 
 
+def history_access_popup(items, auth_cards=None):
+    """Find exactly one bounded history-only request-frequency popup.
+
+    The classification intentionally requires three independent signals inside
+    the same bounded accessibility container: a request-frequency headline,
+    explicit history-access restriction language, and one exact
+    acknowledgement action. Transcript text alone can never satisfy this shape.
+    Authorization and other sensitive dialogs fail closed.
+    """
+    auth_cards = authorization_cards(items) if auth_cards is None else auth_cards
+    candidates = []
+    seen = []
+    for item in items:
+        if not item["visible"] or not any(token in normalized(item) for token in RATE_LIMIT_TEXT):
+            continue
+        current = item["node"]
+        for _ in range(9):
+            if current is None:
+                break
+            current_role = role(current)
+            if current_role in BROAD_AUTH_CONTAINER_ROLES:
+                break
+            if current_role not in HISTORY_ACCESS_CONTAINER_ROLES:
+                current = parent_of(current)
+                continue
+            scoped = [
+                scoped_item for scoped_item in items
+                if scoped_item["visible"] and is_descendant(scoped_item["node"], current)
+            ]
+            material = " ".join(normalized(scoped_item) for scoped_item in scoped).lower()
+            has_headline = any(token in material for token in RATE_LIMIT_TEXT)
+            has_history = any(token in material for token in HISTORY_ACCESS_WORDS)
+            has_restriction = any(token in material for token in HISTORY_ACCESS_RESTRICTION_WORDS)
+            nested_auth = any(
+                is_descendant(card["container"], current)
+                or is_descendant(current, card["container"])
+                for card in auth_cards
+            )
+            sensitive = nested_auth or any(word in material for word in SENSITIVE_POPUP_WORDS)
+            acknowledge = [
+                scoped_item for scoped_item in scoped
+                if scoped_item["role"] in ACTION_ROLES and scoped_item["enabled"]
+                and exact_action_label(scoped_item, HISTORY_ACCESS_ACK_WORDS)
+            ]
+            if has_headline and has_history and has_restriction and not sensitive and len(acknowledge) == 1:
+                if not any(same_node(existing, current) for existing in seen):
+                    seen.append(current)
+                    candidates.append((current, acknowledge[0]))
+                break
+            current = parent_of(current)
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def popup_semantics(items, auth_cards=None):
     auth_cards = authorization_cards(items) if auth_cards is None else auth_cards
     harmless = []
@@ -329,13 +395,20 @@ def popup_semantics(items, auth_cards=None):
 def dismiss_harmless_popup():
     app = find_app()
     items = flattened(app)
-    harmless, blocked = popup_semantics(items)
+    auth_cards = authorization_cards(items)
+    history_popup = history_access_popup(items, auth_cards)
+    if history_popup is not None:
+        return bool(action(history_popup[1]["node"]))
+    harmless, blocked = popup_semantics(items, auth_cards)
     if blocked or len(harmless) != 1:
         return False
     return bool(action(harmless[0][1]["node"]))
 
 
 def rate_limit_notice_container(items):
+    auth_cards = authorization_cards(items)
+    history_popup = history_access_popup(items, auth_cards)
+    history_container = history_popup[0] if history_popup is not None else None
     candidates = []
     for item in items:
         if not item["visible"] or not any(token in normalized(item) for token in RATE_LIMIT_TEXT):
@@ -351,9 +424,73 @@ def rate_limit_notice_container(items):
             current = parent_of(current)
         if notice is None:
             continue
+        if history_container is not None and (
+            is_descendant(notice, history_container)
+            or is_descendant(history_container, notice)
+        ):
+            continue
+        scoped = [
+            scoped_item for scoped_item in items
+            if scoped_item["visible"] and is_descendant(scoped_item["node"], notice)
+        ]
+        material = " ".join(normalized(scoped_item) for scoped_item in scoped).lower()
+        nested_auth = any(
+            is_descendant(card["container"], notice)
+            or is_descendant(notice, card["container"])
+            for card in auth_cards
+        )
+        if nested_auth or any(word in material for word in SENSITIVE_POPUP_WORDS):
+            continue
         if not any(same_node(existing, notice) for existing in candidates):
             candidates.append(notice)
     return candidates[0] if len(candidates) == 1 else None
+
+
+def strict_review_report_projection(prose, response_boundary):
+    """Project exact current-response Review JSON without owning task policy."""
+    if not prose or not response_boundary:
+        return None
+    source = prose.strip()
+    fence = chr(96) * 3
+    if source.startswith(fence):
+        source = source[3:]
+        if source[:4].lower() == "json":
+            source = source[4:]
+        source = source.lstrip()
+        if not source.rstrip().endswith(fence):
+            return None
+        source = source.rstrip()[:-3].rstrip()
+    try:
+        value = json.loads(source)
+    except Exception:
+        return None
+    if not isinstance(value, dict):
+        return None
+    task_id = value.get("taskId")
+    round_value = value.get("round")
+    status = value.get("status")
+    summary = value.get("summary")
+    next_value = value.get("next")
+    if not isinstance(task_id, str) or not task_id.strip():
+        return None
+    if isinstance(round_value, bool) or not isinstance(round_value, int) or not (0 <= round_value <= 0xFFFFFFFF):
+        return None
+    if status not in ("complete", "next"):
+        return None
+    if not isinstance(summary, str) or not summary.strip():
+        return None
+    if next_value is not None and not isinstance(next_value, str):
+        return None
+    if status == "next" and (not isinstance(next_value, str) or not next_value.strip()):
+        return None
+    return {
+        "task_id": task_id,
+        "round": round_value,
+        "status": status,
+        "summary": summary,
+        "next": next_value,
+        "response_boundary": response_boundary,
+    }
 
 
 def is_stream_cache_expired_item(item):
@@ -606,6 +743,7 @@ def snapshot():
     auth_cards = authorization_cards(items)
     auth_present = bool(auth_cards)
     auth_actionable = any(card["actionable"] for card in auth_cards)
+    history_popup = history_access_popup(items, auth_cards)
     harmless_popups, blocked_popups = popup_semantics(items, auth_cards)
 
     all_text = "\n".join((item["text"] or item["name"]) for item in items if item["visible"]).lower()
@@ -636,6 +774,7 @@ def snapshot():
     if composer:
         draft = composer["text"] or ""
     response_boundary = hash_text(prose) if marker and prose else None
+    strict_review_report = strict_review_report_projection(prose, response_boundary)
     conversation_fingerprint = hash_text((marker or "") + "|" + (response_boundary or "")) if marker else None
     progress_material = prose + "|" + "\n".join(work_trace) + "|" + str(stop) + "|" + str(auth_present)
     progress = hash_text(progress_material) if marker else None
@@ -659,7 +798,7 @@ def snapshot():
         "authorization_actionable": auth_actionable,
         "authorization_settlement": "inactive",
         "response_local_copy": copy_after,
-        "strict_review_report": None,
+        "strict_review_report": strict_review_report,
         "rate_limit": rate_limit,
         "retryable_error": retryable,
         "unable_to_load_conversation": unable_load,
@@ -671,9 +810,9 @@ def snapshot():
         "reasoning_picker_available": picker,
         "selected_reasoning_preset": selected,
         "attachment_ready": any_attachment_ready(items),
-        "harmless_popup_present": bool(harmless_popups),
+        "harmless_popup_present": bool(history_popup or harmless_popups),
         "sensitive_or_unknown_popup_present": bool(blocked_popups),
-        "blocker_or_modal": bool(harmless_popups or blocked_popups),
+        "blocker_or_modal": bool(history_popup or harmless_popups or blocked_popups),
         "progress_fingerprint": progress,
     }
 
@@ -944,12 +1083,15 @@ def set_reasoning(target):
 
 def rate_limit_contract_self_test():
     class FakeNode:
-        def __init__(self, node_role, name, parent=None):
+        def __init__(self, node_role, name, parent=None, attributes=None):
             self._role = node_role
             self.name = name
             self.parent = parent
+            self._attributes = attributes or []
         def getRoleName(self):
             return self._role
+        def getAttributes(self):
+            return self._attributes
 
     def item(node):
         return {
@@ -962,9 +1104,12 @@ def rate_limit_contract_self_test():
         }
 
     document = FakeNode("document web", "ChatGPT")
+
     user = FakeNode("section", "user", document)
     quoted = FakeNode("paragraph", "请求过于频繁", user)
     if rate_limit_notice_container([item(document), item(user), item(quoted)]) is not None:
+        return False
+    if history_access_popup([item(document), item(user), item(quoted)]) is not None:
         return False
 
     assistant = FakeNode("section", "assistant", document)
@@ -974,10 +1119,87 @@ def rate_limit_contract_self_test():
     ) is not None:
         return False
 
+    history_panel = FakeNode("panel", "请求过于频繁", document)
+    history_text = FakeNode(
+        "paragraph", "暂时限制访问聊天记录，请稍后再查看历史会话", history_panel
+    )
+    history_ack = FakeNode("push button", "明白了", history_panel)
+    history_items = [
+        item(document), item(history_panel), item(history_text), item(history_ack)
+    ]
+    history = history_access_popup(history_items)
+    if history is None or not same_node(history[0], history_panel):
+        return False
+    if not same_node(history[1]["node"], history_ack):
+        return False
+    if rate_limit_notice_container(history_items) is not None:
+        return False
+
     notice = FakeNode("alert", "请求过于频繁", document)
     notice_text = FakeNode("paragraph", "请稍等几分钟后再重试", notice)
-    items = [item(document), item(notice), item(notice_text)]
-    return same_node(rate_limit_notice_container(items), notice)
+    notice_ack = FakeNode("push button", "明白了", notice)
+    current_request_items = [item(document), item(notice), item(notice_text), item(notice_ack)]
+    if not same_node(rate_limit_notice_container(current_request_items), notice):
+        return False
+    if history_access_popup(current_request_items) is not None:
+        return False
+
+    auth_dialog = FakeNode("dialog", "Authorization", document)
+    auth_text = FakeNode(
+        "paragraph", "请求过于频繁，暂时限制访问聊天记录；authorization required", auth_dialog
+    )
+    auth_allow = FakeNode("push button", "Allow", auth_dialog)
+    auth_reject = FakeNode("push button", "Reject", auth_dialog)
+    auth_options = FakeNode("push button", "Options", auth_dialog, ["haspopup:true"])
+    auth_ack = FakeNode("push button", "Got it", auth_dialog)
+    auth_items = [
+        item(document), item(auth_dialog), item(auth_text), item(auth_allow),
+        item(auth_reject), item(auth_options), item(auth_ack),
+    ]
+    if history_access_popup(auth_items) is not None:
+        return False
+    if rate_limit_notice_container(auth_items) is not None:
+        return False
+
+    return True
+
+
+def strict_review_report_contract_self_test():
+    boundary = "response-boundary-1"
+    valid = strict_review_report_projection(
+        '{"taskId":"task-1","round":7,"status":"next","summary":"continue","next":"do more"}',
+        boundary,
+    )
+    if valid != {
+        "task_id": "task-1",
+        "round": 7,
+        "status": "next",
+        "summary": "continue",
+        "next": "do more",
+        "response_boundary": boundary,
+    }:
+        return False
+    fence = chr(96) * 3
+    fenced = strict_review_report_projection(
+        fence + 'json\n{"taskId":"task-1","round":7,"status":"complete","summary":"done","next":""}\n' + fence,
+        boundary,
+    )
+    if fenced is None or fenced["status"] != "complete":
+        return False
+    if strict_review_report_projection(
+        'prefix {"taskId":"task-1","round":7,"status":"complete","summary":"done","next":""}',
+        boundary,
+    ) is not None:
+        return False
+    if strict_review_report_projection(
+        '{"taskId":"task-1","round":7,"status":"next","summary":"continue","next":""}',
+        boundary,
+    ) is not None:
+        return False
+    return strict_review_report_projection(
+        '{"taskId":"task-1","round":7,"status":"complete","summary":"done","next":""}',
+        None,
+    ) is None
 
 
 def popup_contract_self_test():
@@ -1077,6 +1299,8 @@ def main():
         result = response_boundary_contract_self_test()
     elif op == "contract-rate-limit":
         result = rate_limit_contract_self_test()
+    elif op == "contract-review-report":
+        result = strict_review_report_contract_self_test()
     elif op == "contract-popup":
         result = popup_contract_self_test()
     elif op == "snapshot":

@@ -260,10 +260,42 @@ mod tests {
     }
 
     #[test]
+    fn review_report_projection_is_response_local_and_structured() {
+        use std::process::Command as StdCommand;
+
+        let wrapper = format!(
+            "import sys,types; sys.modules['pyatspi']=types.SimpleNamespace(); sys.argv=['bridge','contract-review-report']; exec({:?})",
+            BRIDGE
+        );
+        let output = StdCommand::new("python3")
+            .arg("-c")
+            .arg(wrapper)
+            .output()
+            .expect("python3 must execute deterministic review-report contract");
+        assert!(
+            output.status.success(),
+            "contract failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "true");
+        assert!(BRIDGE.contains("strict_review_report_projection(prose, response_boundary)"));
+        assert!(BRIDGE.contains("\"strict_review_report\": strict_review_report"));
+    }
+
+    #[test]
     fn rate_limit_detection_requires_semantic_notice_provenance() {
         assert!(BRIDGE.contains("RATE_LIMIT_NOTICE_ROLES"));
+        assert!(BRIDGE.contains("def history_access_popup(items, auth_cards=None):"));
+        assert!(BRIDGE.contains("HISTORY_ACCESS_CONTAINER_ROLES"));
+        assert!(BRIDGE.contains("len(acknowledge) == 1"));
+        assert!(BRIDGE.contains("history_popup = history_access_popup(items, auth_cards)"));
         assert!(BRIDGE.contains("rate_limit_notice_container(items) is not None"));
         assert!(BRIDGE.contains("is_descendant(item[\"node\"], notice)"));
+        assert!(
+            BRIDGE
+                .contains("nested_auth or any(word in material for word in SENSITIVE_POPUP_WORDS)")
+        );
         assert!(!BRIDGE.contains("rate_limit = any(t in all_text for t in RATE_LIMIT_TEXT)"));
     }
 

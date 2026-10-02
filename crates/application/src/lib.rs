@@ -3154,7 +3154,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shipping_run_prompt_dismisses_only_harmless_popup_then_continues() {
+    async fn shipping_run_prompt_acknowledges_history_only_popup_without_rate_limit_cooldown() {
         let before = ChatSurfaceSnapshot {
             user_turn_boundary: Some(UserTurnBoundary::new("u0")),
             ..Default::default()
@@ -3187,10 +3187,12 @@ mod tests {
         ])
         .with_popup_dismiss();
         let clock = FakeClock::new();
+        let rate_limit_pause = Duration::from_secs(300);
         let options = RunOptions {
             poll_interval: Duration::from_secs(1),
             timeout: Duration::from_secs(30),
             stale_reload_after: Duration::from_secs(1_000),
+            rate_limit_pause,
             ..RunOptions::default()
         };
 
@@ -3201,6 +3203,10 @@ mod tests {
 
         assert_eq!(report.state, RunState::Complete);
         assert_eq!(surface.popup_dismiss_count(), 1);
+        assert!(
+            clock.now() < rate_limit_pause,
+            "history-only acknowledgement must not enter the five-minute rate-limit cooldown"
+        );
     }
 
     #[tokio::test]
