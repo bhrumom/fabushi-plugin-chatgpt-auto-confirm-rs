@@ -238,6 +238,36 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_contract_rejects_transcript_text_and_accepts_alert_notice() {
+        use std::process::Command as StdCommand;
+
+        let wrapper = format!(
+            "import sys,types; sys.modules['pyatspi']=types.SimpleNamespace(); sys.argv=['bridge','contract-rate-limit']; exec({:?})",
+            BRIDGE
+        );
+        let output = StdCommand::new("python3")
+            .arg("-c")
+            .arg(wrapper)
+            .output()
+            .expect("python3 must execute deterministic rate-limit contract");
+        assert!(
+            output.status.success(),
+            "contract failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "true");
+    }
+
+    #[test]
+    fn rate_limit_detection_requires_semantic_notice_provenance() {
+        assert!(BRIDGE.contains("RATE_LIMIT_NOTICE_ROLES"));
+        assert!(BRIDGE.contains("rate_limit_notice_container(items) is not None"));
+        assert!(BRIDGE.contains("is_descendant(item[\"node\"], notice)"));
+        assert!(!BRIDGE.contains("rate_limit = any(t in all_text for t in RATE_LIMIT_TEXT)"));
+    }
+
+    #[test]
     fn stream_cache_expired_projection_and_retry_are_response_local() {
         assert!(BRIDGE.contains("is_stream_cache_expired_item"));
         assert!(BRIDGE.contains("response_text_items"));

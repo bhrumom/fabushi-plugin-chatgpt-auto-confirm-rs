@@ -29,6 +29,7 @@ FILE_CHOOSER_WORDS = ("open", "choose", "select", "upload", "file", "打开", "�
 RETRY_WORDS = ("retry", "重试")
 GOT_IT_WORDS = ("got it", "明白了", "知道了")
 RATE_LIMIT_TEXT = ("too many requests", "request too frequent", "请求过于频繁")
+RATE_LIMIT_NOTICE_ROLES = ("alert", "notification", "status", "dialog", "alert dialog", "alertdialog")
 UNABLE_LOAD_TEXT = ("unable to load", "无法加载此 chatgpt 对话", "无法加载此对话")
 INTERRUPTED_TEXT = ("connection interrupted", "连接中断")
 LENGTH_LIMIT_TEXT = ("conversation is too long", "maximum length", "对话过长", "达到对话长度")
@@ -334,6 +335,27 @@ def dismiss_harmless_popup():
     return bool(action(harmless[0][1]["node"]))
 
 
+def rate_limit_notice_container(items):
+    candidates = []
+    for item in items:
+        if not item["visible"] or not any(token in normalized(item) for token in RATE_LIMIT_TEXT):
+            continue
+        current = item["node"]
+        notice = None
+        for _ in range(9):
+            if current is None:
+                break
+            if role(current) in RATE_LIMIT_NOTICE_ROLES:
+                notice = current
+                break
+            current = parent_of(current)
+        if notice is None:
+            continue
+        if not any(same_node(existing, notice) for existing in candidates):
+            candidates.append(notice)
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def is_stream_cache_expired_item(item):
     value = normalized(item).strip().rstrip(".!。！")
     return value in CACHE_EXPIRED_TEXT
@@ -587,7 +609,7 @@ def snapshot():
     harmless_popups, blocked_popups = popup_semantics(items, auth_cards)
 
     all_text = "\n".join((item["text"] or item["name"]) for item in items if item["visible"]).lower()
-    rate_limit = any(t in all_text for t in RATE_LIMIT_TEXT)
+    rate_limit = rate_limit_notice_container(items) is not None
     unable_load = any(t in all_text for t in UNABLE_LOAD_TEXT)
     interrupted = any(t in all_text for t in INTERRUPTED_TEXT)
     length_limit = any(t in all_text for t in LENGTH_LIMIT_TEXT)
@@ -824,11 +846,19 @@ def approve():
 def dismiss_rate_limit():
     app = find_app()
     items = flattened(app)
-    all_text = "\n".join((i["text"] or i["name"]) for i in items if i["visible"]).lower()
-    if not any(t in all_text for t in RATE_LIMIT_TEXT):
+    notice = rate_limit_notice_container(items)
+    if notice is None:
         return False
-    button = find_named(items, GOT_IT_WORDS, roles=("push button", "button"), actionable=True)
-    return bool(button and action(button["node"]))
+    buttons = [
+        item for item in items
+        if item["visible"] and item["enabled"]
+        and item["role"] in ("push button", "button")
+        and is_descendant(item["node"], notice)
+        and any(label in GOT_IT_WORDS for label in item_labels(item))
+    ]
+    if len(buttons) != 1:
+        return False
+    return bool(action(buttons[0]["node"]))
 
 def reasoning_position(items):
     rx = re.compile(r"^(Instant|Medium|High|Extra High|Max|Pro),\s*([1-5])\s+of\s+5\.?$", re.I)
@@ -911,6 +941,44 @@ def set_reasoning(target):
     verified = current == target
     close_reasoning_menu(app)
     return verified
+
+def rate_limit_contract_self_test():
+    class FakeNode:
+        def __init__(self, node_role, name, parent=None):
+            self._role = node_role
+            self.name = name
+            self.parent = parent
+        def getRoleName(self):
+            return self._role
+
+    def item(node):
+        return {
+            "node": node,
+            "role": node.getRoleName(),
+            "name": node.name,
+            "text": node.name,
+            "visible": True,
+            "enabled": True,
+        }
+
+    document = FakeNode("document web", "ChatGPT")
+    user = FakeNode("section", "user", document)
+    quoted = FakeNode("paragraph", "请求过于频繁", user)
+    if rate_limit_notice_container([item(document), item(user), item(quoted)]) is not None:
+        return False
+
+    assistant = FakeNode("section", "assistant", document)
+    quoted_assistant = FakeNode("paragraph", "too many requests", assistant)
+    if rate_limit_notice_container(
+        [item(document), item(assistant), item(quoted_assistant)]
+    ) is not None:
+        return False
+
+    notice = FakeNode("alert", "请求过于频繁", document)
+    notice_text = FakeNode("paragraph", "请稍等几分钟后再重试", notice)
+    items = [item(document), item(notice), item(notice_text)]
+    return same_node(rate_limit_notice_container(items), notice)
+
 
 def popup_contract_self_test():
     class FakeNode:
@@ -1007,6 +1075,8 @@ def main():
     op = sys.argv[1]
     if op == "contract-response-boundary":
         result = response_boundary_contract_self_test()
+    elif op == "contract-rate-limit":
+        result = rate_limit_contract_self_test()
     elif op == "contract-popup":
         result = popup_contract_self_test()
     elif op == "snapshot":
