@@ -95,7 +95,6 @@
         "crates/cli/src/main.rs"
       ],
       "missing": [
-        "RecoveryEnvelope handoff wiring",
         "crash-window semantic resume",
         "acceptance"
       ]
@@ -112,7 +111,6 @@
         "crates/cli/src/main.rs"
       ],
       "missing": [
-        "RecoveryEnvelope handoff wiring",
         "semantic resume when a phase finished remotely but its durable result transition did not commit",
         "pause/resume/cancel lifecycle",
         "fair multi-task supervision",
@@ -139,11 +137,12 @@
       "destination": "application RecoveryState",
       "status": "partial",
       "evidence": [
-        "crates/application/src/lib.rs"
+        "crates/application/src/lib.rs",
+        "crates/runtime/src/lib.rs"
       ],
       "missing": [
-        "RecoveryEnvelope handoff wiring",
-        "acceptance"
+        "fresh handoff dispatch identity rotation instead of reusing the same durable run dispatch identity",
+        "exact-artifact real acceptance"
       ]
     },
     {

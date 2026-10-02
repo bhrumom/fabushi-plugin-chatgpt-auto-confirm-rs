@@ -63,6 +63,22 @@ pub struct ReviewRunIdentity {
     pub round: Round,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryRunContext {
+    pub task_id: TaskId,
+    pub run_id: RunId,
+    pub phase: Phase,
+    pub round: Round,
+    pub goal_revision: GoalRevision,
+    pub authoritative_instruction: String,
+    pub previous_work_result: Option<String>,
+    pub current_next: Option<String>,
+    pub original_goal: String,
+    pub completed: Vec<String>,
+    pub remaining: Vec<String>,
+    pub blockers: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct RunOptions {
     pub timeout: Duration,
@@ -75,6 +91,7 @@ pub struct RunOptions {
     pub dispatch_confirm_after: Duration,
     pub continuation_after: Duration,
     pub review_identity: Option<ReviewRunIdentity>,
+    pub recovery_context: Option<RecoveryRunContext>,
     pub expected_dispatch_id: Option<DispatchId>,
     pub run_phase: Option<Phase>,
     pub run_round: Option<Round>,
@@ -93,6 +110,7 @@ impl Default for RunOptions {
             dispatch_confirm_after: DISPATCH_CONFIRM_WINDOW,
             continuation_after: Duration::from_secs(30 * 60),
             review_identity: None,
+            recovery_context: None,
             expected_dispatch_id: None,
             run_phase: None,
             run_round: None,
@@ -196,14 +214,51 @@ impl<'a> RunPrompt<'a> {
                 continue;
             }
 
+            if snapshot.connection_interrupted
+                || snapshot.stream_polling_timeout
+                || snapshot.conversation_length_limit
+            {
+                if !self.destructive_handoff_is_safe().await? {
+                    terminal_since = None;
+                    self.clock.sleep(options.poll_interval).await;
+                    continue;
+                }
+                let recovery_prompt =
+                    recovery_handoff_prompt(prompt, options.recovery_context.as_ref(), &snapshot)?;
+                self.surface.start_fresh_conversation().await?;
+                self.surface.send_prompt(&recovery_prompt).await?;
+                recoveries += 1;
+                dispatched = now;
+                progress = now;
+                fingerprint.clear();
+                terminal_since = None;
+                if let Some(tracker) = review_tracker.as_mut() {
+                    *tracker = ReviewSettlementTracker::default();
+                }
+                continue;
+            }
+
             if snapshot.rate_limit && self.surface.dismiss_rate_limit_notice().await? {
                 rate_limits += 1;
                 if rate_limits > options.max_rate_limit_pauses
                     && self.destructive_handoff_is_safe().await?
                 {
+                    let recovery_prompt = recovery_handoff_prompt(
+                        prompt,
+                        options.recovery_context.as_ref(),
+                        &snapshot,
+                    )?;
                     self.surface.start_fresh_conversation().await?;
+                    self.surface.send_prompt(&recovery_prompt).await?;
                     recoveries += 1;
+                    dispatched = now;
+                    progress = now;
+                    fingerprint.clear();
+                    terminal_since = None;
                     rate_limits = 0;
+                    if let Some(tracker) = review_tracker.as_mut() {
+                        *tracker = ReviewSettlementTracker::default();
+                    }
                 }
                 self.clock.sleep(options.rate_limit_pause).await;
                 continue;
@@ -231,8 +286,13 @@ impl<'a> RunPrompt<'a> {
                             self.clock.sleep(options.poll_interval).await;
                             continue;
                         }
+                        let recovery_prompt = recovery_handoff_prompt(
+                            prompt,
+                            options.recovery_context.as_ref(),
+                            &snapshot,
+                        )?;
                         self.surface.start_fresh_conversation().await?;
-                        self.surface.send_prompt(prompt).await?;
+                        self.surface.send_prompt(&recovery_prompt).await?;
                         recoveries += 1;
                         dispatched = now;
                         progress = now;
@@ -722,6 +782,35 @@ pub fn build_recovery_envelope(input: RecoveryEnvelopeInput<'_>) -> RecoveryEnve
     })
 }
 
+fn recovery_handoff_prompt(
+    original_prompt: &str,
+    context: Option<&RecoveryRunContext>,
+    snapshot: &ChatSurfaceSnapshot,
+) -> Result<String> {
+    let Some(context) = context else {
+        return Ok(original_prompt.to_owned());
+    };
+    let envelope = build_recovery_envelope(RecoveryEnvelopeInput {
+        task_id: context.task_id.clone(),
+        run_id: context.run_id.clone(),
+        phase: context.phase,
+        round: context.round,
+        goal_revision: context.goal_revision,
+        authoritative_instruction: &context.authoritative_instruction,
+        snapshot,
+        previous_work_result: context.previous_work_result.as_deref(),
+        current_next: context.current_next.as_deref(),
+        original_goal: &context.original_goal,
+        completed: &context.completed,
+        remaining: &context.remaining,
+        blockers: &context.blockers,
+    });
+    let encoded = serde_json::to_string(&envelope)?;
+    Ok(format!(
+        "这是一次异常会话后的接力恢复。请优先承接 RecoveryEnvelope 中已经完成的工作和当前可见工作步骤，从中断处继续，不要重做已完成步骤。\nRecoveryEnvelope：\n{encoded}\n\n当前阶段原始发送内容：\n{original_prompt}"
+    ))
+}
+
 fn bounded_vec(values: &[String], limit: usize) -> Vec<String> {
     let mut remaining = limit;
     let mut output = Vec::new();
@@ -1166,6 +1255,76 @@ mod tests {
         }
     }
 
+    struct HandoffSurface {
+        sends: Mutex<Vec<String>>,
+    }
+
+    impl HandoffSurface {
+        fn new() -> Self {
+            Self {
+                sends: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn sends(&self) -> Vec<String> {
+            self.sends.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl ChatSurfacePort for HandoffSurface {
+        async fn observe(&self) -> Result<ChatSurfaceSnapshot> {
+            match self.sends.lock().unwrap().len() {
+                0 => Ok(ChatSurfaceSnapshot {
+                    user_turn_boundary: Some(UserTurnBoundary::new("u0")),
+                    ..Default::default()
+                }),
+                1 => Ok(ChatSurfaceSnapshot {
+                    user_turn_boundary: Some(UserTurnBoundary::new("u1")),
+                    user_turn_ownership: OwnershipConfidence::Strong,
+                    connection_interrupted: true,
+                    assistant_visible_prose: "partial assistant prose".into(),
+                    assistant_visible_work_trace: vec![
+                        "checking artifact provenance".into(),
+                        "preparing release acceptance".into(),
+                    ],
+                    ..Default::default()
+                }),
+                _ => Ok(ChatSurfaceSnapshot {
+                    app_healthy: true,
+                    user_turn_boundary: Some(UserTurnBoundary::new("u2")),
+                    user_turn_ownership: OwnershipConfidence::Strong,
+                    assistant_response_boundary: Some(AssistantResponseBoundary::new("a2")),
+                    assistant_response_ownership: OwnershipConfidence::Strong,
+                    assistant_visible_prose: "finished after recovery".into(),
+                    response_local_copy: true,
+                    ..Default::default()
+                }),
+            }
+        }
+
+        async fn send_prompt(&self, prompt: &str) -> Result<()> {
+            self.sends.lock().unwrap().push(prompt.to_owned());
+            Ok(())
+        }
+
+        async fn approve_current_conversation(&self) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn dismiss_rate_limit_notice(&self) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn recover_current_surface(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn start_fresh_conversation(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
     struct ScriptedSurface {
         snapshots: Mutex<VecDeque<ChatSurfaceSnapshot>>,
         last_snapshot: Mutex<ChatSurfaceSnapshot>,
@@ -1256,6 +1415,50 @@ mod tests {
             response_local_copy: true,
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn connection_interruption_fresh_handoff_carries_visible_work_in_recovery_envelope() {
+        let surface = HandoffSurface::new();
+        let clock = FakeClock::new();
+        let options = RunOptions {
+            poll_interval: Duration::from_secs(1),
+            timeout: Duration::from_secs(60),
+            stale_reload_after: Duration::from_secs(1_000),
+            recovery_context: Some(RecoveryRunContext {
+                task_id: TaskId::new("task-recovery"),
+                run_id: RunId::new("run-recovery"),
+                phase: Phase::Work,
+                round: Round::new(3),
+                goal_revision: GoalRevision::new(2),
+                authoritative_instruction: "continue exact work".into(),
+                previous_work_result: Some("previous round result".into()),
+                current_next: Some("next required step".into()),
+                original_goal: "original goal".into(),
+                completed: vec!["completed item".into()],
+                remaining: vec!["remaining item".into()],
+                blockers: vec!["device offline".into()],
+            }),
+            ..RunOptions::default()
+        };
+
+        let report = RunPrompt::new(&surface, &clock)
+            .execute("prepared prompt [Fabushi:marker]", options)
+            .await
+            .unwrap();
+
+        assert_eq!(report.state, RunState::Complete);
+        assert_eq!(report.recoveries, 1);
+        let sends = surface.sends();
+        assert_eq!(sends.len(), 2);
+        assert_eq!(sends[0], "prepared prompt [Fabushi:marker]");
+        assert!(sends[1].contains("RecoveryEnvelope"));
+        assert!(sends[1].contains("partial assistant prose"));
+        assert!(sends[1].contains("checking artifact provenance"));
+        assert!(sends[1].contains("previous round result"));
+        assert!(sends[1].contains("next required step"));
+        assert!(sends[1].contains("device offline"));
+        assert!(sends[1].contains("prepared prompt [Fabushi:marker]"));
     }
 
     #[tokio::test]

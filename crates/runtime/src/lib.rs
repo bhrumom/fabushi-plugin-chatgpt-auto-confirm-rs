@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use fabushi_chatgpt_application::{
     ChatProcessHealth, ChatProcessPort, ChatSurfacePort, Clock, ContinuousTaskState,
-    ReasoningDecision, ReasoningGateState, ReviewRunIdentity, RunPrompt,
+    ReasoningDecision, ReasoningGateState, RecoveryRunContext, ReviewRunIdentity, RunPrompt,
     parse_strict_review_report,
 };
 use fabushi_chatgpt_desktop_atspi::ChatGptDesktopAtspi;
@@ -21,8 +21,8 @@ use tokio::time::MissedTickBehavior;
 pub use fabushi_chatgpt_application::RunOptions;
 pub use fabushi_chatgpt_cdp::ChatGptCdp;
 use fabushi_chatgpt_domain::{
-    AuthorizationSettlementState, ConversationFingerprint, DispatchId, OwnershipConfidence, RunId,
-    UserTurnBoundary,
+    AuthorizationSettlementState, ConversationFingerprint, DispatchId, GoalRevision,
+    OwnershipConfidence, RunId, UserTurnBoundary,
 };
 pub use fabushi_chatgpt_domain::{
     ChatSurfaceSnapshot, Phase, ReasoningPreset, Round, RunReport, RunState, TaskId,
@@ -1117,6 +1117,27 @@ impl DesktopRuntime {
                 task_id: task_id.clone(),
                 round,
             });
+            phase_options.recovery_context = Some(RecoveryRunContext {
+                task_id: task_id.clone(),
+                run_id: run_id.clone(),
+                phase,
+                round,
+                goal_revision: state.goal_revision,
+                authoritative_instruction: prompt.clone(),
+                previous_work_result: state.previous_work_result.clone(),
+                current_next: state.current_next.clone(),
+                original_goal: state.goal.clone(),
+                completed: state
+                    .previous_work_result
+                    .iter()
+                    .map(|value| format!("previous Work result: {value}"))
+                    .collect(),
+                remaining: vec![state
+                    .current_next
+                    .clone()
+                    .unwrap_or_else(|| state.goal.clone())],
+                blockers: Vec::new(),
+            });
 
             let report = self
                 .run_prompt_with_identity(
@@ -1208,6 +1229,23 @@ impl DesktopRuntime {
 
         let marker = dispatch_marker()?;
         let dispatch_id = DispatchId::new(marker.clone());
+        let mut options = options;
+        if options.recovery_context.is_none() {
+            options.recovery_context = Some(RecoveryRunContext {
+                task_id: task_id.clone(),
+                run_id: run_id.clone(),
+                phase,
+                round,
+                goal_revision: GoalRevision::new(0),
+                authoritative_instruction: prompt.to_owned(),
+                previous_work_result: None,
+                current_next: None,
+                original_goal: prompt.to_owned(),
+                completed: Vec::new(),
+                remaining: vec![prompt.to_owned()],
+                blockers: Vec::new(),
+            });
+        }
         let worker = RunWorker::new(
             self.desktop_session().await?.clone(),
             &self.state_db_path,
@@ -1224,7 +1262,6 @@ impl DesktopRuntime {
             .await?;
 
         let prepared = format!("{prompt}\n\n[Fabushi:{marker}]");
-        let mut options = options;
         options.expected_dispatch_id = Some(dispatch_id);
         worker.execute(&prepared, options).await
     }
