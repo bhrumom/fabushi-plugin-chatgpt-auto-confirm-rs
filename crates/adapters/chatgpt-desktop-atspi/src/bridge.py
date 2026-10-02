@@ -769,9 +769,16 @@ def response_local_copy_evidence(items, marker_index, response_scope):
 
 def marker_info(items):
     marker_re = re.compile(r"\[Fabushi:([0-9a-fA-F-]{8,})\]")
+    composer = unique_composer(items)
+    composer_node = composer["node"] if composer is not None else None
     latest = None
     latest_index = -1
     for i, item in enumerate(items):
+        if composer_node is not None and (
+            same_node(item["node"], composer_node)
+            or is_descendant(item["node"], composer_node)
+        ):
+            continue
         hay = item["text"] or item["name"]
         match = marker_re.search(hay)
         if match:
@@ -839,10 +846,19 @@ def wait_for_composer_draft(expected, timeout_seconds=2.0):
             return None
         time.sleep(0.05)
 
+def explicit_renderer_error(items):
+    return any(
+        item["visible"]
+        and item["role"] in ("heading", "alert")
+        and "something went wrong" in normalized(item)
+        for item in items
+    )
+
 def snapshot():
     app = find_app()
     items = flattened(app)
     composer = unique_composer(items)
+    renderer_error = composer is None and explicit_renderer_error(items)
 
     marker, marker_index = marker_info(items)
     after = items[marker_index + 1 :] if marker_index >= 0 else []
@@ -871,7 +887,7 @@ def snapshot():
         is_stream_cache_expired_item(item) for item in response_text_items
     )
     polling_timeout = any(t in all_text for t in POLL_TIMEOUT_TEXT)
-    retryable = any(
+    retryable = renderer_error or any(
         item["enabled"] and item["role"] in ("push button", "button")
         and any(w in normalized(item) for w in RETRY_WORDS)
         for item in after if marker_index >= 0
@@ -921,13 +937,13 @@ def snapshot():
         "conversation_length_limit": length_limit,
         "stream_polling_timeout": polling_timeout,
         "stream_cache_expired": cache_expired,
-        "hydration": "ready" if composer else "loading",
+        "hydration": "failed" if renderer_error else ("ready" if composer else "loading"),
         "reasoning_picker_available": picker,
         "selected_reasoning_preset": selected,
         "attachment_ready": any_attachment_ready(items),
         "harmless_popup_present": bool(history_popup or harmless_popups),
         "sensitive_or_unknown_popup_present": bool(blocked_popups),
-        "blocker_or_modal": bool(history_popup or harmless_popups or blocked_popups),
+        "blocker_or_modal": bool(renderer_error or history_popup or harmless_popups or blocked_popups),
         "progress_fingerprint": progress,
     }
 
@@ -1089,13 +1105,24 @@ def send_prompt(prompt):
         raise RuntimeError("ChatGPT Send action failed")
     return True
 
+def new_chat_candidates(items):
+    labels = {"new chat", "新聊天", "新对话"}
+    return [
+        item for item in items
+        if item["role"] in ("push button", "button")
+        and item["visible"] and item["enabled"]
+        and state(item["node"], pyatspi.STATE_SHOWING)
+        and attribute_map(item["node"]).get("tag") == "button"
+        and (item["name"] or item["text"]).strip().lower() in labels
+    ]
+
 def start_fresh():
     app = find_app()
     items = flattened(app)
-    button = find_named(items, ("New chat", "新聊天", "新对话"), roles=("push button", "button"), actionable=True)
-    if button is None:
-        raise RuntimeError("New chat control not found")
-    if not action(button["node"]):
+    candidates = new_chat_candidates(items)
+    if len(candidates) != 1:
+        raise RuntimeError(f"New chat control is not uniquely actionable: {len(candidates)} candidates")
+    if not action(candidates[0]["node"]):
         raise RuntimeError("New chat action failed")
     return True
 
@@ -1474,6 +1501,94 @@ def conversation_ref_contract_self_test():
     return current_conversation_ref([attr_current]) == opaque_conversation_ref(uri)
 
 
+def new_chat_locator_contract_self_test():
+    class FakeNode:
+        def __init__(self, showing, tag):
+            self.showing = showing
+            self.tag = tag
+    nav = FakeNode(True, "button")
+    thread_named_new_chat = FakeNode(True, "div")
+    hidden_nav = FakeNode(False, "button")
+    items = [
+        {"node": thread_named_new_chat, "role": "button", "name": "New chat", "text": "", "visible": True, "enabled": True},
+        {"node": hidden_nav, "role": "button", "name": "New chat", "text": "", "visible": True, "enabled": True},
+        {"node": nav, "role": "button", "name": "New chat", "text": "", "visible": True, "enabled": True},
+    ]
+    old_state = globals().get("state")
+    old_attrs = globals().get("attribute_map")
+    old_showing = getattr(pyatspi, "STATE_SHOWING", None)
+    pyatspi.STATE_SHOWING = 1004
+    globals()["state"] = lambda node, which: node.showing if which == pyatspi.STATE_SHOWING else False
+    globals()["attribute_map"] = lambda node: {"tag": node.tag}
+    try:
+        candidates = new_chat_candidates(items)
+        return len(candidates) == 1 and candidates[0]["node"] is nav
+    finally:
+        globals()["state"] = old_state
+        globals()["attribute_map"] = old_attrs
+        if old_showing is None:
+            try: delattr(pyatspi, "STATE_SHOWING")
+            except Exception: pass
+        else:
+            pyatspi.STATE_SHOWING = old_showing
+
+def dispatch_marker_contract_self_test():
+    class FakeNode:
+        def __init__(self, parent=None): self.parent = parent
+    composer = FakeNode()
+    draft = FakeNode(composer)
+    transcript = FakeNode()
+    old_unique = globals().get("unique_composer")
+    old_same = globals().get("same_node")
+    old_desc = globals().get("is_descendant")
+    globals()["unique_composer"] = lambda items: {"node": composer}
+    globals()["same_node"] = lambda left, right: left is right
+    globals()["is_descendant"] = lambda node, root: getattr(node, "parent", None) is root
+    try:
+        draft_item = {"node": draft, "text": "draft [Fabushi:deadbeef-0000]", "name": ""}
+        committed_item = {"node": transcript, "text": "sent [Fabushi:feedface-0001]", "name": ""}
+        if marker_info([draft_item]) != (None, -1): return False
+        marker, index = marker_info([draft_item, committed_item])
+        return marker == "feedface-0001" and index == 1
+    finally:
+        globals()["unique_composer"] = old_unique
+        globals()["same_node"] = old_same
+        globals()["is_descendant"] = old_desc
+
+def renderer_error_contract_self_test():
+    class FakeNode:
+        def __init__(self, node_role, name, visible=True):
+            self._role = node_role
+            self.name = name
+            self._visible = visible
+        def getRoleName(self): return self._role
+        def getState(self):
+            visible = self._visible
+            class State:
+                def contains(self, which):
+                    return visible
+            return State()
+        def queryText(self):
+            value = self.name
+            class Text:
+                def getText(self, start, end): return value
+            return Text()
+    def item(role_name, value, visible=True):
+        node = FakeNode(role_name, value, visible)
+        return {
+            "node": node, "role": role_name, "name": value, "text": value,
+            "visible": visible, "enabled": True, "focused": False,
+        }
+    if not explicit_renderer_error([item("heading", "Something went wrong…")]):
+        return False
+    if explicit_renderer_error([item("paragraph", "Something went wrong…")]):
+        return False
+    if explicit_renderer_error([item("heading", "Something went wrong…", False)]):
+        return False
+    if explicit_renderer_error([item("heading", "Normal heading")]):
+        return False
+    return True
+
 def composer_write_contract_self_test():
     values = {"draft": "", "typed": []}
     pyatspi.STATE_FOCUSABLE, pyatspi.STATE_EDITABLE, pyatspi.STATE_FOCUSED = 1001, 1002, 1003
@@ -1545,7 +1660,13 @@ def composer_write_contract_self_test():
 
 def main():
     op = sys.argv[1]
-    if op == "contract-composer-write":
+    if op == "contract-new-chat-locator":
+        result = new_chat_locator_contract_self_test()
+    elif op == "contract-dispatch-marker":
+        result = dispatch_marker_contract_self_test()
+    elif op == "contract-renderer-error":
+        result = renderer_error_contract_self_test()
+    elif op == "contract-composer-write":
         result = composer_write_contract_self_test()
     elif op == "contract-conversation-ref":
         result = conversation_ref_contract_self_test()

@@ -168,6 +168,74 @@ mod tests {
     use super::*;
 
     #[test]
+    fn renderer_error_projection_is_heading_bounded_and_fail_closed() {
+        use std::process::Command as StdCommand;
+        let wrapper = format!(
+            "import sys,types; sys.modules['pyatspi']=types.SimpleNamespace(); sys.argv=['bridge','contract-renderer-error']; exec({:?})",
+            BRIDGE
+        );
+        let output = StdCommand::new("python3")
+            .arg("-c")
+            .arg(wrapper)
+            .output()
+            .expect("python3 must execute deterministic renderer-error contract");
+        assert!(
+            output.status.success(),
+            "contract failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "true");
+        assert!(
+            BRIDGE.contains("renderer_error = composer is None and explicit_renderer_error(items)")
+        );
+        assert!(BRIDGE.contains("\"hydration\": \"failed\" if renderer_error"));
+        assert!(BRIDGE.contains("\"retryable_error\": retryable"));
+    }
+
+    #[test]
+    fn new_chat_locator_rejects_thread_titles_and_hidden_duplicates() {
+        use std::process::Command as StdCommand;
+        let wrapper = format!(
+            "import sys,types; sys.modules['pyatspi']=types.SimpleNamespace(); sys.argv=['bridge','contract-new-chat-locator']; exec({:?})",
+            BRIDGE
+        );
+        let output = StdCommand::new("python3")
+            .arg("-c")
+            .arg(wrapper)
+            .output()
+            .expect("python3 must execute deterministic new-chat locator contract");
+        assert!(
+            output.status.success(),
+            "contract failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "true");
+    }
+
+    #[test]
+    fn dispatch_marker_projection_excludes_composer_draft() {
+        use std::process::Command as StdCommand;
+        let wrapper = format!(
+            "import sys,types; sys.modules['pyatspi']=types.SimpleNamespace(); sys.argv=['bridge','contract-dispatch-marker']; exec({:?})",
+            BRIDGE
+        );
+        let output = StdCommand::new("python3")
+            .arg("-c")
+            .arg(wrapper)
+            .output()
+            .expect("python3 must execute deterministic dispatch-marker contract");
+        assert!(
+            output.status.success(),
+            "contract failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "true");
+    }
+
+    #[test]
     fn composer_write_contract_supports_prosemirror_without_editable_text() {
         use std::process::Command as StdCommand;
         let wrapper = format!(

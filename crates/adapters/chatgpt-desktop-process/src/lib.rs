@@ -103,7 +103,7 @@ fn launcher_arguments(launcher: &Path, effective_uid: Option<u32>) -> Vec<&'stat
         && effective_uid == Some(0)
         && launcher == Path::new(DEFAULT_CHATGPT_LAUNCHER)
     {
-        vec!["--no-sandbox"]
+        vec!["--no-sandbox", "--force-renderer-accessibility"]
     } else {
         Vec::new()
     }
@@ -163,7 +163,10 @@ mod tests {
     fn launcher_arguments_limit_no_sandbox_to_linux_root_default_launcher() {
         let default = Path::new(DEFAULT_CHATGPT_LAUNCHER);
         if cfg!(target_os = "linux") {
-            assert_eq!(launcher_arguments(default, Some(0)), vec!["--no-sandbox"]);
+            assert_eq!(
+                launcher_arguments(default, Some(0)),
+                vec!["--no-sandbox", "--force-renderer-accessibility"]
+            );
         } else {
             assert!(launcher_arguments(default, Some(0)).is_empty());
         }
