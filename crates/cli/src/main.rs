@@ -83,10 +83,14 @@ async fn main() -> Result<()> {
         Commands::Doctor => {
             let runtime = DesktopRuntime::default();
             let snapshot = runtime.snapshot().await?;
+            #[cfg(target_os = "macos")]
+            let runtime_name = "chatgpt-desktop-axuielement";
+            #[cfg(target_os = "linux")]
+            let runtime_name = "chatgpt-desktop-atspi";
             println!(
                 "{}",
                 serde_json::json!({
-                    "runtime": "chatgpt-desktop-atspi",
+                    "runtime": runtime_name,
                     "appHealthy": snapshot.app_healthy,
                     "composerReady": snapshot.composer_ready,
                     "reasoningPickerAvailable": snapshot.reasoning_picker_available,

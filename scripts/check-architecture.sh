@@ -20,6 +20,7 @@ SQLITE_CARGO="crates/adapters/sqlite-store/Cargo.toml"
 ATTACHMENT_CARGO="crates/adapters/attachment-store/Cargo.toml"
 PROCESS_CARGO="crates/adapters/chatgpt-desktop-process/Cargo.toml"
 ATSPI_CARGO="crates/adapters/chatgpt-desktop-atspi/Cargo.toml"
+MACOS_CARGO="crates/adapters/chatgpt-desktop-macos/Cargo.toml"
 CLI_CARGO="crates/cli/Cargo.toml"
 
 if contains "$DOMAIN_CARGO" 'fabushi-chatgpt-(application|cdp|runtime|linux-browser)|tokio|reqwest|tungstenite|rusqlite|sqlx'; then
@@ -52,6 +53,10 @@ fi
 
 if contains "$PROCESS_CARGO" 'fabushi-chatgpt-(runtime|cdp|linux-browser|sqlite-store|attachment-store|auto-confirm)'; then
   fail "desktop process adapter depends on runtime, another outer adapter, or CLI"
+fi
+
+if contains "$MACOS_CARGO" 'fabushi-chatgpt-(runtime|cdp|linux-browser|sqlite-store|attachment-store|auto-confirm)'; then
+  fail "desktop macOS adapter depends on runtime, another outer adapter, or CLI"
 fi
 
 if contains "$CLI_CARGO" 'fabushi-chatgpt-(application|domain|cdp|linux-browser)'; then

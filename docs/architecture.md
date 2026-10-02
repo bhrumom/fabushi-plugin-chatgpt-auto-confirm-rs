@@ -46,7 +46,8 @@ crates/
   domain/
   application/
   adapters/
-    chatgpt-desktop-atspi/
+    chatgpt-desktop-atspi/       # Linux
+    chatgpt-desktop-macos/       # macOS
     chatgpt-desktop-process/
     sqlite-store/
     attachment-store/
@@ -232,6 +233,10 @@ Memory measurements are diagnostic only and never trigger reload/restart/fresh-c
 ### chatgpt-desktop-atspi
 
 Owns Linux AT-SPI2/D-Bus discovery and mapping between the actual ChatGPT desktop accessibility surface and semantic facts/effects.
+
+### chatgpt-desktop-macos
+
+Owns macOS ChatGPT.app process discovery/launch and native AXUIElement access. The initial adapter supports accessibility-tree discovery, exact composer identification, and a unique Send action. Reasoning selection, response/authorization evidence, recovery, and new-chat semantics remain unsupported and must fail closed until mapped and accepted. macOS GitHub Actions builds do not establish desktop behavior parity.
 
 It may know roles, labels, hierarchy, Electron accessibility quirks and native dialog details. Those facts never cross the port boundary.
 

@@ -5,8 +5,12 @@ use fabushi_chatgpt_application::{
     ReasoningDecision, ReasoningGateState, RecoveryRunContext, ReviewRunIdentity, RunPrompt,
     parse_strict_review_report,
 };
+#[cfg(target_os = "linux")]
 use fabushi_chatgpt_desktop_atspi::ChatGptDesktopAtspi;
+#[cfg(target_os = "linux")]
 use fabushi_chatgpt_desktop_process::ChatGptDesktopProcess;
+#[cfg(target_os = "macos")]
+use fabushi_chatgpt_desktop_macos::{ChatGptDesktopMacProcess, ChatGptDesktopMacSurface};
 use fabushi_chatgpt_sqlite_store::{
     PreparedApproval, PreparedDispatch, SqliteStore, StateTransitionRecord, TransitionRecord,
     UiSessionLease,
@@ -872,25 +876,43 @@ impl Clock for TokioClock {
 }
 
 pub struct DesktopRuntime {
-    process: ChatGptDesktopProcess,
-    surface: Arc<ChatGptDesktopAtspi>,
+    process: Arc<dyn ChatProcessPort>,
+    surface: Arc<dyn ChatSurfacePort>,
     desktop_session: OnceCell<DesktopSessionActorHandle>,
     state_db_path: PathBuf,
 }
 
 impl Default for DesktopRuntime {
     fn default() -> Self {
-        Self::new(
-            ChatGptDesktopProcess::default(),
-            ChatGptDesktopAtspi::default(),
-        )
+        #[cfg(target_os = "linux")]
+        {
+            Self::new(
+                ChatGptDesktopProcess::default(),
+                ChatGptDesktopAtspi::default(),
+            )
+        }
+        #[cfg(target_os = "macos")]
+        {
+            Self::new(
+                ChatGptDesktopMacProcess::default(),
+                ChatGptDesktopMacSurface::default(),
+            )
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            compile_error!("ChatGPT desktop runtime currently supports Linux and macOS")
+        }
     }
 }
 
 impl DesktopRuntime {
-    pub fn new(process: ChatGptDesktopProcess, surface: ChatGptDesktopAtspi) -> Self {
+    pub fn new<P, S>(process: P, surface: S) -> Self
+    where
+        P: ChatProcessPort + 'static,
+        S: ChatSurfacePort + 'static,
+    {
         Self {
-            process,
+            process: Arc::new(process),
             surface: Arc::new(surface),
             desktop_session: OnceCell::new(),
             state_db_path: default_state_db_path(),
@@ -905,8 +927,7 @@ impl DesktopRuntime {
     async fn desktop_session(&self) -> Result<&DesktopSessionActorHandle> {
         self.desktop_session
             .get_or_try_init(|| async {
-                let surface: Arc<dyn ChatSurfacePort> = self.surface.clone();
-                DesktopSessionActorHandle::spawn_durable(surface, &self.state_db_path)
+                DesktopSessionActorHandle::spawn_durable(self.surface.clone(), &self.state_db_path)
             })
             .await
     }
@@ -922,7 +943,9 @@ impl DesktopRuntime {
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        bail!("ChatGPT desktop process started but semantic AT-SPI surface did not become ready")
+        bail!(
+            "ChatGPT desktop process started but its semantic accessibility surface did not become ready"
+        )
     }
 
     pub async fn snapshot(&self) -> Result<ChatSurfaceSnapshot> {

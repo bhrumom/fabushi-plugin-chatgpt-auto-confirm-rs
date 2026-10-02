@@ -8,6 +8,7 @@ members = [
   "crates/adapters/attachment-store",
   "crates/adapters/chatgpt-desktop-process",
   "crates/adapters/chatgpt-desktop-atspi",
+  "crates/adapters/chatgpt-desktop-macos",
   "crates/runtime",
   "crates/cli",
 ]
