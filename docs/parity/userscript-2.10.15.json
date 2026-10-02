@@ -264,7 +264,9 @@
         "Linux AT-SPI bridge selects attachment controls semantically, drives the native file chooser without screen coordinates, and fails closed on ambiguous chooser entries",
         "required_attachment_precedes_send_and_fresh_chat_reattaches",
         "startup_reconciliation_defers_attachment_to_task_scoped_worker",
-        "45-second readiness window plus 5/10/20/40/60-second task-scoped Supervisor AttachmentWait backoff is production-wired"
+        "restart_reconciles_ready_attachment_without_duplicate_native_attach",
+        "45-second readiness window plus 5/10/20/40/60-second task-scoped Supervisor AttachmentWait backoff is production-wired",
+        "attachment effect payload persists the absolute readiness deadline so restart does not extend the 45-second attempt window or blindly repeat an already-observed native attach"
       ],
       "missing": [
         "exact-head packaged-artifact live Linux attachment acceptance on a real ChatGPT desktop accessibility surface",

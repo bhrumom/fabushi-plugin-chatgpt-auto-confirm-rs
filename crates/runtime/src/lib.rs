@@ -444,6 +444,12 @@ struct PendingApprovalSettlement {
     settlement_until_unix_ms: i64,
 }
 
+#[derive(Debug, Clone)]
+struct PendingAttachmentSettlement {
+    effect_id: i64,
+    readiness_deadline_unix_ms: i64,
+}
+
 #[derive(Clone)]
 struct DurableRunIdentity {
     task_id: TaskId,
@@ -467,7 +473,7 @@ struct DurableRunSurface {
     pending_reasoning: Arc<Mutex<Option<PendingReasoningSettlement>>>,
     pending_send: Arc<Mutex<Option<PendingSendSettlement>>>,
     pending_approval: Arc<Mutex<Option<PendingApprovalSettlement>>>,
-    pending_attachments: Arc<Mutex<HashMap<String, i64>>>,
+    pending_attachments: Arc<Mutex<HashMap<String, PendingAttachmentSettlement>>>,
 }
 
 impl DurableRunSurface {
@@ -496,10 +502,28 @@ impl DurableRunSurface {
             {
                 let payload: serde_json::Value = serde_json::from_str(&effect.effect_payload_json)
                     .context("parse durable attachment effect while restoring run surface")?;
-                if let Some(file_name) = payload.get("fileName").and_then(serde_json::Value::as_str)
-                {
-                    restored_attachments.insert(file_name.to_owned(), effect.id);
-                }
+                let file_name = payload
+                    .get("fileName")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("pending attachment effect is missing fileName")
+                    })?;
+                let readiness_deadline_unix_ms = payload
+                    .get("readinessDeadlineUnixMs")
+                    .and_then(serde_json::Value::as_i64)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "pending attachment effect is missing durable readiness deadline"
+                        )
+                    })?;
+                restored_attachments.insert(
+                    file_name.to_owned(),
+                    PendingAttachmentSettlement {
+                        effect_id: effect.id,
+                        readiness_deadline_unix_ms,
+                    },
+                );
                 continue;
             }
             if effect.task_id != journal.task_id.as_str()
@@ -616,10 +640,10 @@ impl DurableRunSurface {
         if !self.surface.attachment_ready(file_name).await? {
             return Ok(false);
         }
-        if let Some(effect_id) = self.pending_attachments.lock().await.remove(file_name) {
+        if let Some(pending) = self.pending_attachments.lock().await.remove(file_name) {
             let journal = self.journal.lock().await;
             journal.settle(
-                effect_id,
+                pending.effect_id,
                 true,
                 "attachment filename/preview readiness observed",
             )?;
@@ -627,35 +651,44 @@ impl DurableRunSurface {
         Ok(true)
     }
 
-    async fn attach_required_file(&self, file_name: &str, bytes: &[u8]) -> Result<()> {
-        if self.settle_pending_attachment_if_ready(file_name).await? {
-            return Ok(());
-        }
-        let digest = format!("{:x}", Sha256::digest(bytes));
-        let effect_id = if let Some(existing) = self
+    async fn attach_required_file(
+        &self,
+        file_name: &str,
+        bytes: &[u8],
+    ) -> Result<PendingAttachmentSettlement> {
+        if let Some(existing) = self
             .pending_attachments
             .lock()
             .await
             .get(file_name)
-            .copied()
+            .cloned()
         {
-            existing
-        } else {
-            let effect_id = {
-                let mut journal = self.journal.lock().await;
-                journal.begin(
-                    "attach_file",
-                    json!({"fileName": file_name, "sha256": digest}).to_string(),
-                    None,
-                    None,
-                )?
-            };
-            self.pending_attachments
-                .lock()
-                .await
-                .insert(file_name.to_owned(), effect_id);
-            effect_id
+            return Ok(existing);
+        }
+        let digest = format!("{:x}", Sha256::digest(bytes));
+        let readiness_deadline_unix_ms = unix_time_ms()?.saturating_add(45_000);
+        let effect_id = {
+            let mut journal = self.journal.lock().await;
+            journal.begin(
+                "attach_file",
+                json!({
+                    "fileName": file_name,
+                    "sha256": digest,
+                    "readinessDeadlineUnixMs": readiness_deadline_unix_ms,
+                })
+                .to_string(),
+                None,
+                None,
+            )?
         };
+        let pending = PendingAttachmentSettlement {
+            effect_id,
+            readiness_deadline_unix_ms,
+        };
+        self.pending_attachments
+            .lock()
+            .await
+            .insert(file_name.to_owned(), pending.clone());
         let accepted = {
             let _mutation_permit = self.mutation_permit().await;
             self.surface.attach_file(file_name, bytes).await?
@@ -670,7 +703,7 @@ impl DurableRunSurface {
             self.pending_attachments.lock().await.remove(file_name);
             bail!("desktop attachment action was not accepted for {file_name}");
         }
-        Ok(())
+        Ok(pending)
     }
 
     async fn ensure_required_attachments(&self) -> Result<()> {
@@ -708,8 +741,8 @@ impl DurableRunSurface {
                 {
                     break;
                 }
-                self.attach_required_file(&record.file_name, &bytes).await?;
-                let readiness_deadline = unix_time_ms()?.saturating_add(45_000);
+                let pending = self.attach_required_file(&record.file_name, &bytes).await?;
+                let readiness_deadline = pending.readiness_deadline_unix_ms;
                 loop {
                     if self
                         .settle_pending_attachment_if_ready(&record.file_name)
@@ -735,7 +768,7 @@ impl DurableRunSurface {
                         .await?;
                     break;
                 }
-                if let Some(effect_id) = self
+                if let Some(pending) = self
                     .pending_attachments
                     .lock()
                     .await
@@ -743,7 +776,7 @@ impl DurableRunSurface {
                 {
                     let journal = self.journal.lock().await;
                     journal.settle(
-                        effect_id,
+                        pending.effect_id,
                         false,
                         "attachment readiness was not observed within 45 seconds",
                     )?;
@@ -2645,6 +2678,12 @@ fn reconcile_pending_effect(
             .and_then(serde_json::Value::as_str)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| anyhow::anyhow!("pending attachment effect is missing fileName"))?;
+        payload
+            .get("readinessDeadlineUnixMs")
+            .and_then(serde_json::Value::as_i64)
+            .ok_or_else(|| {
+                anyhow::anyhow!("pending attachment effect is missing durable readiness deadline")
+            })?;
         return Ok(StartupReconcileOutcome::DeferredToRunWorker);
     }
 
@@ -3783,6 +3822,102 @@ mod actor_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[tokio::test]
+    async fn restart_reconciles_ready_attachment_without_duplicate_native_attach() {
+        let root = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-attachment-restart-{}-{}",
+            std::process::id(),
+            dispatch_marker().unwrap()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let state_db = root.join("state.sqlite3");
+        let input = root.join("notes.txt");
+        std::fs::write(&input, b"attachment payload").unwrap();
+        let task_id = TaskId::new("task-attachment-restart");
+        let run_id = RunId::new("run-attachment-restart");
+        let runtime = DesktopRuntime::new(LifecycleTestProcess, FakeSurface::default())
+            .with_state_db_path(state_db.clone());
+        runtime
+            .stage_task_attachments(&task_id, std::slice::from_ref(&input))
+            .unwrap();
+
+        let deadline = unix_time_ms().unwrap() + 45_000;
+        let mut store = SqliteStore::open(&state_db).unwrap();
+        store
+            .record_transition(
+                &TransitionRecord {
+                    task_id: task_id.clone(),
+                    run_id: run_id.clone(),
+                    expected_revision: 0,
+                    next_revision: 1,
+                    event_kind: "attach_file_prepared".into(),
+                    event_payload_json: json!({
+                        "fileName":"notes.txt",
+                        "sha256":"restored",
+                        "readinessDeadlineUnixMs":deadline
+                    })
+                    .to_string(),
+                    materialized_state_json: "{}".into(),
+                    effect_kind: "attach_file".into(),
+                    effect_payload_json: json!({
+                        "fileName":"notes.txt",
+                        "sha256":"restored",
+                        "readinessDeadlineUnixMs":deadline
+                    })
+                    .to_string(),
+                    idempotency_key: "attach-restart".into(),
+                    prepared_dispatch: None,
+                    prepared_approval: None,
+                },
+                unix_time_ms().unwrap(),
+            )
+            .unwrap();
+        let attach_effect = store.pending_effects(10).unwrap().remove(0);
+        store.mark_effect_attempted(attach_effect.id).unwrap();
+        drop(store);
+
+        let raw = Arc::new(AttachmentReadySurface {
+            ready: AtomicBool::new(true),
+            attach_count: AtomicUsize::new(0),
+            send_count: AtomicUsize::new(0),
+        });
+        let durable = DurableRunSurface::new(
+            DesktopSessionActorHandle::spawn(raw.clone()),
+            &state_db,
+            task_id,
+            run_id,
+            DispatchId::new("dispatch-attachment-restart"),
+            Phase::Work,
+            Round::new(1),
+        )
+        .unwrap();
+        let restored = durable
+            .pending_attachments
+            .lock()
+            .await
+            .get("notes.txt")
+            .cloned()
+            .unwrap();
+        assert_eq!(restored.readiness_deadline_unix_ms, deadline);
+
+        durable.send_prompt("resume").await.unwrap();
+        assert_eq!(
+            raw.attach_count.load(Ordering::SeqCst),
+            0,
+            "semantic readiness after restart must settle the old effect before any reattach"
+        );
+        assert_eq!(raw.send_count.load(Ordering::SeqCst), 1);
+        assert!(
+            SqliteStore::open(&state_db)
+                .unwrap()
+                .pending_effects(20)
+                .unwrap()
+                .iter()
+                .all(|effect| effect.effect_kind != "attach_file")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn startup_reconciliation_defers_attachment_to_task_scoped_worker() {
         let mut store = SqliteStore::in_memory().unwrap();
@@ -3796,10 +3931,10 @@ mod actor_tests {
                     expected_revision: 0,
                     next_revision: 1,
                     event_kind: "attach_file_prepared".into(),
-                    event_payload_json: json!({"fileName":"notes.txt","sha256":"abc"}).to_string(),
+                    event_payload_json: json!({"fileName":"notes.txt","sha256":"abc","readinessDeadlineUnixMs":12345}).to_string(),
                     materialized_state_json: "{}".into(),
                     effect_kind: "attach_file".into(),
-                    effect_payload_json: json!({"fileName":"notes.txt","sha256":"abc"}).to_string(),
+                    effect_payload_json: json!({"fileName":"notes.txt","sha256":"abc","readinessDeadlineUnixMs":12345}).to_string(),
                     idempotency_key: "attach-reconcile".into(),
                     prepared_dispatch: None,
                     prepared_approval: None,
