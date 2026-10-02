@@ -33,12 +33,13 @@ pub use fabushi_chatgpt_application::RunOptions;
 pub use fabushi_chatgpt_cdp::ChatGptCdp;
 use fabushi_chatgpt_domain::{
     AttachmentId, AuthorizationSettlementState, ConversationFingerprint, ConversationRef,
-    DispatchId, GoalRevision, HydrationState, OwnershipConfidence, RunId, SurfaceGeneration,
-    UserTurnBoundary,
+    DispatchId, GoalRevision, HydrationState, OwnershipConfidence, RunId, UserTurnBoundary,
 };
 pub use fabushi_chatgpt_domain::{
     ChatSurfaceSnapshot, Phase, ReasoningPreset, Round, RunReport, RunState, TaskId,
 };
+#[cfg(test)]
+use fabushi_chatgpt_domain::SurfaceGeneration;
 pub use fabushi_chatgpt_linux_browser::{BrowserLaunch, find_chromium_binary, launch_chromium};
 use serde_json::json;
 use sha2::{Digest, Sha256};
