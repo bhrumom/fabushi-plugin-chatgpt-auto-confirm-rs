@@ -6131,14 +6131,9 @@ VmRSS:	   512 kB
             ReasoningPreset::ExtraHigh,
         );
         let work_run = RunId::new("run-work-1");
-        let work_plan = continuous_phase_execution_plan(
-            &work_state,
-            &work_run,
-            &base_options,
-            true,
-            false,
-        )
-        .unwrap();
+        let work_plan =
+            continuous_phase_execution_plan(&work_state, &work_run, &base_options, true, false)
+                .unwrap();
         assert_eq!(work_plan.options.run_phase, Some(Phase::Work));
         assert_eq!(work_plan.options.run_round, Some(Round::new(1)));
         assert!(work_plan.options.review_identity.is_none());
@@ -6154,14 +6149,9 @@ VmRSS:	   512 kB
             "round-1 work result with stale quoted report {\"taskId\":\"old\",\"round\":9}".into(),
         );
         let review_run = RunId::new("run-review-1");
-        let review_plan = continuous_phase_execution_plan(
-            &review_state,
-            &review_run,
-            &base_options,
-            true,
-            false,
-        )
-        .unwrap();
+        let review_plan =
+            continuous_phase_execution_plan(&review_state, &review_run, &base_options, true, false)
+                .unwrap();
         assert_eq!(review_plan.options.run_phase, Some(Phase::Review));
         assert_eq!(review_plan.options.run_round, Some(Round::new(1)));
         assert!(review_plan.identity.start_fresh);
@@ -6171,7 +6161,11 @@ VmRSS:	   512 kB
         assert_eq!(review_identity.phase, Phase::Review);
         assert_eq!(review_identity.round, Round::new(1));
         assert!(review_plan.prompt.contains("MAHAYANA_TASK_REPORT_V1"));
-        assert!(review_plan.prompt.contains("taskId=\"task-continuous-plan\""));
+        assert!(
+            review_plan
+                .prompt
+                .contains("taskId=\"task-continuous-plan\"")
+        );
         assert!(review_plan.prompt.contains("round=1"));
         let review_context = review_plan.options.recovery_context.as_ref().unwrap();
         assert_eq!(
@@ -6201,22 +6195,24 @@ VmRSS:	   512 kB
         assert_eq!(next_work_plan.options.run_phase, Some(Phase::Work));
         assert_eq!(next_work_plan.options.run_round, Some(Round::new(2)));
         assert!(next_work_plan.identity.start_fresh);
-        assert!(next_work_plan.prompt.starts_with("do only the next required work"));
+        assert!(
+            next_work_plan
+                .prompt
+                .starts_with("do only the next required work")
+        );
         assert!(next_work_plan.prompt.contains("original goal"));
         assert!(next_work_plan.prompt.contains("round-1 work result"));
         let next_context = next_work_plan.options.recovery_context.as_ref().unwrap();
-        assert_eq!(next_context.current_next.as_deref(), Some("do only the next required work"));
+        assert_eq!(
+            next_context.current_next.as_deref(),
+            Some("do only the next required work")
+        );
         assert_eq!(next_context.original_goal, "original goal");
         assert_eq!(next_context.round, Round::new(2));
 
-        let resumed_review_plan = continuous_phase_execution_plan(
-            &review_state,
-            &review_run,
-            &base_options,
-            false,
-            true,
-        )
-        .unwrap();
+        let resumed_review_plan =
+            continuous_phase_execution_plan(&review_state, &review_run, &base_options, false, true)
+                .unwrap();
         assert!(!resumed_review_plan.identity.start_fresh);
         assert!(resumed_review_plan.identity.task_scoped_reconciliation);
         assert_eq!(
