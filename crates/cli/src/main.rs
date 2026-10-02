@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use fabushi_chatgpt_runtime::{
     ChatGptCdp, DesktopRuntime, Phase, ReasoningPreset, Round, RunOptions, TaskId,
-    find_chromium_binary, launch_chromium, run_prompt,
+    find_chromium_binary, launch_chromium, process_memory_diagnostics, run_prompt,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -129,6 +129,7 @@ async fn main() -> Result<()> {
                     "composerReady": snapshot.composer_ready,
                     "reasoningPickerAvailable": snapshot.reasoning_picker_available,
                     "selectedReasoningPreset": snapshot.selected_reasoning_preset,
+                    "runtimeMemory": process_memory_diagnostics(),
                 })
             );
         }

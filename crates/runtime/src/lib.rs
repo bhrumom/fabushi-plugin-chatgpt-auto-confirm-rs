@@ -48,6 +48,56 @@ const DESKTOP_UI_LEASE_TTL_MS: i64 = 15_000;
 const DESKTOP_UI_LEASE_HEARTBEAT: Duration = Duration::from_secs(5);
 const STARTUP_PENDING_EFFECT_LIMIT: usize = 256;
 
+fn parse_linux_proc_memory_status(status: &str) -> serde_json::Value {
+    fn kib_value(status: &str, key: &str) -> Option<u64> {
+        status.lines().find_map(|line| {
+            let rest = line.strip_prefix(key)?;
+            let mut parts = rest.split_whitespace();
+            let value = parts.next()?.parse::<u64>().ok()?;
+            match parts.next() {
+                Some("kB") | None => Some(value.saturating_mul(1024)),
+                _ => None,
+            }
+        })
+    }
+
+    json!({
+        "supported": true,
+        "source": "proc-self-status",
+        "processScope": "fabushi-cli-runtime",
+        "rssBytes": kib_value(status, "VmRSS:"),
+        "virtualBytes": kib_value(status, "VmSize:"),
+        "policy": "diagnostic-only"
+    })
+}
+
+pub fn process_memory_diagnostics() -> serde_json::Value {
+    #[cfg(target_os = "linux")]
+    {
+        return match std::fs::read_to_string("/proc/self/status") {
+            Ok(status) => parse_linux_proc_memory_status(&status),
+            Err(error) => json!({
+                "supported": false,
+                "source": "proc-self-status",
+                "processScope": "fabushi-cli-runtime",
+                "reason": error.to_string(),
+                "policy": "diagnostic-only"
+            }),
+        };
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        json!({
+            "supported": false,
+            "source": "platform-not-implemented",
+            "processScope": "fabushi-cli-runtime",
+            "reason": "runtime memory diagnostics are not implemented for this platform",
+            "policy": "diagnostic-only"
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StartupReconcileOutcome {
     Clear,
@@ -3860,6 +3910,24 @@ mod actor_tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::Notify;
+
+    #[test]
+    fn linux_process_memory_diagnostics_are_process_scoped_and_non_actionable() {
+        let value = parse_linux_proc_memory_status(
+            "Name:	fabushi
+VmSize:	  2048 kB
+VmRSS:	   512 kB
+",
+        );
+        assert_eq!(value["supported"], true);
+        assert_eq!(value["source"], "proc-self-status");
+        assert_eq!(value["processScope"], "fabushi-cli-runtime");
+        assert_eq!(value["rssBytes"], 512_u64 * 1024);
+        assert_eq!(value["virtualBytes"], 2048_u64 * 1024);
+        assert_eq!(value["policy"], "diagnostic-only");
+        assert!(value.get("action").is_none());
+        assert!(value.get("threshold").is_none());
+    }
 
     #[derive(Default)]
     struct FakeSurface {
