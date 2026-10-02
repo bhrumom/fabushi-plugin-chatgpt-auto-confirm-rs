@@ -1054,7 +1054,7 @@ def attachment_ready(file_name):
     return attachment_ready_for(flattened(find_app()), file_name)
 
 def fabushi_owned_draft(value):
-    return bool(re.search(r"\\s\\[Fabushi:[0-9a-fA-F]{8,32}(?:\\])?\\s*$", (value or "").strip()))
+    return bool(re.search(r"\s\[Fabushi:[0-9a-fA-F]{8,32}(?:\])?\s*$", (value or "").strip()))
 
 def set_composer_text(entry, prompt):
     before = composer_draft(entry)
