@@ -170,10 +170,12 @@
       "evidence": [
         "crates/application/src/lib.rs",
         "production rate-limit cooldown uses task-scoped durable Supervisor wake",
-        "rate_limit_deferred_task_does_not_block_runnable_task"
+        "rate_limit_deferred_task_does_not_block_runnable_task",
+        "desktop AT-SPI rate-limit projection requires alert/notification/status/dialog provenance instead of scanning the conversation transcript",
+        "dismiss_rate_limit scopes Got it/明白了 to the same semantic notice container, preventing unrelated page controls from being clicked",
+        "rate_limit_contract_rejects_transcript_text_and_accepts_alert_notice plus rate_limit_detection_requires_semantic_notice_provenance"
       ],
       "missing": [
-        "desktop notice provenance",
         "acceptance"
       ]
     },
