@@ -189,7 +189,7 @@ mod tests {
         assert!(BRIDGE.contains("pyatspi.KEY_STRING"));
         assert!(BRIDGE.contains("pyatspi.STATE_EDITABLE"));
         assert!(BRIDGE.contains("if not action(entry):"));
-        assert!(BRIDGE.contains("ChatGPT composer did not acquire keyboard focus"));
+        assert!(BRIDGE.contains("Chromium may retain AT-SPI focus on the document"));
         assert!(BRIDGE.contains("ChatGPT composer did not expose the exact prepared prompt"));
     }
 

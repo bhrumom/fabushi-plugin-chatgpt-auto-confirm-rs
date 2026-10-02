@@ -1019,23 +1019,29 @@ def set_composer_text(entry, prompt):
     else:
         if not state(entry, pyatspi.STATE_FOCUSABLE) or not state(entry, pyatspi.STATE_EDITABLE):
             raise RuntimeError("ChatGPT composer lacks a safe editable keyboard surface")
+        focused = False
         try:
-            entry.queryComponent().grabFocus()
+            focused = bool(entry.queryComponent().grabFocus())
         except Exception:
-            pass
+            focused = False
         for _ in range(4):
             if state(entry, pyatspi.STATE_FOCUSED):
+                focused = True
                 break
             time.sleep(0.025)
         if not state(entry, pyatspi.STATE_FOCUSED):
-            if not action(entry):
-                raise RuntimeError("ChatGPT composer could not receive keyboard focus")
+            activated = action(entry)
+            if not activated and not focused:
+                raise RuntimeError("ChatGPT composer could not activate its keyboard surface")
             for _ in range(12):
                 if state(entry, pyatspi.STATE_FOCUSED):
+                    focused = True
                     break
                 time.sleep(0.025)
-        if not state(entry, pyatspi.STATE_FOCUSED):
-            raise RuntimeError("ChatGPT composer did not acquire keyboard focus")
+            # Chromium may retain AT-SPI focus on the document while the
+            # contenteditable ProseMirror owns the internal caret. Exact
+            # composer Text readback below is therefore the final safety proof
+            # before Send, rather than STATE_FOCUSED alone.
         pyatspi.Registry.generateKeyboardEvent(
             0, "a", pyatspi.KEY_PRESSRELEASE | pyatspi.KEY_CONTROL
         )
@@ -1484,7 +1490,8 @@ def composer_write_contract_self_test():
         def getName(self, index):
             return "activate"
         def doAction(self, index):
-            values["focused"] = True
+            # Chromium can leave AT-SPI STATE_FOCUSED on document web even
+            # when this contenteditable owns the internal caret.
             return True
     class FakeText:
         def getText(self, start, end):
