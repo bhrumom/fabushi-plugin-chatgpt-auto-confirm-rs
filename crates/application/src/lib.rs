@@ -688,7 +688,7 @@ impl ReviewSettlementTracker {
     }
 }
 
-fn validated_snapshot_review_report(
+pub fn validated_snapshot_review_report(
     snapshot: &ChatSurfaceSnapshot,
     task_id: &TaskId,
     round: Round,

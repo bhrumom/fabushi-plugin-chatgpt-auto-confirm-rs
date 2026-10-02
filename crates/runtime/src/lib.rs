@@ -2,8 +2,9 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use fabushi_chatgpt_application::{
     ChatProcessHealth, ChatProcessPort, ChatSurfacePort, Clock, ContinuousTaskState,
-    ReasoningDecision, ReasoningGateState, RecoveryRunContext, ReviewRunIdentity, RunPrompt,
-    parse_strict_review_report,
+    RECOVERED_TERMINAL_STABILITY, ReasoningDecision, ReasoningGateState, RecoveryRunContext,
+    ReviewReport, ReviewRunIdentity, RunPrompt, parse_strict_review_report,
+    validated_snapshot_review_report,
 };
 #[cfg(target_os = "linux")]
 use fabushi_chatgpt_desktop_atspi::ChatGptDesktopAtspi;
@@ -12,8 +13,8 @@ use fabushi_chatgpt_desktop_macos::{ChatGptDesktopMacProcess, ChatGptDesktopMacS
 #[cfg(target_os = "linux")]
 use fabushi_chatgpt_desktop_process::ChatGptDesktopProcess;
 use fabushi_chatgpt_sqlite_store::{
-    PreparedApproval, PreparedDispatch, SqliteStore, StateTransitionRecord, TransitionRecord,
-    UiSessionLease,
+    IncompleteContinuousPhase, PreparedApproval, PreparedDispatch, SqliteStore,
+    StateTransitionRecord, TransitionRecord, UiSessionLease,
 };
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -1032,6 +1033,67 @@ impl DesktopRuntime {
         Ok(())
     }
 
+    async fn recover_completed_continuous_phase(
+        &self,
+        state: &ContinuousTaskState,
+    ) -> Result<Option<(RunId, RunReport, Option<ReviewReport>)>> {
+        self.ensure_ready().await?;
+        self.reconcile_unsettled_effects_before_run().await?;
+
+        let candidate = {
+            let store = SqliteStore::open(&self.state_db_path)?;
+            store.latest_incomplete_continuous_phase(&state.task_id)?
+        };
+        let Some(candidate) = candidate else {
+            return Ok(None);
+        };
+        if !incomplete_phase_matches_state(&candidate, state)? {
+            return Ok(None);
+        }
+
+        let surface = self.desktop_session().await?;
+        let first = surface.observe().await?;
+        if !snapshot_matches_dispatch(&first, &candidate.dispatch_id) {
+            return Ok(None);
+        }
+
+        match state.phase {
+            Phase::Work => {
+                if !first.ordinary_terminal_evidence() {
+                    return Ok(None);
+                }
+                tokio::time::sleep(RECOVERED_TERMINAL_STABILITY).await;
+                let second = surface.observe().await?;
+                let Some(report) =
+                    recovered_work_report(&first, &second, &candidate.dispatch_id)
+                else {
+                    return Ok(None);
+                };
+                Ok(Some((candidate.run_id, report, None)))
+            }
+            Phase::Review => {
+                let Some(review) =
+                    recovered_review_report(&first, state, &candidate.dispatch_id)
+                else {
+                    return Ok(None);
+                };
+                let report = RunReport {
+                    state: RunState::Complete,
+                    conversation_ref: first.conversation_ref.clone(),
+                    assistant_text: first.assistant_visible_prose.clone(),
+                    approvals_clicked: 0,
+                    recoveries: 0,
+                    rate_limit_pauses: 0,
+                    dispatch_retries: 0,
+                    message:
+                        "recovered strict Review final from the previous durable phase after restart"
+                            .into(),
+                };
+                Ok(Some((candidate.run_id, report, Some(review))))
+            }
+        }
+    }
+
     fn load_continuous_task_state(&self, task_id: &TaskId) -> Result<Option<ContinuousTaskState>> {
         let store = SqliteStore::open(&self.state_db_path)?;
         let Some(raw) = store.task_state_json(task_id)? else {
@@ -1080,7 +1142,9 @@ impl DesktopRuntime {
         requested_reasoning: ReasoningPreset,
         options: RunOptions,
     ) -> Result<RunReport> {
-        let mut state = match self.load_continuous_task_state(&task_id)? {
+        let loaded_state = self.load_continuous_task_state(&task_id)?;
+        let resumed_existing = loaded_state.is_some();
+        let mut state = match loaded_state {
             Some(existing) => {
                 if existing.goal != goal {
                     bail!(
@@ -1108,6 +1172,51 @@ impl DesktopRuntime {
                 dispatch_retries: 0,
                 message: "continuous task is already complete in durable state".into(),
             });
+        }
+
+        if resumed_existing
+            && let Some((run_id, report, recovered_review)) =
+                self.recover_completed_continuous_phase(&state).await?
+        {
+            let phase = state.phase;
+            let round = state.round;
+            match phase {
+                Phase::Work => {
+                    state = state.after_work_result(report.assistant_text.clone());
+                    self.persist_continuous_task_state(
+                        &state,
+                        &run_id,
+                        "continuous_work_result_saved",
+                        json!({
+                            "round": round,
+                            "resultChars": report.assistant_text.chars().count(),
+                            "recoveredAfterRestart": true,
+                        }),
+                    )?;
+                }
+                Phase::Review => {
+                    let review = recovered_review.ok_or_else(|| {
+                        anyhow::anyhow!("recovered Review phase did not include strict report")
+                    })?;
+                    let status = review.status;
+                    state = state.apply_review(review)?;
+                    self.persist_continuous_task_state(
+                        &state,
+                        &run_id,
+                        "continuous_review_applied",
+                        json!({
+                            "round": round,
+                            "status": status,
+                            "nextRound": state.round,
+                            "completed": state.completed,
+                            "recoveredAfterRestart": true,
+                        }),
+                    )?;
+                    if state.completed {
+                        return Ok(report);
+                    }
+                }
+            }
         }
 
         loop {
@@ -1287,6 +1396,66 @@ impl DesktopRuntime {
         options.expected_dispatch_id = Some(dispatch_id);
         worker.execute(&prepared, options).await
     }
+}
+
+fn incomplete_phase_matches_state(
+    candidate: &IncompleteContinuousPhase,
+    state: &ContinuousTaskState,
+) -> Result<bool> {
+    let payload: serde_json::Value = serde_json::from_str(&candidate.event_payload_json)
+        .context("parse continuous phase-start event payload")?;
+    let expected_phase = match state.phase {
+        Phase::Work => "work",
+        Phase::Review => "review",
+    };
+    Ok(payload.get("phase").and_then(serde_json::Value::as_str) == Some(expected_phase)
+        && payload.get("round").and_then(serde_json::Value::as_u64)
+            == Some(u64::from(state.round.get())))
+}
+
+fn snapshot_matches_dispatch(snapshot: &ChatSurfaceSnapshot, dispatch_id: &DispatchId) -> bool {
+    snapshot.current_dispatch_id.as_ref() == Some(dispatch_id)
+        && snapshot.user_turn_ownership == OwnershipConfidence::Strong
+}
+
+fn recovered_work_report(
+    first: &ChatSurfaceSnapshot,
+    second: &ChatSurfaceSnapshot,
+    dispatch_id: &DispatchId,
+) -> Option<RunReport> {
+    if !snapshot_matches_dispatch(first, dispatch_id)
+        || !snapshot_matches_dispatch(second, dispatch_id)
+        || !first.ordinary_terminal_evidence()
+        || !second.ordinary_terminal_evidence()
+        || first.assistant_response_boundary.is_none()
+        || first.assistant_response_boundary != second.assistant_response_boundary
+        || first.activity_fingerprint() != second.activity_fingerprint()
+    {
+        return None;
+    }
+
+    Some(RunReport {
+        state: RunState::Complete,
+        conversation_ref: second.conversation_ref.clone(),
+        assistant_text: second.assistant_visible_prose.clone(),
+        approvals_clicked: 0,
+        recoveries: 0,
+        rate_limit_pauses: 0,
+        dispatch_retries: 0,
+        message:
+            "recovered stable terminal Work result from the previous durable phase after restart"
+                .into(),
+    })
+}
+
+fn recovered_review_report(
+    snapshot: &ChatSurfaceSnapshot,
+    state: &ContinuousTaskState,
+    dispatch_id: &DispatchId,
+) -> Option<ReviewReport> {
+    snapshot_matches_dispatch(snapshot, dispatch_id)
+        .then(|| validated_snapshot_review_report(snapshot, &state.task_id, state.round))
+        .flatten()
 }
 
 fn merge_task_root(existing: Option<&str>) -> Result<serde_json::Map<String, serde_json::Value>> {
@@ -2223,6 +2392,37 @@ mod actor_tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn recovered_work_terminal_requires_same_dispatch_boundary_and_static_snapshot() {
+        let dispatch_id = DispatchId::new("dispatch-recovered");
+        let first = ChatSurfaceSnapshot {
+            conversation_ref: Some(fabushi_chatgpt_domain::ConversationRef::new("conversation-1")),
+            user_turn_boundary: Some(UserTurnBoundary::new("u1")),
+            current_dispatch_id: Some(dispatch_id.clone()),
+            user_turn_ownership: OwnershipConfidence::Strong,
+            assistant_response_boundary: Some(
+                fabushi_chatgpt_domain::AssistantResponseBoundary::new("a1"),
+            ),
+            assistant_response_ownership: OwnershipConfidence::Strong,
+            assistant_visible_prose: "completed work".into(),
+            response_local_copy: true,
+            ..Default::default()
+        };
+        let second = first.clone();
+        let report = recovered_work_report(&first, &second, &dispatch_id).unwrap();
+        assert_eq!(report.assistant_text, "completed work");
+
+        let mut wrong_dispatch = second.clone();
+        wrong_dispatch.current_dispatch_id = Some(DispatchId::new("different"));
+        assert!(recovered_work_report(&first, &wrong_dispatch, &dispatch_id).is_none());
+
+        let mut changed_boundary = second;
+        changed_boundary.assistant_response_boundary = Some(
+            fabushi_chatgpt_domain::AssistantResponseBoundary::new("a2"),
+        );
+        assert!(recovered_work_report(&first, &changed_boundary, &dispatch_id).is_none());
     }
 
     #[test]

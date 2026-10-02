@@ -39,6 +39,13 @@ pub struct PreparedDispatch {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncompleteContinuousPhase {
+    pub run_id: RunId,
+    pub dispatch_id: DispatchId,
+    pub event_payload_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedApproval {
     pub fingerprint: String,
     pub phase: String,
@@ -653,6 +660,42 @@ impl SqliteStore {
             .context("read dispatch attempt settlement")
     }
 
+    pub fn latest_incomplete_continuous_phase(
+        &self,
+        task_id: &TaskId,
+    ) -> Result<Option<IncompleteContinuousPhase>> {
+        self.connection
+            .query_row(
+                "SELECT phase.run_id, dispatch.dispatch_id, phase.event_payload_json
+                 FROM run_events AS phase
+                 JOIN dispatch_attempts AS dispatch
+                   ON dispatch.task_id=phase.task_id AND dispatch.run_id=phase.run_id
+                 WHERE phase.task_id=?1
+                   AND phase.event_kind='continuous_phase_started'
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM run_events AS outcome
+                       WHERE outcome.run_id=phase.run_id
+                         AND outcome.event_kind IN (
+                             'continuous_work_result_saved',
+                             'continuous_review_applied'
+                         )
+                   )
+                 ORDER BY phase.id DESC, dispatch.id DESC
+                 LIMIT 1",
+                [task_id.as_str()],
+                |row| {
+                    Ok(IncompleteContinuousPhase {
+                        run_id: RunId::new(row.get::<_, String>(0)?),
+                        dispatch_id: DispatchId::new(row.get::<_, String>(1)?),
+                        event_payload_json: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .context("read latest incomplete continuous phase")
+    }
+
     pub fn task_state_json(&self, task_id: &TaskId) -> Result<Option<String>> {
         self.connection
             .query_row(
@@ -867,6 +910,62 @@ mod tests {
         let effects = store.pending_effects(10).unwrap();
         assert_eq!(effects.len(), 1);
         assert_eq!(effects[0].idempotency_key, "effect-1");
+    }
+
+    #[test]
+    fn latest_incomplete_continuous_phase_disappears_after_result_transition() {
+        let store = SqliteStore::in_memory().unwrap();
+        let task_id = TaskId::new("task-resume");
+        store
+            .connection
+            .execute(
+                "INSERT INTO tasks(task_id, revision, state_json, updated_at_unix_ms)
+                 VALUES(?1, 1, '{}', 1)",
+                [task_id.as_str()],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO run_events(
+                     task_id, run_id, revision, event_kind, event_payload_json, created_at_unix_ms
+                 ) VALUES(?1, 'run-resume', 1, 'continuous_phase_started',
+                     '{"phase":"work","round":2,"goalRevision":0}', 1)",
+                [task_id.as_str()],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO dispatch_attempts(
+                     task_id, run_id, dispatch_id, prepared_intent_json, created_at_unix_ms
+                 ) VALUES(?1, 'run-resume', 'dispatch-resume', '{}', 2)",
+                [task_id.as_str()],
+            )
+            .unwrap();
+
+        let candidate = store
+            .latest_incomplete_continuous_phase(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(candidate.run_id, RunId::new("run-resume"));
+        assert_eq!(candidate.dispatch_id, DispatchId::new("dispatch-resume"));
+
+        store
+            .connection
+            .execute(
+                "INSERT INTO run_events(
+                     task_id, run_id, revision, event_kind, event_payload_json, created_at_unix_ms
+                 ) VALUES(?1, 'run-resume', 2, 'continuous_work_result_saved', '{}', 3)",
+                [task_id.as_str()],
+            )
+            .unwrap();
+        assert!(
+            store
+                .latest_incomplete_continuous_phase(&task_id)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
