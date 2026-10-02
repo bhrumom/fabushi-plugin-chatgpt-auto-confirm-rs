@@ -1676,6 +1676,47 @@ def response_boundary_contract_self_test():
         return False
     return response_local_copy_evidence(remounted_items, 0, remounted_scope)
 
+def surface_generation_contract_self_test():
+    class FakeNode:
+        def __init__(self, process_id, accessible_id, object_id, path):
+            self.name = "ChatGPT"
+            self._process_id = process_id
+            self._accessible_id = accessible_id
+            self._object_id = object_id
+            self.path = path
+        def get_process_id(self):
+            return self._process_id
+        def get_accessible_id(self):
+            return self._accessible_id
+        def get_id(self):
+            return self._object_id
+        def getRoleName(self):
+            return "document web"
+
+    def item(node):
+        return {
+            "node": node,
+            "role": "document web",
+            "name": "ChatGPT",
+            "text": "",
+            "visible": True,
+            "enabled": True,
+            "focused": False,
+            "selected": False,
+        }
+
+    before = surface_generation([item(FakeNode(101, "doc", 7, "/surface/1"))])
+    after = surface_generation([item(FakeNode(101, "doc", 8, "/surface/2"))])
+    if before is None or after is None or before == after:
+        return False
+    if len(before) != 64 or len(after) != 64:
+        return False
+    ambiguous = [
+        item(FakeNode(101, "doc", 7, "/surface/1")),
+        item(FakeNode(101, "doc", 8, "/surface/2")),
+    ]
+    return surface_generation(ambiguous) is None
+
 def conversation_ref_contract_self_test():
     class FakeHyperlink:
         def __init__(self, uri):
@@ -1968,6 +2009,8 @@ def main():
         result = conversation_ref_contract_self_test()
     elif op == "contract-response-boundary":
         result = response_boundary_contract_self_test()
+    elif op == "contract-surface-generation":
+        result = surface_generation_contract_self_test()
     elif op == "contract-rate-limit":
         result = rate_limit_contract_self_test()
     elif op == "contract-review-report":
