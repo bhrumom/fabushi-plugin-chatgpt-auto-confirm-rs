@@ -131,9 +131,32 @@ impl<'a> RunPrompt<'a> {
     }
 
     pub async fn execute(&self, prompt: &str, options: RunOptions) -> Result<RunReport> {
+        self.execute_with_dispatch_state(prompt, options, false).await
+    }
+
+    pub async fn resume_confirmed_dispatch(
+        &self,
+        prompt: &str,
+        options: RunOptions,
+    ) -> Result<RunReport> {
+        if options.expected_dispatch_id.is_none() {
+            bail!("resuming a confirmed dispatch requires expected_dispatch_id");
+        }
+        self.execute_with_dispatch_state(prompt, options, true).await
+    }
+
+    async fn execute_with_dispatch_state(
+        &self,
+        prompt: &str,
+        options: RunOptions,
+        preconfirmed_dispatch: bool,
+    ) -> Result<RunReport> {
         let before = self.surface.observe().await?;
-        let baseline = before.user_turn_boundary.clone();
-        self.surface.send_prompt(prompt).await?;
+        let mut baseline = before.user_turn_boundary.clone();
+        let mut dispatch_preconfirmed = preconfirmed_dispatch;
+        if !dispatch_preconfirmed {
+            self.surface.send_prompt(prompt).await?;
+        }
 
         let started = self.clock.now();
         let mut dispatched = started;
@@ -170,7 +193,7 @@ impl<'a> RunPrompt<'a> {
                 .as_ref()
                 .is_none_or(|expected| snapshot.current_dispatch_id.as_ref() == Some(expected));
             let dispatch_confirmed = snapshot.user_turn_boundary.is_some()
-                && snapshot.user_turn_boundary != baseline
+                && (dispatch_preconfirmed || snapshot.user_turn_boundary != baseline)
                 && snapshot.user_turn_ownership == OwnershipConfidence::Strong
                 && dispatch_identity_matches;
 
@@ -179,7 +202,9 @@ impl<'a> RunPrompt<'a> {
                     && self.destructive_handoff_is_safe().await?
                 {
                     self.surface.start_fresh_conversation().await?;
+                    baseline = self.surface.observe().await?.user_turn_boundary;
                     self.surface.send_prompt(prompt).await?;
+                    dispatch_preconfirmed = false;
                     recoveries += 1;
                     dispatch_retries += 1;
                     dispatched = now;
@@ -226,7 +251,9 @@ impl<'a> RunPrompt<'a> {
                 let recovery_prompt =
                     recovery_handoff_prompt(prompt, options.recovery_context.as_ref(), &snapshot)?;
                 self.surface.start_fresh_conversation().await?;
+                baseline = self.surface.observe().await?.user_turn_boundary;
                 self.surface.send_prompt(&recovery_prompt).await?;
+                dispatch_preconfirmed = false;
                 recoveries += 1;
                 dispatched = now;
                 progress = now;
@@ -249,7 +276,9 @@ impl<'a> RunPrompt<'a> {
                         &snapshot,
                     )?;
                     self.surface.start_fresh_conversation().await?;
+                    baseline = self.surface.observe().await?.user_turn_boundary;
                     self.surface.send_prompt(&recovery_prompt).await?;
+                    dispatch_preconfirmed = false;
                     recoveries += 1;
                     dispatched = now;
                     progress = now;
@@ -292,7 +321,9 @@ impl<'a> RunPrompt<'a> {
                             &snapshot,
                         )?;
                         self.surface.start_fresh_conversation().await?;
+                        baseline = self.surface.observe().await?.user_turn_boundary;
                         self.surface.send_prompt(&recovery_prompt).await?;
+                        dispatch_preconfirmed = false;
                         recoveries += 1;
                         dispatched = now;
                         progress = now;
@@ -306,7 +337,12 @@ impl<'a> RunPrompt<'a> {
                 terminal_since = None;
             } else if snapshot.ordinary_terminal_evidence() {
                 let since = *terminal_since.get_or_insert(now);
-                if now.saturating_sub(since) >= ORDINARY_TERMINAL_STABILITY {
+                let required_stability = if dispatch_preconfirmed {
+                    RECOVERED_TERMINAL_STABILITY
+                } else {
+                    ORDINARY_TERMINAL_STABILITY
+                };
+                if now.saturating_sub(since) >= required_stability {
                     return Ok(RunReport {
                         state: RunState::Complete,
                         conversation_ref: snapshot.conversation_ref,
@@ -315,7 +351,11 @@ impl<'a> RunPrompt<'a> {
                         recoveries,
                         rate_limit_pauses: rate_limits,
                         dispatch_retries,
-                        message: "stable current-response terminal evidence".into(),
+                        message: if dispatch_preconfirmed {
+                            "stable recovered current-response terminal evidence".into()
+                        } else {
+                            "stable current-response terminal evidence".into()
+                        },
                     });
                 }
             } else {
@@ -1459,6 +1499,56 @@ mod tests {
         assert!(sends[1].contains("next required step"));
         assert!(sends[1].contains("device offline"));
         assert!(sends[1].contains("prepared prompt [Fabushi:marker]"));
+    }
+
+    #[tokio::test]
+    async fn resumed_confirmed_dispatch_supervises_without_duplicate_send() {
+        let dispatch_id = DispatchId::new("dispatch-resume");
+        let owned = ChatSurfaceSnapshot {
+            app_healthy: true,
+            user_turn_boundary: Some(UserTurnBoundary::new("u1")),
+            current_dispatch_id: Some(dispatch_id.clone()),
+            user_turn_ownership: OwnershipConfidence::Strong,
+            assistant_response_boundary: Some(AssistantResponseBoundary::new("a1")),
+            assistant_response_ownership: OwnershipConfidence::Strong,
+            assistant_visible_prose: "finished existing work".into(),
+            response_local_copy: true,
+            ..Default::default()
+        };
+        let surface = ScriptedSurface::new(vec![
+            owned.clone(),
+            owned.clone(),
+            owned.clone(),
+            owned.clone(),
+            owned.clone(),
+            owned.clone(),
+            owned.clone(),
+            owned.clone(),
+            owned.clone(),
+            owned,
+        ]);
+        let clock = FakeClock::new();
+        let options = RunOptions {
+            poll_interval: Duration::from_secs(1),
+            timeout: Duration::from_secs(30),
+            stale_reload_after: Duration::from_secs(1_000),
+            expected_dispatch_id: Some(dispatch_id),
+            ..RunOptions::default()
+        };
+
+        let report = RunPrompt::new(&surface, &clock)
+            .resume_confirmed_dispatch("already dispatched prompt", options)
+            .await
+            .unwrap();
+
+        assert_eq!(report.state, RunState::Complete);
+        assert_eq!(report.assistant_text, "finished existing work");
+        assert_eq!(
+            report.message,
+            "stable recovered current-response terminal evidence"
+        );
+        assert_eq!(surface.send_count(), 0);
+        assert_eq!(clock.now(), RECOVERED_TERMINAL_STABILITY);
     }
 
     #[tokio::test]

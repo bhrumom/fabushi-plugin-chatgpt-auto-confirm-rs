@@ -95,7 +95,7 @@
         "crates/cli/src/main.rs"
       ],
       "missing": [
-        "resume an owned Review that is still in its settlement window after CLI restart",
+        "preserve the original Review settlement deadline across process restart instead of restarting the local two-minute tracker",
         "acceptance"
       ]
     },
@@ -111,9 +111,9 @@
         "crates/cli/src/main.rs"
       ],
       "missing": [
-        "resume an owned phase that is still actively streaming after CLI restart without starting a duplicate fresh run",
         "pause/resume/cancel lifecycle",
         "fair multi-task supervision",
+        "fresh-handoff dispatch identity rotation",
         "exact-artifact real acceptance"
       ]
     },
@@ -222,7 +222,6 @@
       "missing": [
         "cross-process durable UI lease acceptance on htch-runtime",
         "fair multi-task next-wake scheduler",
-        "semantic resume of an owned phase that is still active after restart",
         "pause/resume/cancel worker lifecycle",
         "htch-runtime concurrent-task acceptance"
       ]
