@@ -8,12 +8,12 @@
   "target": {
     "repository": "bhrumom/fabushi-plugin-chatgpt-auto-confirm-rs",
     "spec": "docs/specs/desktop-chat-userscript-parity-rust-cli.md",
-    "lastVerifiedExactHead": "eb83b0b844a930c71f39d4e4e8ea789e409c18ef",
-    "lastVerifiedCiRun": 37000139413,
+    "lastVerifiedExactHead": "f572592df361ea31f32391f01c40c0e63177fc33",
+    "lastVerifiedCiRun": 37004568576,
     "lastVerifiedArtifact": {
-      "id": 11223821227,
+      "id": 11225421625,
       "name": "fabushi-chatgpt-auto-confirm-linux-x86_64",
-      "sha256": "6c0d428cc7b7a5fa907517e4f1b1202fd96da7fed66b4ddd9f1cb78d31b24106"
+      "sha256": "0cf555a5fd47fef6c31d640ceec1f1082e059a62413c8a285b730d640b181e04"
     }
   },
   "rules": {
@@ -187,10 +187,12 @@
         "start_fresh_conversation persists baseline user-turn/conversation identity, re-observes a clean fresh-surface postcondition before settlement, and startup reconciliation can settle crash-left fresh effects without replay",
         "startup_reconciliation_settles_fresh_conversation_only_from_clean_postcondition and startup_reconciliation_keeps_fresh_conversation_pending_when_old_owned_turn_remains",
         "SQLite schema v4 task_deletions tombstone makes task deletion crash-resumable across database cleanup and attachment-byte cleanup",
-        "task_delete_is_transactional_and_refuses_pending_effects plus restart_finishes_crash_left_task_attachment_cleanup prove fail-closed deletion and restart cleanup"
+        "task_delete_is_transactional_and_refuses_pending_effects plus restart_finishes_crash_left_task_attachment_cleanup prove fail-closed deletion and restart cleanup",
+        "recover_current_surface now journals the pre-reload semantic baseline and only settles after same conversation/user-turn/dispatch identity is ready and degraded error/hydration state has cleared",
+        "startup_reconciliation_settles_recovery_only_from_same_identity_ready_surface and startup_reconciliation_keeps_healthy_stall_recovery_pending_after_crash prove crash-left degraded recovery is reconcilable while ambiguous healthy-stall reload remains pending"
       ],
       "missing": [
-        "semantic startup reconciliation for recover/reload destructive effects",
+        "healthy-stall reload remains intentionally fail-closed after a crash because the current desktop snapshot has no independent reload-generation proof",
         "exact-artifact task lifecycle acceptance",
         "resumable supervision after fail-closed ambiguous pending effects",
         "real crash/restart acceptance"
@@ -291,7 +293,11 @@
         "exact-head run 37000139413 is green at eb83b0b844a930c71f39d4e4e8ea789e409c18ef across Linux, macOS aarch64, and macOS x86_64",
         "Linux artifact 11223821227 / fabushi-chatgpt-auto-confirm-linux-x86_64 / sha256:6c0d428cc7b7a5fa907517e4f1b1202fd96da7fed66b4ddd9f1cb78d31b24106 is bound to eb83b0b844a930c71f39d4e4e8ea789e409c18ef",
         "Linux artifact 11223821227 was downloaded through the GitHub connector onto htch-runtime; device-side ZIP sha256 exactly matched 6c0d428cc7b7a5fa907517e4f1b1202fd96da7fed66b4ddd9f1cb78d31b24106, and the packaged binary is 12708992 bytes with sha256:58b9cfe421bdffdf1b438ed4810d5485145081b7f803e2e462d9709e765ed741",
-        "the exact packaged binary executed --help on htch-runtime; doctor currently fails before app attach because /usr/bin/chatgpt is absent and read-only device application enumeration finds no installed ChatGPT desktop application"
+        "the exact packaged binary executed --help on htch-runtime; doctor currently fails before app attach because /usr/bin/chatgpt is absent and read-only device application enumeration finds no installed ChatGPT desktop application",
+        "production-code exact-head run 37004568576 is green at f572592df361ea31f32391f01c40c0e63177fc33 across Linux, macOS aarch64, and macOS x86_64; every job passed architecture, fmt, workspace tests, clippy, release build, and artifact upload",
+        "Linux artifact 11225421625 / fabushi-chatgpt-auto-confirm-linux-x86_64 / sha256:0cf555a5fd47fef6c31d640ceec1f1082e059a62413c8a285b730d640b181e04; macOS arm64 artifact 11225556788 / sha256:130769cfd4fb445d600b8e62cf0ce254b034a3498e88cd4037d1211c238f4b8c; macOS x86_64 artifact 11225037580 / sha256:ac905854b476c26e616c5b0fa6d714e3c3d4f26bcfe41c8af7ebe82bf7a507e8",
+        "Linux artifact 11225421625 was downloaded through the GitHub connector onto htch-runtime; device-side ZIP sha256 exactly matched 0cf555a5fd47fef6c31d640ceec1f1082e059a62413c8a285b730d640b181e04, and the packaged binary is 12790144 bytes with sha256:f05bd6afa9fd7b0288a6998897d29e387b5f8f54c8a01e27ecf117edaa6a3aa5",
+        "the f572592 packaged binary executed --help on htch-runtime and exposed edit-goal/delete; doctor still fails before app attach because /usr/bin/chatgpt is absent, so Gates E/F remain pending"
       ],
       "missing": [
         "restore/install a real ChatGPT desktop application on htch-runtime without using the device controller to substitute CLI actions",
