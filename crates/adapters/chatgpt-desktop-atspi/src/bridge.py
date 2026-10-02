@@ -1683,7 +1683,7 @@ def composer_write_contract_self_test():
         if values["typed"] != ["replacement [Fabushi:deadbeef]"]: return False
         values["draft"] = ""
         try:
-            set_composer_text(fake, "alpha\\nbeta")
+            set_composer_text(fake, "alpha\nbeta")
         except RuntimeError as exc:
             return "single-line" in str(exc)
         return False
