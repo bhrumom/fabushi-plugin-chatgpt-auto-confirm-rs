@@ -260,6 +260,8 @@ mod tests {
         assert!(BRIDGE.contains("composer_draft"));
         assert!(BRIDGE.contains("wait_for_composer_draft"));
         assert!(BRIDGE.contains("unrelated draft; refusing to overwrite it"));
+        assert!(BRIDGE.contains("fabushi_owned_draft"));
+        assert!(BRIDGE.contains("did not clear the stale Fabushi draft"));
         assert!(BRIDGE.contains("prepared prompt must be single-line"));
     }
 
