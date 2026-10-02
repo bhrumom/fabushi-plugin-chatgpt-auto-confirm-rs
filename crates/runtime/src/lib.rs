@@ -2312,6 +2312,41 @@ impl DesktopRuntime {
             .join("attachments")
     }
 
+    fn initialize_one_shot_task(
+        &self,
+        task_id: &TaskId,
+        run_id: &RunId,
+    ) -> Result<()> {
+        let mut store = SqliteStore::open(&self.state_db_path)?;
+        if store.task_state_json(task_id)?.is_some() {
+            bail!(
+                "refusing to reuse existing one-shot task identity {}",
+                task_id.as_str()
+            );
+        }
+        store.record_state_transition(
+            &StateTransitionRecord {
+                task_id: task_id.clone(),
+                run_id: run_id.clone(),
+                expected_revision: 0,
+                next_revision: 1,
+                event_kind: "one_shot_started".into(),
+                event_payload_json: json!({
+                    "taskId": task_id.as_str(),
+                    "runId": run_id.as_str(),
+                })
+                .to_string(),
+                materialized_state_json: json!({
+                    "kind": "one-shot",
+                    "taskId": task_id.as_str(),
+                    "runId": run_id.as_str(),
+                })
+                .to_string(),
+            },
+            unix_time_ms()?,
+        )
+    }
+
     fn stage_task_attachments(
         &self,
         task_id: &TaskId,
@@ -3134,6 +3169,8 @@ impl DesktopRuntime {
     ) -> Result<RunReport> {
         let identity_marker = dispatch_marker()?;
         let task_id = TaskId::new(format!("task-{identity_marker}"));
+        let run_id = RunId::new(format!("run-{identity_marker}"));
+        self.initialize_one_shot_task(&task_id, &run_id)?;
         self.stage_task_attachments(&task_id, attachment_paths)?;
         self.run_prompt_with_identity(
             prompt,
@@ -3141,7 +3178,7 @@ impl DesktopRuntime {
             options,
             RunPromptIdentity {
                 task_id,
-                run_id: RunId::new(format!("run-{identity_marker}")),
+                run_id,
                 start_fresh: false,
                 task_scoped_reconciliation: false,
             },
@@ -5103,6 +5140,50 @@ mod actor_tests {
         async fn ensure_running(&self) -> Result<()> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn one_shot_task_is_durable_and_active_before_first_effect() {
+        let root = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-one-shot-start-{}-{}",
+            std::process::id(),
+            dispatch_marker().unwrap()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let state_db = root.join("state.sqlite3");
+        let runtime = DesktopRuntime::new(LifecycleTestProcess, FakeSurface::default())
+            .with_state_db_path(state_db.clone());
+        let task_id = TaskId::new("task-one-shot");
+        let run_id = RunId::new("run-one-shot");
+
+        runtime
+            .initialize_one_shot_task(&task_id, &run_id)
+            .unwrap();
+
+        let state = SqliteStore::open(&state_db)
+            .unwrap()
+            .task_state_json(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&state).unwrap()["kind"],
+            "one-shot"
+        );
+        let control = SqliteRunControl {
+            path: state_db.clone(),
+            task_id: task_id.clone(),
+        };
+        assert_eq!(
+            control.lifecycle().await.unwrap(),
+            ContinuousTaskLifecycle::Active
+        );
+        assert!(
+            runtime
+                .initialize_one_shot_task(&task_id, &run_id)
+                .is_err(),
+            "one-shot identity reuse must fail closed"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
