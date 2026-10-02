@@ -359,8 +359,8 @@
         "the 39632937 packaged Gate E canary safely failed before Send because the composer contained a stale prior Fabushi continuous prepared draft; read-only AT-SPI inspection proved the draft ended in [Fabushi:f985...], exposing a production stale-draft recovery gap rather than a user-draft ownership failure",
         "exact-head run 37054592733 is green at 6b9e1b8512957885df8eb83d6275a26363dd77df across Linux, macOS aarch64, and macOS x86_64; every job passed architecture, fmt, workspace tests, clippy, release build, and artifact upload",
         "artifacts from run 37054592733: Linux 11248151562 sha256:7ad3b464076e4fd0db2ec53db158fb8de5c5a39cb95e72e7ddc424117bb4139a; macOS arm64 11248855715 sha256:648c295a5c5b5c3d8b0ea8e5f7ada0b0e8474760c11bebaaf30084027d488676; macOS x86_64 11247932849 sha256:f4cdd8df3b92916cac7fef14b6b5e6ed12568755c9777a5fdb33480095ca232a",
-        "Linux artifact 11248151562 was downloaded to htch-runtime and device-side ZIP sha256 matched GitHub exactly; packaged binary sha256 is 62f9910a2c3f45e1d2d78090ebe5efc4466fdd8a91a4f372be8be1dcf0d34126",
-        "the 1fc19b5 packaged status/doctor currently fail before app attach because /usr/bin/chatgpt is absent; read-only device application enumeration likewise shows no installed/running ChatGPT desktop application, so Gates E/F remain environment-blocked without any device-controller mutation"
+        "artifact 11248151562 is the formal Linux release candidate for the verified 6b9e1b8 baseline, but it was not downloaded in the current round because htch-runtime has no installed/running ChatGPT desktop application and /usr/bin/chatgpt is absent",
+        "current read-only htch-runtime application enumeration confirms the desktop environment remains unavailable, so Gates E/F stay environment-blocked without any device-controller mutation; no packaged-binary Gate E evidence is claimed for 6b9e1b8"
       ],
       "missing": [
         "restore/install a real ChatGPT desktop application on htch-runtime without using the device controller to substitute CLI actions; current read-only enumeration has no ChatGPT application and /usr/bin/chatgpt is absent",
