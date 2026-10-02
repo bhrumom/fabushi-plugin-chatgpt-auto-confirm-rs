@@ -478,6 +478,57 @@ impl DurableRunJournal {
             unix_time_ms()?,
         )
     }
+
+    fn bind_owned_conversation_ref(
+        &mut self,
+        dispatch_id: &DispatchId,
+        snapshot: &ChatSurfaceSnapshot,
+    ) -> Result<bool> {
+        if !snapshot_matches_dispatch(snapshot, dispatch_id) {
+            return Ok(false);
+        }
+        let Some(conversation_ref) = snapshot.conversation_ref.as_ref() else {
+            return Ok(false);
+        };
+
+        let Some(existing_state) = self.store.task_state_json(&self.task_id)? else {
+            return Ok(false);
+        };
+        let mut root = merge_task_root(Some(&existing_state))?;
+        let Some(orchestration) = root.get("orchestration").cloned() else {
+            return Ok(false);
+        };
+        let mut state: ContinuousTaskState = serde_json::from_value(orchestration)
+            .context("parse continuous task state while binding conversation ref")?;
+        if state.conversation_ref.as_ref() == Some(conversation_ref) {
+            return Ok(false);
+        }
+        state.conversation_ref = Some(conversation_ref.clone());
+        root.insert(
+            "orchestration".into(),
+            serde_json::to_value(&state).context("serialize conversation-bound task state")?,
+        );
+
+        let next_revision = self.revision + 1;
+        self.store.record_state_transition(
+            &StateTransitionRecord {
+                task_id: self.task_id.clone(),
+                run_id: self.run_id.clone(),
+                expected_revision: self.revision,
+                next_revision,
+                event_kind: "conversation_ref_bound".into(),
+                event_payload_json: json!({
+                    "dispatchId": dispatch_id.as_str(),
+                    "conversationRef": conversation_ref.as_str(),
+                })
+                .to_string(),
+                materialized_state_json: serde_json::Value::Object(root).to_string(),
+            },
+            unix_time_ms()?,
+        )?;
+        self.revision = next_revision;
+        Ok(true)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -971,6 +1022,11 @@ impl ChatSurfacePort for DurableRunSurface {
         self.settle_pending_send_if_observed(&snapshot).await?;
         self.project_and_settle_pending_approval(&mut snapshot)
             .await?;
+        let dispatch_id = self.dispatch_id.lock().await.clone();
+        self.journal
+            .lock()
+            .await
+            .bind_owned_conversation_ref(&dispatch_id, &snapshot)?;
         Ok(snapshot)
     }
 
@@ -5077,6 +5133,124 @@ mod actor_tests {
             StartupReconcileOutcome::DeferredToRunWorker
         );
         assert_eq!(store.pending_effects(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn in_flight_owned_observation_durably_binds_conversation_ref_once() {
+        let path = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-inflight-conversation-ref-{}-{}.sqlite3",
+            std::process::id(),
+            dispatch_marker().unwrap()
+        ));
+        let task_id = TaskId::new("task-inflight-ref");
+        let run_id = RunId::new("run-inflight-ref");
+        let dispatch_id = DispatchId::new("dispatch-inflight-ref");
+        let runtime = DesktopRuntime::new(LifecycleTestProcess, FakeSurface::default())
+            .with_state_db_path(path.clone());
+        let state =
+            ContinuousTaskState::new(task_id.clone(), "goal".into(), ReasoningPreset::ExtraHigh);
+        runtime
+            .persist_continuous_task_state(
+                &state,
+                &run_id,
+                "continuous_phase_started",
+                json!({"phase": "work", "round": 1}),
+            )
+            .unwrap();
+
+        let initial_revision = SqliteStore::open(&path)
+            .unwrap()
+            .task_revision(&task_id)
+            .unwrap()
+            .unwrap();
+        let mut journal = DurableRunJournal::open(&path, task_id.clone(), run_id.clone()).unwrap();
+        let conversation_ref = ConversationRef::new(
+            "atspi:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        );
+        let owned = ChatSurfaceSnapshot {
+            current_dispatch_id: Some(dispatch_id.clone()),
+            user_turn_ownership: OwnershipConfidence::Strong,
+            conversation_ref: Some(conversation_ref.clone()),
+            ..Default::default()
+        };
+        assert!(
+            journal
+                .bind_owned_conversation_ref(&dispatch_id, &owned)
+                .unwrap()
+        );
+        let bound_revision = SqliteStore::open(&path)
+            .unwrap()
+            .task_revision(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bound_revision, initial_revision + 1);
+        assert_eq!(
+            runtime
+                .active_continuous_tasks()
+                .unwrap()
+                .into_iter()
+                .find(|state| state.task_id == task_id)
+                .unwrap()
+                .conversation_ref,
+            Some(conversation_ref.clone())
+        );
+
+        assert!(
+            !journal
+                .bind_owned_conversation_ref(&dispatch_id, &owned)
+                .unwrap()
+        );
+        assert_eq!(
+            SqliteStore::open(&path)
+                .unwrap()
+                .task_revision(&task_id)
+                .unwrap()
+                .unwrap(),
+            bound_revision,
+            "same owned ref must not churn durable revision"
+        );
+
+        let wrong_dispatch = ChatSurfaceSnapshot {
+            current_dispatch_id: Some(DispatchId::new("different-dispatch")),
+            user_turn_ownership: OwnershipConfidence::Strong,
+            conversation_ref: Some(ConversationRef::new(
+                "atspi:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            )),
+            ..Default::default()
+        };
+        assert!(
+            !journal
+                .bind_owned_conversation_ref(&dispatch_id, &wrong_dispatch)
+                .unwrap()
+        );
+        let weak = ChatSurfaceSnapshot {
+            current_dispatch_id: Some(dispatch_id.clone()),
+            user_turn_ownership: OwnershipConfidence::Weak,
+            conversation_ref: Some(ConversationRef::new(
+                "atspi:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            )),
+            ..Default::default()
+        };
+        assert!(
+            !journal
+                .bind_owned_conversation_ref(&dispatch_id, &weak)
+                .unwrap()
+        );
+        assert_eq!(
+            runtime
+                .active_continuous_tasks()
+                .unwrap()
+                .into_iter()
+                .find(|state| state.task_id == task_id)
+                .unwrap()
+                .conversation_ref,
+            Some(conversation_ref),
+            "wrong dispatch or weak ownership must not overwrite the durable ref"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
     }
 
     #[test]

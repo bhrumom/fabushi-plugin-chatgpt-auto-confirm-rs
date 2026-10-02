@@ -147,11 +147,12 @@
         "startup_scan_enumerates_only_active_incomplete_continuous_tasks and startup_daemon_fails_closed_before_desktop_mutation_with_multiple_active_tasks prove startup orchestration and fail-closed multi-task behavior before ConversationRef rebinding exists",
         "Linux desktop AT-SPI projects an opaque hashed ConversationRef only from one unambiguous current/selected accessibility link with a native URI; transcript/title text alone cannot create identity",
         "ChatSurfacePort/DesktopSessionActor/DurableRunSurface now expose journaled single-writer rebind_conversation, and incomplete single-task resume rebinds to the persisted ConversationRef before validating the exact dispatch marker",
-        "startup scan preserves durable ConversationRef while ambiguous/missing refs and sensitive/authorization surfaces fail closed"
+        "startup scan preserves durable ConversationRef while ambiguous/missing refs and sensitive/authorization surfaces fail closed",
+        "DurableRunSurface now captures the current ConversationRef during an in-flight phase as soon as the exact durable dispatch marker has strong user-turn ownership; the state-only transition is idempotent and wrong-dispatch/weak-ownership observations cannot overwrite it",
+        "in_flight_owned_observation_durably_binds_conversation_ref_once proves pre-terminal crash-survivable binding without poll-time revision churn"
       ],
       "missing": [
         "exact-artifact real acceptance",
-        "capture/reconcile the current in-flight phase ConversationRef early enough for crash-mid-phase multi-task startup",
         "production daemon rotation across multiple independently running server-side conversations",
         "macOS ConversationRef projection/rebind parity",
         "live concurrent-task acceptance"
