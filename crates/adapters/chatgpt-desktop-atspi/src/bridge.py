@@ -1006,6 +1006,47 @@ def attach_file(path):
 def attachment_ready(file_name):
     return attachment_ready_for(flattened(find_app()), file_name)
 
+def set_composer_text(entry, prompt):
+    try:
+        editable = entry.queryEditableText()
+    except Exception:
+        editable = None
+    if editable is not None:
+        try:
+            editable.setTextContents(prompt)
+        except Exception as exc:
+            raise RuntimeError("ChatGPT composer EditableText update failed") from exc
+    else:
+        if not state(entry, pyatspi.STATE_FOCUSABLE) or not state(entry, pyatspi.STATE_EDITABLE):
+            raise RuntimeError("ChatGPT composer lacks a safe editable keyboard surface")
+        try:
+            entry.queryComponent().grabFocus()
+        except Exception as exc:
+            raise RuntimeError("ChatGPT composer could not receive keyboard focus") from exc
+        time.sleep(0.04)
+        if not state(entry, pyatspi.STATE_FOCUSED):
+            raise RuntimeError("ChatGPT composer did not acquire keyboard focus")
+        pyatspi.Registry.generateKeyboardEvent(
+            0, "a", pyatspi.KEY_PRESSRELEASE | pyatspi.KEY_CONTROL
+        )
+        time.sleep(0.03)
+        lines = prompt.split("\n")
+        for index, line in enumerate(lines):
+            if line:
+                pyatspi.Registry.generateKeyboardEvent(0, line, pyatspi.KEY_STRING)
+            if index + 1 < len(lines):
+                pyatspi.Registry.generateKeyboardEvent(65505, None, pyatspi.KEY_PRESS)
+                pyatspi.Registry.generateKeyboardEvent(65293, None, pyatspi.KEY_PRESSRELEASE)
+                pyatspi.Registry.generateKeyboardEvent(65505, None, pyatspi.KEY_RELEASE)
+    time.sleep(0.08)
+    try:
+        observed = entry.queryText().getText(0, -1) or ""
+    except Exception as exc:
+        raise RuntimeError("ChatGPT composer text cannot be verified after update") from exc
+    if observed.replace("\ufffc", "") != prompt:
+        raise RuntimeError("ChatGPT composer did not expose the exact prepared prompt")
+    return True
+
 def send_prompt(prompt):
     app = find_app()
     items = flattened(app)
@@ -1019,8 +1060,7 @@ def send_prompt(prompt):
             break
     if entry is None:
         raise RuntimeError("ChatGPT composer is not ready")
-    editable = entry.queryEditableText()
-    editable.setTextContents(prompt)
+    set_composer_text(entry, prompt)
     time.sleep(0.15)
     items = flattened(app)
     button = find_named(items, SEND_WORDS, roles=("push button", "button"), actionable=True)
@@ -1415,9 +1455,81 @@ def conversation_ref_contract_self_test():
     return current_conversation_ref([attr_current]) == opaque_conversation_ref(uri)
 
 
+def composer_write_contract_self_test():
+    values = {"text": "\ufffc", "focused": False, "shift": False, "select_all": False}
+    events = []
+    pyatspi.STATE_FOCUSABLE, pyatspi.STATE_EDITABLE, pyatspi.STATE_FOCUSED = 1001, 1002, 1003
+    pyatspi.KEY_PRESSRELEASE, pyatspi.KEY_CONTROL = 1, 2
+    pyatspi.KEY_PRESS, pyatspi.KEY_STRING, pyatspi.KEY_RELEASE = 4, 8, 16
+    class FakeState:
+        def contains(self, which):
+            if which in (pyatspi.STATE_FOCUSABLE, pyatspi.STATE_EDITABLE):
+                return True
+            return which == pyatspi.STATE_FOCUSED and values["focused"]
+    class FakeComponent:
+        def grabFocus(self):
+            values["focused"] = True
+            return True
+    class FakeText:
+        def getText(self, start, end):
+            return values["text"]
+    class FakeEntry:
+        def getState(self):
+            return FakeState()
+        def queryEditableText(self):
+            raise NotImplementedError()
+        def queryComponent(self):
+            return FakeComponent()
+        def queryText(self):
+            return FakeText()
+    class FakeRegistry:
+        @staticmethod
+        def generateKeyboardEvent(keyval, text, synth):
+            events.append((keyval, text, synth))
+            if text == "a" and synth == (pyatspi.KEY_PRESSRELEASE | pyatspi.KEY_CONTROL):
+                values["select_all"] = True
+            elif keyval == 65505 and synth == pyatspi.KEY_PRESS:
+                values["shift"] = True
+            elif keyval == 65505 and synth == pyatspi.KEY_RELEASE:
+                values["shift"] = False
+            elif keyval == 65293 and synth == pyatspi.KEY_PRESSRELEASE:
+                if not values["shift"]:
+                    raise RuntimeError("Enter without Shift would submit early")
+                if values["select_all"]:
+                    values["text"], values["select_all"] = "", False
+                values["text"] += "\n"
+            elif synth == pyatspi.KEY_STRING:
+                if values["select_all"]:
+                    values["text"], values["select_all"] = "", False
+                values["text"] += text
+    pyatspi.Registry = FakeRegistry
+    prepared = "alpha\n\nbeta\n[Fabushi:deadbeef]"
+    if not set_composer_text(FakeEntry(), prepared) or values["text"] != prepared:
+        return False
+    if not events or events[0][1] != "a" or sum(1 for event in events if event[0] == 65293) != 3:
+        return False
+    class BadEntry(FakeEntry):
+        def queryEditableText(self):
+            class Editable:
+                def setTextContents(self, prompt):
+                    pass
+            return Editable()
+        def queryText(self):
+            class BadText:
+                def getText(self, start, end):
+                    return "wrong"
+            return BadText()
+    try:
+        set_composer_text(BadEntry(), "expected")
+    except RuntimeError as exc:
+        return "exact prepared prompt" in str(exc)
+    return False
+
 def main():
     op = sys.argv[1]
-    if op == "contract-conversation-ref":
+    if op == "contract-composer-write":
+        result = composer_write_contract_self_test()
+    elif op == "contract-conversation-ref":
         result = conversation_ref_contract_self_test()
     elif op == "contract-response-boundary":
         result = response_boundary_contract_self_test()

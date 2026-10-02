@@ -168,6 +168,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn composer_write_contract_supports_prosemirror_without_editable_text() {
+        use std::process::Command as StdCommand;
+        let wrapper = format!(
+            "import sys,types; sys.modules['pyatspi']=types.SimpleNamespace(); sys.argv=['bridge','contract-composer-write']; exec({:?})",
+            BRIDGE
+        );
+        let output = StdCommand::new("python3")
+            .arg("-c")
+            .arg(wrapper)
+            .output()
+            .expect("python3 must execute deterministic composer-write contract");
+        assert!(
+            output.status.success(),
+            "contract failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "true");
+        assert!(BRIDGE.contains("pyatspi.KEY_STRING"));
+        assert!(BRIDGE.contains("pyatspi.STATE_EDITABLE"));
+        assert!(BRIDGE.contains("ChatGPT composer did not expose the exact prepared prompt"));
+    }
+
+    #[test]
     fn conversation_ref_projection_is_strong_opaque_and_fail_closed_on_ambiguity() {
         use std::process::Command as StdCommand;
         let wrapper = format!(
