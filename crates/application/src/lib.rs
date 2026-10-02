@@ -33,6 +33,9 @@ pub trait ChatSurfacePort: Send + Sync {
         Ok(false)
     }
     async fn send_prompt(&self, prompt: &str) -> Result<()>;
+    async fn expected_dispatch_id(&self) -> Result<Option<DispatchId>> {
+        Ok(None)
+    }
     async fn approve_current_conversation(&self) -> Result<bool>;
     async fn dismiss_rate_limit_notice(&self) -> Result<bool>;
     async fn recover_current_surface(&self) -> Result<()>;
@@ -190,8 +193,12 @@ impl<'a> RunPrompt<'a> {
             }
 
             let snapshot = self.surface.observe().await?;
-            let dispatch_identity_matches = options
-                .expected_dispatch_id
+            let expected_dispatch_id = self
+                .surface
+                .expected_dispatch_id()
+                .await?
+                .or_else(|| options.expected_dispatch_id.clone());
+            let dispatch_identity_matches = expected_dispatch_id
                 .as_ref()
                 .is_none_or(|expected| snapshot.current_dispatch_id.as_ref() == Some(expected));
             let dispatch_confirmed = snapshot.user_turn_boundary.is_some()
