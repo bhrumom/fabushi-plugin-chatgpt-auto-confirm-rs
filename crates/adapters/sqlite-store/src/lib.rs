@@ -702,6 +702,33 @@ impl SqliteStore {
             .context("read durable explicit-load failure state")
     }
 
+    pub fn load_failure_state_for_run(
+        &self,
+        task_id: &TaskId,
+        run_id: &RunId,
+    ) -> Result<Option<LoadFailureRecord>> {
+        self.connection
+            .query_row(
+                "SELECT task_id, run_id, phase, round, attempts, next_retry_unix_ms
+                 FROM load_failure_states
+                 WHERE task_id=?1 AND run_id=?2
+                 ORDER BY round DESC LIMIT 1",
+                params![task_id.as_str(), run_id.as_str()],
+                |row| {
+                    Ok(LoadFailureRecord {
+                        task_id: row.get(0)?,
+                        run_id: row.get(1)?,
+                        phase: row.get(2)?,
+                        round: row.get(3)?,
+                        attempts: row.get(4)?,
+                        next_retry_unix_ms: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .context("read durable explicit-load failure state for run")
+    }
+
     pub fn store_load_failure_state(
         &self,
         record: &LoadFailureRecord,

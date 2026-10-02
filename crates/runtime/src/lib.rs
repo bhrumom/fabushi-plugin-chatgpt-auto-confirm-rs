@@ -56,6 +56,7 @@ enum StartupReconcileOutcome {
     SettledObservedApproval,
     SettledObservedFreshConversation,
     SettledObservedRecovery,
+    SettledAmbiguousExplicitLoadRecovery,
 }
 
 struct DurableUiLease {
@@ -2132,7 +2133,8 @@ impl DesktopRuntime {
                 | StartupReconcileOutcome::SettledObservedReasoning
                 | StartupReconcileOutcome::SettledObservedApproval
                 | StartupReconcileOutcome::SettledObservedFreshConversation
-                | StartupReconcileOutcome::SettledObservedRecovery => {
+                | StartupReconcileOutcome::SettledObservedRecovery
+                | StartupReconcileOutcome::SettledAmbiguousExplicitLoadRecovery => {
                     settled_any = true;
                 }
             }
@@ -3079,24 +3081,50 @@ fn reconcile_pending_effect(
             .context(
                 "parse pending surface-recovery effect payload during startup reconciliation",
             )?;
-        if !recovery_baseline_was_observably_degraded(&payload)
-            || !recovery_postcondition(snapshot, &payload)?
+        if recovery_baseline_was_observably_degraded(&payload)
+            && recovery_postcondition(snapshot, &payload)?
         {
-            return Ok(StartupReconcileOutcome::Clear);
+            store.settle_effect(
+                effect.id,
+                &json!({
+                    "ok": true,
+                    "detail": "startup reconciliation observed recovered surface postcondition without replaying reload",
+                    "conversationFingerprint": snapshot.conversation_fingerprint.as_ref().map(|value| value.as_str()),
+                    "userTurnBoundary": snapshot.user_turn_boundary.as_ref().map(|value| value.as_str()),
+                    "dispatchId": snapshot.current_dispatch_id.as_ref().map(|value| value.as_str()),
+                })
+                .to_string(),
+                unix_time_ms()?,
+            )?;
+            return Ok(StartupReconcileOutcome::SettledObservedRecovery);
         }
-        store.settle_effect(
-            effect.id,
-            &json!({
-                "ok": true,
-                "detail": "startup reconciliation observed recovered surface postcondition without replaying reload",
-                "conversationFingerprint": snapshot.conversation_fingerprint.as_ref().map(|value| value.as_str()),
-                "userTurnBoundary": snapshot.user_turn_boundary.as_ref().map(|value| value.as_str()),
-                "dispatchId": snapshot.current_dispatch_id.as_ref().map(|value| value.as_str()),
-            })
-            .to_string(),
-            unix_time_ms()?,
-        )?;
-        return Ok(StartupReconcileOutcome::SettledObservedRecovery);
+
+        let explicit_load_attempt = payload
+            .get("baselineUnableToLoadConversation")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if explicit_load_attempt {
+            let task_id = TaskId::new(effect.task_id.clone());
+            let run_id = RunId::new(effect.run_id.clone());
+            if let Some(state) = store.load_failure_state_for_run(&task_id, &run_id)?
+                && state.attempts > 0
+            {
+                store.settle_effect(
+                    effect.id,
+                    &json!({
+                        "ok": false,
+                        "ambiguous": true,
+                        "detail": "crash-left explicit-load reload attempt cannot be proven; account the already-durable attempt without replay and resume at its preserved next retry deadline",
+                        "attempts": state.attempts,
+                        "nextRetryUnixMs": state.next_retry_unix_ms,
+                    })
+                    .to_string(),
+                    unix_time_ms()?,
+                )?;
+                return Ok(StartupReconcileOutcome::SettledAmbiguousExplicitLoadRecovery);
+            }
+        }
+        return Ok(StartupReconcileOutcome::Clear);
     }
 
     if effect.effect_kind == "start_fresh_conversation" {
@@ -4040,6 +4068,50 @@ mod actor_tests {
             StartupReconcileOutcome::SettledObservedRecovery
         );
         assert!(store.pending_effects(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn startup_reconciliation_accounts_crash_left_explicit_load_attempt_without_replay() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        let task_id = TaskId::new("task-recover-explicit-load");
+        let run_id = RunId::new("run-recover-explicit-load");
+        let baseline = ChatSurfaceSnapshot {
+            app_healthy: true,
+            composer_ready: false,
+            current_dispatch_id: Some(DispatchId::new("dispatch-recover")),
+            user_turn_boundary: Some(UserTurnBoundary::new("turn-recover")),
+            conversation_fingerprint: Some(ConversationFingerprint::new("conversation-recover")),
+            unable_to_load_conversation: true,
+            hydration: HydrationState::Ready,
+            ..Default::default()
+        };
+        create_pending_recovery(&mut store, &task_id, &run_id, &baseline);
+        store
+            .store_load_failure_state(
+                &LoadFailureRecord {
+                    task_id: task_id.as_str().to_owned(),
+                    run_id: run_id.as_str().to_owned(),
+                    phase: "work".into(),
+                    round: 1,
+                    attempts: 3,
+                    next_retry_unix_ms: 987_654,
+                },
+                123_456,
+            )
+            .unwrap();
+
+        let effect = store.pending_effects(10).unwrap().remove(0);
+        assert_eq!(
+            reconcile_pending_effect(&mut store, &baseline, &effect).unwrap(),
+            StartupReconcileOutcome::SettledAmbiguousExplicitLoadRecovery
+        );
+        assert!(store.pending_effects(10).unwrap().is_empty());
+        let state = store
+            .load_failure_state_for_run(&task_id, &run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.attempts, 3);
+        assert_eq!(state.next_retry_unix_ms, 987_654);
     }
 
     #[test]
