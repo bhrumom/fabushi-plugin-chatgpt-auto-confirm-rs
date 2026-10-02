@@ -8,12 +8,12 @@
   "target": {
     "repository": "bhrumom/fabushi-plugin-chatgpt-auto-confirm-rs",
     "spec": "docs/specs/desktop-chat-userscript-parity-rust-cli.md",
-    "lastVerifiedExactHead": "f572592df361ea31f32391f01c40c0e63177fc33",
-    "lastVerifiedCiRun": 37004568576,
+    "lastVerifiedExactHead": "e914a11804c5ad623df6019f2f08365b0e543dd9",
+    "lastVerifiedCiRun": 37007291813,
     "lastVerifiedArtifact": {
-      "id": 11225421625,
+      "id": 11226720838,
       "name": "fabushi-chatgpt-auto-confirm-linux-x86_64",
-      "sha256": "0cf555a5fd47fef6c31d640ceec1f1082e059a62413c8a285b730d640b181e04"
+      "sha256": "0aba210f346752b8d9e3224bae409cda2cd0068e67fe0c37a722c111adff7337"
     }
   },
   "rules": {
@@ -136,12 +136,14 @@
       "destination": "application RecoveryState",
       "status": "partial",
       "evidence": [
-        "crates/application/src/lib.rs"
+        "crates/application/src/lib.rs",
+        "SQLite schema v5 load_failure_states persists task/run/phase/round attempts and absolute next_retry_unix_ms",
+        "RunWorker injects SqliteLoadFailureState into shipping RunPrompt; unable-to-load waits to the preserved 30-second deadline, performs seven recoveries, then fresh-handoffs with RecoveryEnvelope",
+        "shipping_run_prompt_persists_seven_explicit_load_retries_then_handoffs and explicit_load_failure_state_round_trips_absolute_deadline",
+        "startup_reconciliation_accounts_crash_left_explicit_load_attempt_without_replay preserves the already-durable attempt/deadline and never replays the ambiguous old reload"
       ],
       "missing": [
-        "durable attempt state",
-        "desktop recovery effect wiring",
-        "acceptance"
+        "exact-head packaged-artifact live unable-to-load acceptance"
       ]
     },
     {
@@ -189,12 +191,12 @@
         "SQLite schema v4 task_deletions tombstone makes task deletion crash-resumable across database cleanup and attachment-byte cleanup",
         "task_delete_is_transactional_and_refuses_pending_effects plus restart_finishes_crash_left_task_attachment_cleanup prove fail-closed deletion and restart cleanup",
         "recover_current_surface now journals the pre-reload semantic baseline and only settles after same conversation/user-turn/dispatch identity is ready and degraded error/hydration state has cleared",
-        "startup_reconciliation_settles_recovery_only_from_same_identity_ready_surface and startup_reconciliation_keeps_healthy_stall_recovery_pending_after_crash prove crash-left degraded recovery is reconcilable while ambiguous healthy-stall reload remains pending"
+        "startup_reconciliation_settles_recovery_only_from_same_identity_ready_surface and startup_reconciliation_keeps_healthy_stall_recovery_pending_after_crash prove crash-left degraded recovery is reconcilable while ambiguous healthy-stall reload remains pending",
+        "explicit-load crash-left recoveries can be settled as ambiguous/accounted without replay only when a durable numbered load-failure attempt already exists; supervision resumes at the preserved absolute retry deadline"
       ],
       "missing": [
         "healthy-stall reload remains intentionally fail-closed after a crash because the current desktop snapshot has no independent reload-generation proof",
         "exact-artifact task lifecycle acceptance",
-        "resumable supervision after fail-closed ambiguous pending effects",
         "real crash/restart acceptance"
       ]
     },
@@ -208,11 +210,12 @@
         "crates/adapters/chatgpt-desktop-atspi/src/lib.rs",
         "crates/adapters/chatgpt-desktop-atspi/src/bridge.py",
         "crates/runtime/src/lib.rs",
-        "crates/cli/src/main.rs"
+        "crates/cli/src/main.rs",
+        "popup_semantics classifies accessibility dialogs without leaking AT-SPI roles upstream, excludes bounded authorization cards from generic dismissal, and exposes only one explicit harmless dismiss action",
+        "popup_contract_executes_safe_sensitive_and_authorization_fixtures plus shipping RunPrompt harmless/sensitive popup behavioral contracts"
       ],
       "missing": [
-        "deterministic semantic fixtures beyond source-contract tests",
-        "native attachment effect/readiness",
+        "macOS native attachment parity",
         "stream retry and review-report projection hardening",
         "real authorization and terminal acceptance"
       ]
@@ -225,10 +228,11 @@
       "evidence": [
         "crates/application/src/lib.rs",
         "crates/adapters/chatgpt-desktop-process/src/lib.rs",
-        "crates/runtime/src/lib.rs"
+        "crates/runtime/src/lib.rs",
+        "ReattachingDesktopSurface restarts ChatGPT only for read-side observation after confirmed NotRunning and waits for a newly discoverable semantic surface",
+        "reattaching_surface_restarts_only_for_read_side_observation and reattaching_surface_never_restarts_or_replays_destructive_send prove read rebind plus mutation fail-closed behavior"
       ],
       "missing": [
-        "reattach/crash lifecycle policy wiring",
         "htch-runtime lifecycle acceptance"
       ]
     },
@@ -251,7 +255,7 @@
       "missing": [
         "cross-process durable UI lease acceptance on htch-runtime",
         "htch-runtime concurrent-task acceptance",
-        "native attachment wait/retry production wiring"
+        "exact-artifact live attachment wait/retry acceptance"
       ]
     },
     {
@@ -297,7 +301,10 @@
         "production-code exact-head run 37004568576 is green at f572592df361ea31f32391f01c40c0e63177fc33 across Linux, macOS aarch64, and macOS x86_64; every job passed architecture, fmt, workspace tests, clippy, release build, and artifact upload",
         "Linux artifact 11225421625 / fabushi-chatgpt-auto-confirm-linux-x86_64 / sha256:0cf555a5fd47fef6c31d640ceec1f1082e059a62413c8a285b730d640b181e04; macOS arm64 artifact 11225556788 / sha256:130769cfd4fb445d600b8e62cf0ce254b034a3498e88cd4037d1211c238f4b8c; macOS x86_64 artifact 11225037580 / sha256:ac905854b476c26e616c5b0fa6d714e3c3d4f26bcfe41c8af7ebe82bf7a507e8",
         "Linux artifact 11225421625 was downloaded through the GitHub connector onto htch-runtime; device-side ZIP sha256 exactly matched 0cf555a5fd47fef6c31d640ceec1f1082e059a62413c8a285b730d640b181e04, and the packaged binary is 12790144 bytes with sha256:f05bd6afa9fd7b0288a6998897d29e387b5f8f54c8a01e27ecf117edaa6a3aa5",
-        "the f572592 packaged binary executed --help on htch-runtime and exposed edit-goal/delete; doctor still fails before app attach because /usr/bin/chatgpt is absent, so Gates E/F remain pending"
+        "the f572592 packaged binary executed --help on htch-runtime and exposed edit-goal/delete; doctor still fails before app attach because /usr/bin/chatgpt is absent, so Gates E/F remain pending",
+        "exact-head run 37007291813 at e914a11804c5ad623df6019f2f08365b0e543dd9 passed architecture/fmt/workspace tests/clippy/release packaging on Linux and both macOS targets",
+        "Linux artifact 11226720838 / fabushi-chatgpt-auto-confirm-linux-x86_64 / sha256:0aba210f346752b8d9e3224bae409cda2cd0068e67fe0c37a722c111adff7337 is bound to e914a11804c5ad623df6019f2f08365b0e543dd9",
+        "macOS arm64 artifact 11226960989 sha256:176dfd318357ca1335f8a99eed95fdecba885a2a1f1b7a63a4b67e826cbf3f71 and macOS x86_64 artifact 11226871819 sha256:a53ff36fbe97864b830562cb845f34c386cdc13ef9c0d9babba6e70d5b0a9009 are from the same exact-head run"
       ],
       "missing": [
         "restore/install a real ChatGPT desktop application on htch-runtime without using the device controller to substitute CLI actions",
