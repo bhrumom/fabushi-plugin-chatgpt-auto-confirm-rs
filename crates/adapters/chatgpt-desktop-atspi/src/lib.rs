@@ -215,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_marker_projection_excludes_composer_draft() {
+    fn dispatch_marker_projection_excludes_composer_draft_and_hidden_history() {
         use std::process::Command as StdCommand;
         let wrapper = format!(
             "import sys,types; sys.modules['pyatspi']=types.SimpleNamespace(); sys.argv=['bridge','contract-dispatch-marker']; exec({:?})",
@@ -233,6 +233,7 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "true");
+        assert!(BRIDGE.contains("if not item[\"visible\"]:\n            continue"));
     }
 
     #[test]

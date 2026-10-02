@@ -774,6 +774,8 @@ def marker_info(items):
     latest = None
     latest_index = -1
     for i, item in enumerate(items):
+        if not item["visible"]:
+            continue
         if composer_node is not None and (
             same_node(item["node"], composer_node)
             or is_descendant(item["node"], composer_node)
@@ -1545,11 +1547,13 @@ def dispatch_marker_contract_self_test():
     globals()["same_node"] = lambda left, right: left is right
     globals()["is_descendant"] = lambda node, root: getattr(node, "parent", None) is root
     try:
-        draft_item = {"node": draft, "text": "draft [Fabushi:deadbeef-0000]", "name": ""}
-        committed_item = {"node": transcript, "text": "sent [Fabushi:feedface-0001]", "name": ""}
+        hidden_history = {"node": transcript, "text": "old [Fabushi:baadf00d-0002]", "name": "", "visible": False}
+        draft_item = {"node": draft, "text": "draft [Fabushi:deadbeef-0000]", "name": "", "visible": True}
+        committed_item = {"node": transcript, "text": "sent [Fabushi:feedface-0001]", "name": "", "visible": True}
+        if marker_info([hidden_history]) != (None, -1): return False
         if marker_info([draft_item]) != (None, -1): return False
-        marker, index = marker_info([draft_item, committed_item])
-        return marker == "feedface-0001" and index == 1
+        marker, index = marker_info([hidden_history, draft_item, committed_item])
+        return marker == "feedface-0001" and index == 2
     finally:
         globals()["unique_composer"] = old_unique
         globals()["same_node"] = old_same
