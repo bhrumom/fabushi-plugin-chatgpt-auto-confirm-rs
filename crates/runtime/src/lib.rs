@@ -3571,6 +3571,30 @@ mod actor_tests {
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
     }
 
+    async fn wait_for_persisted_wake_reason(
+        store: &SqliteStore,
+        task_id: &TaskId,
+        expected_reason: &str,
+    ) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match store.task_wake(task_id) {
+                Ok(Some(wake)) => {
+                    assert_eq!(wake.reason, expected_reason);
+                    return;
+                }
+                Ok(None) => {}
+                Err(error) => panic!("failed reading persisted task wake: {error}"),
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "durable wake for {} was not persisted within bounded observation window",
+                task_id.as_str()
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
     #[tokio::test]
     async fn supervisor_exits_after_last_external_handle_drops() {
         let path = scheduler_test_path("shutdown");
@@ -3704,6 +3728,7 @@ mod actor_tests {
     #[tokio::test]
     async fn rate_limit_deferred_task_does_not_block_runnable_task() {
         let path = scheduler_test_path("rate-limit");
+        let observer = SqliteStore::open(&path).unwrap();
         let supervisor = SupervisorHandle::spawn(path.clone());
         let a = SupervisorClock::new(
             supervisor.clone(),
@@ -3738,12 +3763,12 @@ mod actor_tests {
             "b"
         );
         assert!(!a_wait.is_finished());
-        let wake = SqliteStore::open(&path)
-            .unwrap()
-            .task_wake(&TaskId::new("task-a"))
-            .unwrap()
-            .unwrap();
-        assert_eq!(wake.reason, WakeReason::RateLimitCooldown.as_str());
+        wait_for_persisted_wake_reason(
+            &observer,
+            &TaskId::new("task-a"),
+            WakeReason::RateLimitCooldown.as_str(),
+        )
+        .await;
         a_wait.abort();
         let _ = a_wait.await;
         cleanup_scheduler_path(&path);
@@ -3752,6 +3777,7 @@ mod actor_tests {
     #[tokio::test]
     async fn attachment_backoff_leaves_other_tasks_runnable() {
         let path = scheduler_test_path("attachment");
+        let observer = SqliteStore::open(&path).unwrap();
         let supervisor = SupervisorHandle::spawn(path.clone());
         let a = SupervisorClock::new(
             supervisor.clone(),
@@ -3798,12 +3824,12 @@ mod actor_tests {
             "c"
         );
         assert!(!a_wait.is_finished());
-        let wake = SqliteStore::open(&path)
-            .unwrap()
-            .task_wake(&TaskId::new("task-a"))
-            .unwrap()
-            .unwrap();
-        assert_eq!(wake.reason, WakeReason::AttachmentWait.as_str());
+        wait_for_persisted_wake_reason(
+            &observer,
+            &TaskId::new("task-a"),
+            WakeReason::AttachmentWait.as_str(),
+        )
+        .await;
         a_wait.abort();
         let _ = a_wait.await;
         cleanup_scheduler_path(&path);
@@ -3812,6 +3838,7 @@ mod actor_tests {
     #[tokio::test]
     async fn authorization_settlement_is_task_scoped_not_global() {
         let path = scheduler_test_path("authorization");
+        let observer = SqliteStore::open(&path).unwrap();
         let supervisor = SupervisorHandle::spawn(path.clone());
         let a = SupervisorClock::new(
             supervisor.clone(),
@@ -3839,12 +3866,12 @@ mod actor_tests {
             "b"
         );
         assert!(!a_wait.is_finished());
-        let wake = SqliteStore::open(&path)
-            .unwrap()
-            .task_wake(&TaskId::new("task-a"))
-            .unwrap()
-            .unwrap();
-        assert_eq!(wake.reason, WakeReason::AuthorizationSettlement.as_str());
+        wait_for_persisted_wake_reason(
+            &observer,
+            &TaskId::new("task-a"),
+            WakeReason::AuthorizationSettlement.as_str(),
+        )
+        .await;
         a_wait.abort();
         let _ = a_wait.await;
         cleanup_scheduler_path(&path);
