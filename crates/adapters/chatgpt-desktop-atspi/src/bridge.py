@@ -1056,6 +1056,65 @@ def attachment_ready(file_name):
 def fabushi_owned_draft(value):
     return bool(re.search(r"\s\[Fabushi:[0-9a-fA-F]{8,32}(?:\])?\s*$", (value or "").strip()))
 
+def wait_for_entry_draft(entry, expected, timeout_seconds=1.0):
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        if composer_draft(entry) == expected:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
+
+def clear_fabushi_owned_draft(entry, before):
+    if not before:
+        return True
+    if not fabushi_owned_draft(before):
+        raise RuntimeError("ChatGPT composer contains an unrelated draft; refusing to clear it")
+
+    try:
+        editable = entry.queryEditableText()
+    except Exception:
+        editable = None
+    if editable is not None:
+        try:
+            editable.setTextContents("")
+        except Exception as exc:
+            raise RuntimeError("ChatGPT composer EditableText clear failed") from exc
+        if not wait_for_entry_draft(entry, ""):
+            raise RuntimeError("ChatGPT composer did not clear the stale Fabushi draft")
+        return True
+
+    expected = before
+    while expected:
+        expected = expected[:-1]
+        pyatspi.Registry.generateKeyboardEvent(65288, None, pyatspi.KEY_SYM)
+        if not wait_for_entry_draft(entry, expected):
+            raise RuntimeError("stale Fabushi draft cleanup diverged from exact suffix deletion")
+    return True
+
+def type_composer_text_exact(entry, prompt):
+    expected = ""
+    index = 0
+    while index < len(prompt):
+        if ord(prompt[index]) < 128:
+            end = index
+            while end < len(prompt) and ord(prompt[end]) < 128 and end - index < 48:
+                end += 1
+            chunk = prompt[index:end]
+            pyatspi.Registry.generateKeyboardEvent(0, chunk, pyatspi.KEY_STRING)
+            expected += chunk
+            index = end
+        else:
+            char = prompt[index]
+            pyatspi.Registry.generateKeyboardEvent(
+                0x01000000 | ord(char), None, pyatspi.KEY_SYM
+            )
+            expected += char
+            index += 1
+        if not wait_for_entry_draft(entry, expected):
+            raise RuntimeError("ChatGPT composer input diverged from exact prepared prompt prefix")
+    return True
+
 def set_composer_text(entry, prompt):
     before = composer_draft(entry)
     replacing_fabushi_draft = (
@@ -1095,13 +1154,8 @@ def set_composer_text(entry, prompt):
         if "\n" in prompt:
             raise RuntimeError("ChatGPT desktop prepared prompt must be single-line for safe AT-SPI input")
         if replacing_fabushi_draft:
-            pyatspi.Registry.generateKeyboardEvent(
-                0, "a", pyatspi.KEY_PRESSRELEASE | pyatspi.KEY_CONTROL
-            )
-            pyatspi.Registry.generateKeyboardEvent(65288, None, pyatspi.KEY_SYM)
-            if wait_for_composer_draft("") is None:
-                raise RuntimeError("ChatGPT composer did not clear the stale Fabushi draft")
-        pyatspi.Registry.generateKeyboardEvent(0, prompt, pyatspi.KEY_STRING)
+            clear_fabushi_owned_draft(entry, before)
+        type_composer_text_exact(entry, prompt)
 
     if wait_for_composer_draft(prompt) is None:
         raise RuntimeError("ChatGPT composer did not expose the exact prepared prompt")
@@ -1612,7 +1666,7 @@ def renderer_error_contract_self_test():
 def composer_write_contract_self_test():
     values = {"draft": "", "typed": []}
     pyatspi.STATE_FOCUSABLE, pyatspi.STATE_EDITABLE, pyatspi.STATE_FOCUSED = 1001, 1002, 1003
-    pyatspi.KEY_STRING = 8
+    pyatspi.KEY_STRING, pyatspi.KEY_SYM = 8, 9
     class FakeState:
         def contains(self, which):
             return which in (pyatspi.STATE_FOCUSABLE, pyatspi.STATE_EDITABLE)
@@ -1641,7 +1695,6 @@ def composer_write_contract_self_test():
         def queryComponent(self): return FakeComponent()
         def queryAction(self): return FakeAction()
         def queryText(self): return FakeText(lambda: "\ufffc")
-    pyatspi.KEY_PRESSRELEASE, pyatspi.KEY_CONTROL, pyatspi.KEY_SYM = 16, 32, 64
     class FakeRegistry:
         @staticmethod
         def generateKeyboardEvent(keyval, text, synth):
@@ -1649,10 +1702,14 @@ def composer_write_contract_self_test():
                 values["typed"].append(text)
                 values["draft"] += text
                 return
-            if synth == (pyatspi.KEY_PRESSRELEASE | pyatspi.KEY_CONTROL) and text == "a":
-                return
             if synth == pyatspi.KEY_SYM and keyval == 65288:
-                values["draft"] = ""
+                if values["draft"]:
+                    values["draft"] = values["draft"][:-1]
+                return
+            if synth == pyatspi.KEY_SYM and keyval >= 0x01000000:
+                char = chr(keyval & 0x00FFFFFF)
+                values["typed"].append(char)
+                values["draft"] += char
                 return
             raise RuntimeError("unexpected keyboard input")
     pyatspi.Registry = FakeRegistry
@@ -1669,6 +1726,7 @@ def composer_write_contract_self_test():
         if composer_draft(fake) != "": return False
         if not set_composer_text(fake, prepared): return False
         if values["draft"] != prepared or values["typed"] != [prepared]: return False
+
         values["draft"] = "unrelated draft"
         try:
             set_composer_text(fake, "different [Fabushi:deadbeef]")
@@ -1676,12 +1734,17 @@ def composer_write_contract_self_test():
             if "unrelated draft" not in str(exc): return False
         else:
             return False
+        if values["draft"] != "unrelated draft": return False
+
         values["draft"] = "stale task [Fabushi:feedface"
         values["typed"] = []
-        if not set_composer_text(fake, "replacement [Fabushi:deadbeef]"): return False
-        if values["draft"] != "replacement [Fabushi:deadbeef]": return False
-        if values["typed"] != ["replacement [Fabushi:deadbeef]"]: return False
+        replacement = "replacement 中文 [Fabushi:deadbeef]"
+        if not set_composer_text(fake, replacement): return False
+        if values["draft"] != replacement: return False
+        if "中" not in values["typed"] or "文" not in values["typed"]: return False
+
         values["draft"] = ""
+        values["typed"] = []
         try:
             set_composer_text(fake, "alpha\nbeta")
         except RuntimeError as exc:

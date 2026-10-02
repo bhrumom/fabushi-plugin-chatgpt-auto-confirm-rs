@@ -261,7 +261,12 @@ mod tests {
         assert!(BRIDGE.contains("wait_for_composer_draft"));
         assert!(BRIDGE.contains("unrelated draft; refusing to overwrite it"));
         assert!(BRIDGE.contains("fabushi_owned_draft"));
-        assert!(BRIDGE.contains("did not clear the stale Fabushi draft"));
+        assert!(BRIDGE.contains("stale Fabushi draft cleanup diverged from exact suffix deletion"));
+        assert!(BRIDGE.contains("type_composer_text_exact(entry, prompt)"));
+        assert!(BRIDGE.contains("0x01000000 | ord(char)"));
+        assert!(
+            BRIDGE.contains("ChatGPT composer input diverged from exact prepared prompt prefix")
+        );
         assert!(BRIDGE.contains("prepared prompt must be single-line"));
     }
 

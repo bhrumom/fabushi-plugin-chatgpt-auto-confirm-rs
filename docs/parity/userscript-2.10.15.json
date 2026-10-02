@@ -254,12 +254,14 @@
         "strict Review report projection is bounded to the current owned assistant response and emits structured MAHAYANA_TASK_REPORT_V1 evidence before Copy hydration",
         "review_report_projection_is_response_local_and_structured plus application Copy-before-hydration contracts",
         "macOS AXUIElement attachment path stages content-addressed bytes, requires unique ChatGPT attachment and native Open-panel actions, uses system-wide focused Accessibility for the out-of-process NSOpenPanel, writes/re-reads the exact path, and binds readiness to the exact filename",
-        "composer-write production safety distinguishes unrelated user drafts from stale Fabushi-owned prepared drafts: only drafts ending in a bounded Fabushi dispatch marker (including AT-SPI-truncated closing bracket) may be replaced by another Fabushi prepared prompt; ordinary drafts remain fail-closed",
-        "composer_write_contract_self_test executes the stale-Fabushi replacement path, the unrelated-draft rejection path, and exact prepared-prompt readback"
+        "composer-write production safety distinguishes unrelated user drafts from stale Fabushi-owned prepared drafts using the real bounded dispatch-marker regex; ordinary drafts remain fail-closed, while stale Fabushi drafts are removed only by exact suffix deletion with semantic draft readback after every Backspace",
+        "non-ASCII prepared prompt input uses Unicode X11 keysyms instead of whole-prompt KEY_STRING and waits for the composer draft to equal each expected prefix before continuing; any dropped, duplicated, or reordered codepoint fails closed before Send",
+        "composer_write_contract_self_test executes ordinary-draft rejection, truncated stale-Fabushi replacement, CJK Unicode input, and exact prepared-prompt readback without inventing the non-existent pyatspi.KEY_CONTROL constant"
       ],
       "missing": [
         "exact-head macOS compile/test evidence for native attachment path",
-        "real authorization, attachment and terminal acceptance"
+        "real authorization, attachment and terminal acceptance",
+        "current-exact packaged Linux composer/Send acceptance after restoring a real ChatGPT desktop application on htch-runtime"
       ]
     },
     {
