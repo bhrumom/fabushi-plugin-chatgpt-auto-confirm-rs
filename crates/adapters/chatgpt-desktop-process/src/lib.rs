@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use fabushi_chatgpt_application::{ChatProcessHealth, ChatProcessPort};
 use std::path::{Path, PathBuf};
-use tokio::process::Command;
+use std::process::{Command, Stdio};
 
 pub const DEFAULT_CHATGPT_LAUNCHER: &str = "/usr/bin/chatgpt";
 
@@ -82,14 +82,7 @@ impl ChatProcessPort for ChatGptDesktopProcess {
             );
         }
 
-        let mut command = Command::new(&self.launcher);
-        for argument in launcher_arguments(&self.launcher, effective_uid()) {
-            command.arg(argument);
-        }
-        command
-            .spawn()
-            .with_context(|| format!("launch ChatGPT desktop via {:?}", self.launcher))?;
-        Ok(())
+        spawn_launcher(&self.launcher, effective_uid())
     }
 }
 
@@ -114,6 +107,20 @@ fn launcher_arguments(launcher: &Path, effective_uid: Option<u32>) -> Vec<&'stat
     } else {
         Vec::new()
     }
+}
+
+fn spawn_launcher(launcher: &Path, effective_uid: Option<u32>) -> Result<()> {
+    let mut command = Command::new(launcher);
+    for argument in launcher_arguments(launcher, effective_uid) {
+        command.arg(argument);
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("launch ChatGPT desktop via {launcher:?}"))?;
+    Ok(())
 }
 
 fn executable_matches(candidate: &Path, launcher: &Path) -> bool {
@@ -163,6 +170,58 @@ mod tests {
         assert!(launcher_arguments(default, Some(1000)).is_empty());
         assert!(launcher_arguments(default, None).is_empty());
         assert!(launcher_arguments(Path::new("/custom/chatgpt"), Some(0)).is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn spawned_desktop_process_does_not_inherit_cli_stdio() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-process-stdio-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("create stdio contract directory");
+        let report = root.join("stdio.txt");
+        let launcher = root.join("fake-chatgpt");
+        let script = format!(
+            r#"#!/usr/bin/python3
+import os
+with open(r"{}", "w", encoding="utf-8") as report:
+    for descriptor in range(3):
+        report.write(os.readlink(f"/proc/self/fd/{{descriptor}}") + "\n")
+"#,
+            report.display()
+        );
+        std::fs::write(&launcher, script).expect("write fake launcher");
+        let mut permissions = std::fs::metadata(&launcher)
+            .expect("fake launcher metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&launcher, permissions).expect("make fake launcher executable");
+
+        spawn_launcher(&launcher, Some(1000)).expect("spawn fake desktop launcher");
+
+        let mut observed = None;
+        for _ in 0..50 {
+            if let Ok(value) = std::fs::read_to_string(&report)
+                && value.lines().count() == 3
+            {
+                observed = Some(value);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let observed = observed.expect("fake launcher must report all inherited stdio descriptors");
+        let descriptors = observed.lines().collect::<Vec<_>>();
+        assert_eq!(descriptors, vec!["/dev/null", "/dev/null", "/dev/null"]);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
