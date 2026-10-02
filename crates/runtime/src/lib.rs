@@ -3912,6 +3912,7 @@ mod actor_tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::Notify;
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn linux_process_memory_diagnostics_are_process_scoped_and_non_actionable() {
         let value = parse_linux_proc_memory_status(
