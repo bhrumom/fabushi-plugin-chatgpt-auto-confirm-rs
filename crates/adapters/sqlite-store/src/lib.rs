@@ -3,7 +3,7 @@ use fabushi_chatgpt_domain::{AttachmentId, DispatchId, RunId, TaskId};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::Value;
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitionRecord {
@@ -111,6 +111,16 @@ pub struct UiSessionLease {
     pub owner_id: String,
     pub generation: i64,
     pub expires_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadFailureRecord {
+    pub task_id: String,
+    pub run_id: String,
+    pub phase: String,
+    pub round: i64,
+    pub attempts: u32,
+    pub next_retry_unix_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,6 +245,17 @@ impl SqliteStore {
                 no_final_since_unix_ms INTEGER NOT NULL,
                 updated_at_unix_ms INTEGER NOT NULL,
                 PRIMARY KEY(task_id, run_id, phase, round, conversation_fingerprint)
+            );
+
+            CREATE TABLE IF NOT EXISTS load_failure_states (
+                task_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                phase TEXT NOT NULL,
+                round INTEGER NOT NULL,
+                attempts INTEGER NOT NULL,
+                next_retry_unix_ms INTEGER NOT NULL,
+                updated_at_unix_ms INTEGER NOT NULL,
+                PRIMARY KEY(task_id, run_id, phase, round)
             );
 
             CREATE TABLE IF NOT EXISTS task_wakes (
@@ -653,6 +674,75 @@ impl SqliteStore {
             .context("clear review settlements for task")
     }
 
+    pub fn load_failure_state(
+        &self,
+        task_id: &TaskId,
+        run_id: &RunId,
+        phase: &str,
+        round: i64,
+    ) -> Result<Option<LoadFailureRecord>> {
+        self.connection
+            .query_row(
+                "SELECT task_id, run_id, phase, round, attempts, next_retry_unix_ms
+                 FROM load_failure_states
+                 WHERE task_id=?1 AND run_id=?2 AND phase=?3 AND round=?4",
+                params![task_id.as_str(), run_id.as_str(), phase, round],
+                |row| {
+                    Ok(LoadFailureRecord {
+                        task_id: row.get(0)?,
+                        run_id: row.get(1)?,
+                        phase: row.get(2)?,
+                        round: row.get(3)?,
+                        attempts: row.get(4)?,
+                        next_retry_unix_ms: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .context("read durable explicit-load failure state")
+    }
+
+    pub fn store_load_failure_state(
+        &self,
+        record: &LoadFailureRecord,
+        now_unix_ms: i64,
+    ) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO load_failure_states(
+                 task_id, run_id, phase, round, attempts, next_retry_unix_ms, updated_at_unix_ms
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(task_id, run_id, phase, round)
+             DO UPDATE SET attempts=excluded.attempts,
+                           next_retry_unix_ms=excluded.next_retry_unix_ms,
+                           updated_at_unix_ms=excluded.updated_at_unix_ms",
+            params![
+                record.task_id,
+                record.run_id,
+                record.phase,
+                record.round,
+                record.attempts,
+                record.next_retry_unix_ms,
+                now_unix_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_load_failure_state(
+        &self,
+        task_id: &TaskId,
+        run_id: &RunId,
+        phase: &str,
+        round: i64,
+    ) -> Result<()> {
+        self.connection.execute(
+            "DELETE FROM load_failure_states
+             WHERE task_id=?1 AND run_id=?2 AND phase=?3 AND round=?4",
+            params![task_id.as_str(), run_id.as_str(), phase, round],
+        )?;
+        Ok(())
+    }
+
     pub fn approval_fingerprint(
         &self,
         fingerprint: &str,
@@ -952,6 +1042,7 @@ impl SqliteStore {
 
         for sql in [
             "DELETE FROM task_wakes WHERE task_id=?1",
+            "DELETE FROM load_failure_states WHERE task_id=?1",
             "DELETE FROM review_settlement_states WHERE task_id=?1",
             "DELETE FROM approval_fingerprints WHERE task_id=?1",
             "DELETE FROM effect_outbox WHERE task_id=?1",
@@ -1278,7 +1369,7 @@ mod tests {
     #[test]
     fn enables_schema_and_wal_contract() {
         let store = SqliteStore::in_memory().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 4);
+        assert_eq!(store.schema_version().unwrap(), 5);
         assert_eq!(store.count_rows("tasks").unwrap(), 0);
         assert_eq!(store.count_rows("effect_outbox").unwrap(), 0);
     }
@@ -1300,6 +1391,37 @@ mod tests {
         let effects = store.pending_effects(10).unwrap();
         assert_eq!(effects.len(), 1);
         assert_eq!(effects[0].idempotency_key, "effect-1");
+    }
+
+    #[test]
+    fn explicit_load_failure_state_round_trips_absolute_deadline() {
+        let store = SqliteStore::in_memory().unwrap();
+        let task_id = TaskId::new("task-load-failure");
+        let run_id = RunId::new("run-load-failure");
+        let record = LoadFailureRecord {
+            task_id: task_id.as_str().to_owned(),
+            run_id: run_id.as_str().to_owned(),
+            phase: "work".into(),
+            round: 3,
+            attempts: 4,
+            next_retry_unix_ms: 987_654,
+        };
+        store.store_load_failure_state(&record, 123_456).unwrap();
+        assert_eq!(
+            store
+                .load_failure_state(&task_id, &run_id, "work", 3)
+                .unwrap(),
+            Some(record)
+        );
+        store
+            .clear_load_failure_state(&task_id, &run_id, "work", 3)
+            .unwrap();
+        assert!(
+            store
+                .load_failure_state(&task_id, &run_id, "work", 3)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

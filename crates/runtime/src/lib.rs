@@ -2,9 +2,10 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use fabushi_chatgpt_application::{
     ChatProcessHealth, ChatProcessPort, ChatSurfacePort, Clock, ContinuousTaskLifecycle,
-    ContinuousTaskState, DurableReviewSettlementState, ReasoningDecision, ReasoningGateState,
-    RecoveryRunContext, ReviewRunIdentity, ReviewSettlementKey, ReviewSettlementPort,
-    RunControlPort, RunPrompt, WakeReason, parse_strict_review_report,
+    ContinuousTaskState, DurableLoadFailureState, DurableReviewSettlementState,
+    LoadFailureStatePort, ReasoningDecision, ReasoningGateState, RecoveryRunContext,
+    ReviewRunIdentity, ReviewSettlementKey, ReviewSettlementPort, RunControlPort, RunPrompt,
+    WakeReason, parse_strict_review_report,
 };
 use fabushi_chatgpt_attachment_store::{AttachmentStore, StoredAttachment};
 #[cfg(target_os = "linux")]
@@ -14,9 +15,9 @@ use fabushi_chatgpt_desktop_macos::{ChatGptDesktopMacProcess, ChatGptDesktopMacS
 #[cfg(target_os = "linux")]
 use fabushi_chatgpt_desktop_process::ChatGptDesktopProcess;
 use fabushi_chatgpt_sqlite_store::{
-    AttachmentRecord, IncompleteContinuousPhase, PreparedApproval, PreparedDispatch,
-    ReviewSettlementRecord, SqliteStore, StateTransitionRecord, TaskDeletionRecord,
-    TransitionRecord, UiSessionLease,
+    AttachmentRecord, IncompleteContinuousPhase, LoadFailureRecord, PreparedApproval,
+    PreparedDispatch, ReviewSettlementRecord, SqliteStore, StateTransitionRecord,
+    TaskDeletionRecord, TransitionRecord, UiSessionLease,
 };
 use std::collections::HashMap;
 use std::io::Read;
@@ -1120,7 +1121,7 @@ impl ChatSurfacePort for DurableRunSurface {
         }
 
         let observed = self.surface.observe().await?;
-        if !recovery_postcondition(&observed, &payload)? {
+        if !recovery_effect_postcondition(&observed, &payload)? {
             bail!(
                 "surface recovery returned successfully but its semantic postcondition was not observed; durable effect remains pending for startup reconciliation"
             );
@@ -1252,6 +1253,63 @@ impl ReviewSettlementPort for SqliteReviewSettlement {
             phase,
             i64::from(key.round.get()),
             key.conversation_fingerprint.as_str(),
+        )
+    }
+}
+
+struct SqliteLoadFailureState {
+    path: PathBuf,
+    task_id: TaskId,
+    run_id: RunId,
+    phase: Phase,
+    round: Round,
+}
+
+impl SqliteLoadFailureState {
+    fn phase_name(&self) -> &'static str {
+        match self.phase {
+            Phase::Work => "work",
+            Phase::Review => "review",
+        }
+    }
+}
+
+#[async_trait]
+impl LoadFailureStatePort for SqliteLoadFailureState {
+    async fn load_load_failure_state(&self) -> Result<Option<DurableLoadFailureState>> {
+        Ok(SqliteStore::open(&self.path)?
+            .load_failure_state(
+                &self.task_id,
+                &self.run_id,
+                self.phase_name(),
+                i64::from(self.round.get()),
+            )?
+            .map(|record| DurableLoadFailureState {
+                attempts: record.attempts,
+                next_retry_unix_ms: record.next_retry_unix_ms,
+            }))
+    }
+
+    async fn store_load_failure_state(&self, state: &DurableLoadFailureState) -> Result<()> {
+        SqliteStore::open(&self.path)?.store_load_failure_state(
+            &LoadFailureRecord {
+                task_id: self.task_id.as_str().to_owned(),
+                run_id: self.run_id.as_str().to_owned(),
+                phase: self.phase_name().to_owned(),
+                round: i64::from(self.round.get()),
+                attempts: state.attempts,
+                next_retry_unix_ms: state.next_retry_unix_ms,
+            },
+            unix_time_ms()?,
+        )
+    }
+
+    async fn clear_load_failure_state(&self) -> Result<()> {
+        SqliteStore::open(&self.path)?.clear_load_failure_state(
+            &self.task_id,
+            &self.run_id,
+            self.phase_name(),
+            i64::from(self.round.get()),
         )
     }
 }
@@ -1724,6 +1782,7 @@ struct RunWorkerIdentity {
 pub struct RunWorker {
     surface: DurableRunSurface,
     review_settlement: SqliteReviewSettlement,
+    load_failure_state: SqliteLoadFailureState,
     run_control: SqliteRunControl,
     clock: SupervisorClock,
 }
@@ -1758,6 +1817,13 @@ impl RunWorker {
             )?,
             review_settlement: SqliteReviewSettlement {
                 path: state_db_path.to_path_buf(),
+            },
+            load_failure_state: SqliteLoadFailureState {
+                path: state_db_path.to_path_buf(),
+                task_id: identity.task_id.clone(),
+                run_id: identity.run_id.clone(),
+                phase: identity.phase,
+                round: identity.round,
             },
             run_control: SqliteRunControl {
                 path: state_db_path.to_path_buf(),
@@ -1802,6 +1868,7 @@ impl RunWorker {
             &self.surface,
             &self.clock,
             &self.review_settlement,
+            &self.load_failure_state,
             &self.run_control,
         )
         .execute(prompt, options)
@@ -1813,6 +1880,7 @@ impl RunWorker {
             &self.surface,
             &self.clock,
             &self.review_settlement,
+            &self.load_failure_state,
             &self.run_control,
         )
         .resume_confirmed_dispatch(prompt, options)
@@ -2820,6 +2888,48 @@ fn recovery_postcondition(
         && !snapshot.retryable_error
         && !snapshot.unable_to_load_conversation
         && !snapshot.connection_interrupted)
+}
+
+fn recovery_effect_postcondition(
+    snapshot: &ChatSurfaceSnapshot,
+    payload: &serde_json::Value,
+) -> Result<bool> {
+    let explicit_load_attempt = payload
+        .get("baselineUnableToLoadConversation")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if !explicit_load_attempt {
+        return recovery_postcondition(snapshot, payload);
+    }
+
+    let baseline_conversation = payload
+        .get("baselineConversationFingerprint")
+        .and_then(serde_json::Value::as_str);
+    let baseline_user_turn = payload
+        .get("baselineUserTurnBoundary")
+        .and_then(serde_json::Value::as_str);
+    let baseline_dispatch = payload
+        .get("baselineDispatchId")
+        .and_then(serde_json::Value::as_str);
+    let same_identity = snapshot
+        .conversation_fingerprint
+        .as_ref()
+        .map(|value| value.as_str())
+        == baseline_conversation
+        && snapshot
+            .user_turn_boundary
+            .as_ref()
+            .map(|value| value.as_str())
+            == baseline_user_turn
+        && snapshot
+            .current_dispatch_id
+            .as_ref()
+            .map(|value| value.as_str())
+            == baseline_dispatch;
+
+    Ok(same_identity
+        && snapshot.app_healthy
+        && (snapshot.unable_to_load_conversation || recovery_postcondition(snapshot, payload)?))
 }
 
 fn recovery_baseline_was_observably_degraded(payload: &serde_json::Value) -> bool {
@@ -3880,6 +3990,23 @@ mod actor_tests {
             .unwrap();
         let effect = store.pending_effects(10).unwrap().remove(0);
         store.mark_effect_attempted(effect.id).unwrap();
+    }
+
+    #[test]
+    fn live_explicit_load_recovery_can_settle_an_accounted_retry_even_if_error_persists() {
+        let baseline = ChatSurfaceSnapshot {
+            app_healthy: true,
+            composer_ready: false,
+            current_dispatch_id: Some(DispatchId::new("dispatch-load")),
+            user_turn_boundary: Some(UserTurnBoundary::new("turn-load")),
+            conversation_fingerprint: Some(ConversationFingerprint::new("conversation-load")),
+            unable_to_load_conversation: true,
+            hydration: HydrationState::Ready,
+            ..Default::default()
+        };
+        let payload = recovery_effect_payload(&baseline);
+        assert!(recovery_effect_postcondition(&baseline, &payload).unwrap());
+        assert!(!recovery_postcondition(&baseline, &payload).unwrap());
     }
 
     #[test]

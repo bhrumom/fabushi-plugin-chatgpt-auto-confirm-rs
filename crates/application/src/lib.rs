@@ -156,6 +156,19 @@ pub trait ReviewSettlementPort: Send + Sync {
     async fn clear_review_settlement(&self, key: &ReviewSettlementKey) -> Result<()>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableLoadFailureState {
+    pub attempts: u32,
+    pub next_retry_unix_ms: i64,
+}
+
+#[async_trait]
+pub trait LoadFailureStatePort: Send + Sync {
+    async fn load_load_failure_state(&self) -> Result<Option<DurableLoadFailureState>>;
+    async fn store_load_failure_state(&self, state: &DurableLoadFailureState) -> Result<()>;
+    async fn clear_load_failure_state(&self) -> Result<()>;
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ContinuousTaskLifecycle {
@@ -231,6 +244,7 @@ pub struct RunPrompt<'a> {
     surface: &'a dyn ChatSurfacePort,
     clock: &'a dyn Clock,
     review_settlement: Option<&'a dyn ReviewSettlementPort>,
+    load_failure_state: Option<&'a dyn LoadFailureStatePort>,
     run_control: Option<&'a dyn RunControlPort>,
 }
 
@@ -240,6 +254,7 @@ impl<'a> RunPrompt<'a> {
             surface,
             clock,
             review_settlement: None,
+            load_failure_state: None,
             run_control: None,
         }
     }
@@ -253,6 +268,21 @@ impl<'a> RunPrompt<'a> {
             surface,
             clock,
             review_settlement: Some(review_settlement),
+            load_failure_state: None,
+            run_control: None,
+        }
+    }
+
+    pub fn with_load_failure_state(
+        surface: &'a dyn ChatSurfacePort,
+        clock: &'a dyn Clock,
+        load_failure_state: &'a dyn LoadFailureStatePort,
+    ) -> Self {
+        Self {
+            surface,
+            clock,
+            review_settlement: None,
+            load_failure_state: Some(load_failure_state),
             run_control: None,
         }
     }
@@ -261,12 +291,14 @@ impl<'a> RunPrompt<'a> {
         surface: &'a dyn ChatSurfacePort,
         clock: &'a dyn Clock,
         review_settlement: &'a dyn ReviewSettlementPort,
+        load_failure_state: &'a dyn LoadFailureStatePort,
         run_control: &'a dyn RunControlPort,
     ) -> Self {
         Self {
             surface,
             clock,
             review_settlement: Some(review_settlement),
+            load_failure_state: Some(load_failure_state),
             run_control: Some(run_control),
         }
     }
@@ -280,6 +312,7 @@ impl<'a> RunPrompt<'a> {
             surface,
             clock,
             review_settlement: None,
+            load_failure_state: None,
             run_control: Some(run_control),
         }
     }
@@ -331,6 +364,10 @@ impl<'a> RunPrompt<'a> {
             .as_ref()
             .map(|_| ReviewSettlementTracker::default());
         let mut loaded_review_key: Option<ReviewSettlementKey> = None;
+        let mut load_failure_state = match self.load_failure_state {
+            Some(port) => port.load_load_failure_state().await?,
+            None => None,
+        };
 
         loop {
             let now = self.clock.now();
@@ -476,6 +513,74 @@ impl<'a> RunPrompt<'a> {
                     *tracker = ReviewSettlementTracker::default();
                 }
                 continue;
+            }
+
+            if snapshot.unable_to_load_conversation {
+                let now_unix_ms = self.clock.unix_time_ms();
+                let state = load_failure_state.get_or_insert(DurableLoadFailureState {
+                    attempts: 0,
+                    next_retry_unix_ms: now_unix_ms
+                        .saturating_add(EXPLICIT_LOAD_RETRY_WINDOW.as_millis() as i64),
+                });
+                if let Some(port) = self.load_failure_state {
+                    port.store_load_failure_state(state).await?;
+                }
+
+                if now_unix_ms < state.next_retry_unix_ms {
+                    let wait_ms = state.next_retry_unix_ms.saturating_sub(now_unix_ms) as u64;
+                    terminal_since = None;
+                    self.clock
+                        .sleep_for(
+                            WakeReason::RecoveryNavigation,
+                            Duration::from_millis(wait_ms),
+                        )
+                        .await?;
+                    continue;
+                }
+
+                if state.attempts < EXPLICIT_LOAD_MAX_RECOVERIES {
+                    state.attempts += 1;
+                    state.next_retry_unix_ms =
+                        now_unix_ms.saturating_add(EXPLICIT_LOAD_RETRY_WINDOW.as_millis() as i64);
+                    if let Some(port) = self.load_failure_state {
+                        port.store_load_failure_state(state).await?;
+                    }
+                    self.surface.recover_current_surface().await?;
+                    recoveries += 1;
+                    terminal_since = None;
+                    continue;
+                }
+
+                if !self.destructive_handoff_is_safe().await? {
+                    terminal_since = None;
+                    self.clock
+                        .sleep_for(WakeReason::AuthorizationSafetyCheck, options.poll_interval)
+                        .await?;
+                    continue;
+                }
+                let recovery_prompt =
+                    recovery_handoff_prompt(prompt, options.recovery_context.as_ref(), &snapshot)?;
+                self.surface.start_fresh_conversation().await?;
+                self.surface.send_prompt(&recovery_prompt).await?;
+                if let Some(port) = self.load_failure_state {
+                    port.clear_load_failure_state().await?;
+                }
+                load_failure_state = None;
+                dispatch_preconfirmed = false;
+                recoveries += 1;
+                dispatched = now;
+                progress = now;
+                fingerprint.clear();
+                terminal_since = None;
+                if let Some(tracker) = review_tracker.as_mut() {
+                    *tracker = ReviewSettlementTracker::default();
+                }
+                continue;
+            } else if load_failure_state.is_some() {
+                if let Some(port) = self.load_failure_state {
+                    port.clear_load_failure_state().await?;
+                }
+                load_failure_state = None;
             }
 
             if snapshot.rate_limit && self.surface.dismiss_rate_limit_notice().await? {
@@ -1669,9 +1774,117 @@ mod tests {
             *self.now.lock().unwrap()
         }
 
+        fn unix_time_ms(&self) -> i64 {
+            self.now().as_millis().min(i64::MAX as u128) as i64
+        }
+
         async fn sleep(&self, duration: Duration) -> Result<()> {
             let mut now = self.now.lock().unwrap();
             *now += duration;
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct MemoryLoadFailureState {
+        state: Mutex<Option<DurableLoadFailureState>>,
+    }
+
+    #[async_trait]
+    impl LoadFailureStatePort for MemoryLoadFailureState {
+        async fn load_load_failure_state(&self) -> Result<Option<DurableLoadFailureState>> {
+            Ok(self.state.lock().unwrap().clone())
+        }
+
+        async fn store_load_failure_state(&self, state: &DurableLoadFailureState) -> Result<()> {
+            *self.state.lock().unwrap() = Some(state.clone());
+            Ok(())
+        }
+
+        async fn clear_load_failure_state(&self) -> Result<()> {
+            *self.state.lock().unwrap() = None;
+            Ok(())
+        }
+    }
+
+    struct ExplicitLoadFailureSurface {
+        sends: Mutex<u32>,
+        recoveries: Mutex<u32>,
+        fresh: Mutex<u32>,
+    }
+
+    impl ExplicitLoadFailureSurface {
+        fn new() -> Self {
+            Self {
+                sends: Mutex::new(0),
+                recoveries: Mutex::new(0),
+                fresh: Mutex::new(0),
+            }
+        }
+
+        fn recoveries(&self) -> u32 {
+            *self.recoveries.lock().unwrap()
+        }
+
+        fn fresh_count(&self) -> u32 {
+            *self.fresh.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl ChatSurfacePort for ExplicitLoadFailureSurface {
+        async fn observe(&self) -> Result<ChatSurfaceSnapshot> {
+            let sends = *self.sends.lock().unwrap();
+            let fresh = *self.fresh.lock().unwrap();
+            if sends == 0 {
+                return Ok(ChatSurfaceSnapshot {
+                    user_turn_boundary: Some(UserTurnBoundary::new("u0")),
+                    ..Default::default()
+                });
+            }
+            if fresh > 0 && sends >= 2 {
+                return Ok(ChatSurfaceSnapshot {
+                    app_healthy: true,
+                    composer_ready: true,
+                    user_turn_boundary: Some(UserTurnBoundary::new("u2")),
+                    user_turn_ownership: OwnershipConfidence::Strong,
+                    assistant_response_boundary: Some(AssistantResponseBoundary::new("a2")),
+                    assistant_response_ownership: OwnershipConfidence::Strong,
+                    assistant_visible_prose: "finished after explicit-load handoff".into(),
+                    response_local_copy: true,
+                    hydration: HydrationState::Ready,
+                    ..Default::default()
+                });
+            }
+            Ok(ChatSurfaceSnapshot {
+                app_healthy: true,
+                user_turn_boundary: Some(UserTurnBoundary::new("u1")),
+                user_turn_ownership: OwnershipConfidence::Strong,
+                unable_to_load_conversation: true,
+                ..Default::default()
+            })
+        }
+
+        async fn send_prompt(&self, _prompt: &str) -> Result<()> {
+            *self.sends.lock().unwrap() += 1;
+            Ok(())
+        }
+
+        async fn approve_current_conversation(&self) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn dismiss_rate_limit_notice(&self) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn recover_current_surface(&self) -> Result<()> {
+            *self.recoveries.lock().unwrap() += 1;
+            Ok(())
+        }
+
+        async fn start_fresh_conversation(&self) -> Result<()> {
+            *self.fresh.lock().unwrap() += 1;
             Ok(())
         }
     }
@@ -2332,6 +2545,30 @@ mod tests {
             &snapshot,
             NO_APPROVAL_RECHECK_WINDOW + NO_APPROVAL_RECHECK_WINDOW
         ));
+    }
+
+    #[tokio::test]
+    async fn shipping_run_prompt_persists_seven_explicit_load_retries_then_handoffs() {
+        let surface = ExplicitLoadFailureSurface::new();
+        let clock = FakeClock::new();
+        let durable = MemoryLoadFailureState::default();
+        let options = RunOptions {
+            poll_interval: Duration::from_secs(1),
+            timeout: Duration::from_secs(400),
+            stale_reload_after: Duration::from_secs(1_000),
+            ..RunOptions::default()
+        };
+
+        let report = RunPrompt::with_load_failure_state(&surface, &clock, &durable)
+            .execute("prepared prompt", options)
+            .await
+            .unwrap();
+
+        assert_eq!(report.state, RunState::Complete);
+        assert_eq!(surface.recoveries(), EXPLICIT_LOAD_MAX_RECOVERIES);
+        assert_eq!(surface.fresh_count(), 1);
+        assert!(durable.state.lock().unwrap().is_none());
+        assert!(clock.now() >= Duration::from_secs(7 * 30));
     }
 
     #[test]
