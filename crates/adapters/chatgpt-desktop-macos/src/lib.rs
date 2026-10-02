@@ -282,16 +282,18 @@ impl ChatGptDesktopMacSurface {
     }
 
     fn open_go_to_path_sheet() -> Result<()> {
-        let status = Command::new("/usr/bin/osascript")
-            .args([
-                "-e",
-                "tell application \"System Events\" to keystroke \"g\" using {command down, shift down}",
-            ])
-            .status()
-            .context("open macOS file chooser Go to Folder sheet through System Events")?;
-        if !status.success() {
-            bail!("System Events could not open the native file chooser path entry");
-        }
+        const ANSI_SLASH_VIRTUAL_KEY: u16 = 0x2c;
+        let system = system_wide().ok_or_else(|| anyhow::anyhow!(ACCESSIBILITY_HELP))?;
+        let window = system
+            .focused_window()
+            .context("read focused native file chooser before opening path entry")?
+            .ok_or_else(|| anyhow::anyhow!("native file chooser lost focused window"))?;
+        window
+            .post_keyboard_event('/' as u16, ANSI_SLASH_VIRTUAL_KEY, true)
+            .context("press native file chooser path shortcut")?;
+        window
+            .post_keyboard_event('/' as u16, ANSI_SLASH_VIRTUAL_KEY, false)
+            .context("release native file chooser path shortcut")?;
         Ok(())
     }
 
