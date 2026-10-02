@@ -91,12 +91,13 @@ impl ChatProcessPort for ChatGptDesktopProcess {
 
 fn executable_matches(candidate: &Path, launcher: &Path) -> bool {
     candidate == launcher
-        || (candidate.file_name().is_some()
-            && candidate.file_name() == launcher.file_name()
-            && candidate
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.eq_ignore_ascii_case("chatgpt")))
+        || candidate
+            .file_name()
+            .and_then(|name| name.to_str())
+            .zip(launcher.file_name().and_then(|name| name.to_str()))
+            .is_some_and(|(candidate_name, launcher_name)| {
+                candidate_name.eq_ignore_ascii_case(launcher_name)
+            })
 }
 
 fn command_line_matches(command_line: &[u8], launcher: &Path) -> bool {
@@ -109,7 +110,9 @@ fn command_line_matches(command_line: &[u8], launcher: &Path) -> bool {
     command_line
         .split(|byte| *byte == 0)
         .filter_map(|part| std::str::from_utf8(part).ok())
+        .flat_map(|part| std::iter::once(part).chain(part.split_ascii_whitespace()))
         .any(|part| {
+            let part = part.trim_matches(|ch| ch == '"' || ch == '\'');
             part == launcher_text
                 || Path::new(part)
                     .file_name()
@@ -132,6 +135,10 @@ mod tests {
             Path::new("/opt/ChatGPT/chatgpt"),
             Path::new("/usr/bin/chatgpt")
         ));
+        assert!(executable_matches(
+            Path::new("/usr/lib/chatgpt/ChatGPT"),
+            Path::new("/usr/bin/chatgpt")
+        ));
         assert!(!executable_matches(
             Path::new("/usr/bin/chromium"),
             Path::new("/usr/bin/chatgpt")
@@ -142,6 +149,10 @@ mod tests {
     fn command_line_match_handles_nul_separated_proc_cmdline() {
         assert!(command_line_matches(
             b"/usr/bin/chatgpt\0--flag\0",
+            Path::new("/usr/bin/chatgpt")
+        ));
+        assert!(command_line_matches(
+            b"/usr/lib/chatgpt/ChatGPT --no-sandbox\0",
             Path::new("/usr/bin/chatgpt")
         ));
         assert!(!command_line_matches(
