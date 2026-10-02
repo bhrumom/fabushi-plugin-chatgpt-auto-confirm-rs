@@ -31,7 +31,7 @@ pub use fabushi_chatgpt_application::RunOptions;
 pub use fabushi_chatgpt_cdp::ChatGptCdp;
 use fabushi_chatgpt_domain::{
     AttachmentId, AuthorizationSettlementState, ConversationFingerprint, DispatchId, GoalRevision,
-    OwnershipConfidence, RunId, UserTurnBoundary,
+    HydrationState, OwnershipConfidence, RunId, UserTurnBoundary,
 };
 pub use fabushi_chatgpt_domain::{
     ChatSurfaceSnapshot, Phase, ReasoningPreset, Round, RunReport, RunState, TaskId,
@@ -54,6 +54,7 @@ enum StartupReconcileOutcome {
     SettledObservedReasoning,
     SettledObservedApproval,
     SettledObservedFreshConversation,
+    SettledObservedRecovery,
 }
 
 struct DurableUiLease {
@@ -1103,12 +1104,36 @@ impl ChatSurfacePort for DurableRunSurface {
     }
 
     async fn recover_current_surface(&self) -> Result<()> {
-        self.record_and_settle(
-            "recover_current_surface",
-            json!({}),
-            self.surface.recover_current_surface(),
-        )
-        .await
+        self.foreground_gate.acquire_exclusive(&self.task_id).await;
+        let _mutation_permit = self.mutation_permit().await;
+        let baseline = self.surface.observe().await?;
+        let payload = recovery_effect_payload(&baseline);
+        let effect_id = {
+            let mut journal = self.journal.lock().await;
+            journal.begin("recover_current_surface", payload.to_string(), None, None)?
+        };
+
+        if let Err(error) = self.surface.recover_current_surface().await {
+            let journal = self.journal.lock().await;
+            journal.settle(effect_id, false, &error.to_string())?;
+            return Err(error);
+        }
+
+        let observed = self.surface.observe().await?;
+        if !recovery_postcondition(&observed, &payload)? {
+            bail!(
+                "surface recovery returned successfully but its semantic postcondition was not observed; durable effect remains pending for startup reconciliation"
+            );
+        }
+        {
+            let journal = self.journal.lock().await;
+            journal.settle(
+                effect_id,
+                true,
+                "surface recovery semantic postcondition observed",
+            )?;
+        }
+        Ok(())
     }
 
     async fn start_fresh_conversation(&self) -> Result<()> {
@@ -2038,7 +2063,8 @@ impl DesktopRuntime {
                 StartupReconcileOutcome::SettledObservedSend
                 | StartupReconcileOutcome::SettledObservedReasoning
                 | StartupReconcileOutcome::SettledObservedApproval
-                | StartupReconcileOutcome::SettledObservedFreshConversation => {
+                | StartupReconcileOutcome::SettledObservedFreshConversation
+                | StartupReconcileOutcome::SettledObservedRecovery => {
                     settled_any = true;
                 }
             }
@@ -2723,6 +2749,79 @@ fn merge_task_orchestration_state(
     Ok(serde_json::Value::Object(root).to_string())
 }
 
+fn recovery_effect_payload(snapshot: &ChatSurfaceSnapshot) -> serde_json::Value {
+    json!({
+        "baselineConversationFingerprint": snapshot
+            .conversation_fingerprint
+            .as_ref()
+            .map(|value| value.as_str()),
+        "baselineUserTurnBoundary": snapshot
+            .user_turn_boundary
+            .as_ref()
+            .map(|value| value.as_str()),
+        "baselineDispatchId": snapshot
+            .current_dispatch_id
+            .as_ref()
+            .map(|value| value.as_str()),
+        "baselineHydration": snapshot.hydration,
+        "baselineAppHealthy": snapshot.app_healthy,
+        "baselineComposerReady": snapshot.composer_ready,
+        "baselineRetryableError": snapshot.retryable_error,
+        "baselineUnableToLoadConversation": snapshot.unable_to_load_conversation,
+        "baselineConnectionInterrupted": snapshot.connection_interrupted,
+    })
+}
+
+fn recovery_postcondition(
+    snapshot: &ChatSurfaceSnapshot,
+    payload: &serde_json::Value,
+) -> Result<bool> {
+    let baseline_conversation = payload
+        .get("baselineConversationFingerprint")
+        .and_then(serde_json::Value::as_str);
+    let baseline_user_turn = payload
+        .get("baselineUserTurnBoundary")
+        .and_then(serde_json::Value::as_str);
+    let baseline_dispatch = payload
+        .get("baselineDispatchId")
+        .and_then(serde_json::Value::as_str);
+
+    if baseline_conversation.is_some()
+        && snapshot
+            .conversation_fingerprint
+            .as_ref()
+            .map(|value| value.as_str())
+            != baseline_conversation
+    {
+        return Ok(false);
+    }
+    if baseline_user_turn.is_some()
+        && snapshot
+            .user_turn_boundary
+            .as_ref()
+            .map(|value| value.as_str())
+            != baseline_user_turn
+    {
+        return Ok(false);
+    }
+    if baseline_dispatch.is_some()
+        && snapshot
+            .current_dispatch_id
+            .as_ref()
+            .map(|value| value.as_str())
+            != baseline_dispatch
+    {
+        return Ok(false);
+    }
+
+    Ok(snapshot.app_healthy
+        && snapshot.composer_ready
+        && snapshot.hydration == HydrationState::Ready
+        && !snapshot.retryable_error
+        && !snapshot.unable_to_load_conversation
+        && !snapshot.connection_interrupted)
+}
+
 fn fresh_conversation_postcondition(
     snapshot: &ChatSurfaceSnapshot,
     baseline_user_turn_boundary: Option<&str>,
@@ -2829,6 +2928,29 @@ fn reconcile_pending_effect(
                 anyhow::anyhow!("pending attachment effect is missing durable readiness deadline")
             })?;
         return Ok(StartupReconcileOutcome::DeferredToRunWorker);
+    }
+
+    if effect.effect_kind == "recover_current_surface" {
+        let payload: serde_json::Value = serde_json::from_str(&effect.effect_payload_json)
+            .context(
+                "parse pending surface-recovery effect payload during startup reconciliation",
+            )?;
+        if !recovery_postcondition(snapshot, &payload)? {
+            return Ok(StartupReconcileOutcome::Clear);
+        }
+        store.settle_effect(
+            effect.id,
+            &json!({
+                "ok": true,
+                "detail": "startup reconciliation observed recovered surface postcondition without replaying reload",
+                "conversationFingerprint": snapshot.conversation_fingerprint.as_ref().map(|value| value.as_str()),
+                "userTurnBoundary": snapshot.user_turn_boundary.as_ref().map(|value| value.as_str()),
+                "dispatchId": snapshot.current_dispatch_id.as_ref().map(|value| value.as_str()),
+            })
+            .to_string(),
+            unix_time_ms()?,
+        )?;
+        return Ok(StartupReconcileOutcome::SettledObservedRecovery);
     }
 
     if effect.effect_kind == "start_fresh_conversation" {
@@ -3575,6 +3697,36 @@ mod actor_tests {
         store.mark_effect_attempted(pending[0].id).unwrap();
     }
 
+    fn create_pending_recovery(
+        store: &mut SqliteStore,
+        task_id: &TaskId,
+        run_id: &RunId,
+        baseline: &ChatSurfaceSnapshot,
+    ) {
+        let payload = recovery_effect_payload(baseline).to_string();
+        store
+            .record_transition(
+                &TransitionRecord {
+                    task_id: task_id.clone(),
+                    run_id: run_id.clone(),
+                    expected_revision: 0,
+                    next_revision: 1,
+                    event_kind: "recover_current_surface_prepared".into(),
+                    event_payload_json: payload.clone(),
+                    materialized_state_json: json!({"revision": 1}).to_string(),
+                    effect_kind: "recover_current_surface".into(),
+                    effect_payload_json: payload,
+                    idempotency_key: "recover-current-surface-test".into(),
+                    prepared_dispatch: None,
+                    prepared_approval: None,
+                },
+                100,
+            )
+            .unwrap();
+        let effect = store.pending_effects(10).unwrap().remove(0);
+        store.mark_effect_attempted(effect.id).unwrap();
+    }
+
     fn create_pending_fresh_conversation(
         store: &mut SqliteStore,
         task_id: &TaskId,
@@ -3692,6 +3844,96 @@ mod actor_tests {
             .unwrap();
         let effect = store.pending_effects(10).unwrap().remove(0);
         store.mark_effect_attempted(effect.id).unwrap();
+    }
+
+    #[test]
+    fn startup_reconciliation_settles_recovery_only_from_same_identity_ready_surface() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        let task_id = TaskId::new("task-recover-startup");
+        let run_id = RunId::new("run-recover-startup");
+        let baseline = ChatSurfaceSnapshot {
+            app_healthy: true,
+            composer_ready: false,
+            current_dispatch_id: Some(DispatchId::new("dispatch-recover")),
+            user_turn_boundary: Some(UserTurnBoundary::new("turn-recover")),
+            conversation_fingerprint: Some(ConversationFingerprint::new("conversation-recover")),
+            hydration: HydrationState::Loading,
+            ..Default::default()
+        };
+        create_pending_recovery(&mut store, &task_id, &run_id, &baseline);
+
+        let recovered = ChatSurfaceSnapshot {
+            app_healthy: true,
+            composer_ready: true,
+            current_dispatch_id: baseline.current_dispatch_id.clone(),
+            user_turn_boundary: baseline.user_turn_boundary.clone(),
+            conversation_fingerprint: baseline.conversation_fingerprint.clone(),
+            hydration: HydrationState::Ready,
+            ..Default::default()
+        };
+        let effect = store.pending_effects(10).unwrap().remove(0);
+        assert_eq!(
+            reconcile_pending_effect(&mut store, &recovered, &effect).unwrap(),
+            StartupReconcileOutcome::SettledObservedRecovery
+        );
+        assert!(store.pending_effects(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn startup_reconciliation_keeps_recovery_pending_when_identity_changed_or_surface_unready() {
+        for (case, observed) in [
+            (
+                "identity-changed",
+                ChatSurfaceSnapshot {
+                    app_healthy: true,
+                    composer_ready: true,
+                    current_dispatch_id: Some(DispatchId::new("dispatch-other")),
+                    user_turn_boundary: Some(UserTurnBoundary::new("turn-recover")),
+                    conversation_fingerprint: Some(ConversationFingerprint::new(
+                        "conversation-recover",
+                    )),
+                    hydration: HydrationState::Ready,
+                    ..Default::default()
+                },
+            ),
+            (
+                "still-loading",
+                ChatSurfaceSnapshot {
+                    app_healthy: true,
+                    composer_ready: false,
+                    current_dispatch_id: Some(DispatchId::new("dispatch-recover")),
+                    user_turn_boundary: Some(UserTurnBoundary::new("turn-recover")),
+                    conversation_fingerprint: Some(ConversationFingerprint::new(
+                        "conversation-recover",
+                    )),
+                    hydration: HydrationState::Loading,
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let mut store = SqliteStore::in_memory().unwrap();
+            let task_id = TaskId::new(format!("task-recover-{case}"));
+            let run_id = RunId::new(format!("run-recover-{case}"));
+            let baseline = ChatSurfaceSnapshot {
+                app_healthy: true,
+                composer_ready: false,
+                current_dispatch_id: Some(DispatchId::new("dispatch-recover")),
+                user_turn_boundary: Some(UserTurnBoundary::new("turn-recover")),
+                conversation_fingerprint: Some(ConversationFingerprint::new(
+                    "conversation-recover",
+                )),
+                hydration: HydrationState::Loading,
+                ..Default::default()
+            };
+            create_pending_recovery(&mut store, &task_id, &run_id, &baseline);
+            let effect = store.pending_effects(10).unwrap().remove(0);
+            assert_eq!(
+                reconcile_pending_effect(&mut store, &observed, &effect).unwrap(),
+                StartupReconcileOutcome::Clear,
+                "case={case}"
+            );
+            assert_eq!(store.pending_effects(10).unwrap().len(), 1, "case={case}");
+        }
     }
 
     #[test]
