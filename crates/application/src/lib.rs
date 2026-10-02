@@ -374,6 +374,7 @@ impl<'a> RunPrompt<'a> {
             Some(port) => port.load_load_failure_state().await?,
             None => None,
         };
+        let mut hydration_recovery = HydrationRecoveryState::default();
 
         loop {
             let now = self.clock.now();
@@ -683,6 +684,22 @@ impl<'a> RunPrompt<'a> {
                     .sleep_for(WakeReason::RateLimitCooldown, options.rate_limit_pause)
                     .await?;
                 continue;
+            }
+
+            match hydration_recovery.observe(&snapshot, snapshot.composer_ready, now) {
+                HydrationDecision::Ready | HydrationDecision::Wait => {}
+                HydrationDecision::RecoverCurrentSurface => {
+                    terminal_since = None;
+                    self.surface.recover_current_surface().await?;
+                    recoveries += 1;
+                    self.clock
+                        .sleep_for(WakeReason::RecoveryNavigation, options.poll_interval)
+                        .await?;
+                    continue;
+                }
+                HydrationDecision::Exhausted => {
+                    terminal_since = None;
+                }
             }
 
             if let (Some(identity), Some(tracker)) =
@@ -1971,6 +1988,69 @@ mod tests {
         }
     }
 
+    struct HydrationLoadingSurface {
+        sends: Mutex<u32>,
+        recoveries: Mutex<u32>,
+    }
+
+    impl HydrationLoadingSurface {
+        fn new() -> Self {
+            Self {
+                sends: Mutex::new(0),
+                recoveries: Mutex::new(0),
+            }
+        }
+
+        fn recovery_count(&self) -> u32 {
+            *self.recoveries.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl ChatSurfacePort for HydrationLoadingSurface {
+        async fn observe(&self) -> Result<ChatSurfaceSnapshot> {
+            let sent = *self.sends.lock().unwrap();
+            Ok(ChatSurfaceSnapshot {
+                app_healthy: true,
+                hydration: HydrationState::Loading,
+                composer_ready: false,
+                user_turn_boundary: Some(UserTurnBoundary::new(if sent == 0 {
+                    "u0"
+                } else {
+                    "u1"
+                })),
+                user_turn_ownership: if sent == 0 {
+                    OwnershipConfidence::None
+                } else {
+                    OwnershipConfidence::Strong
+                },
+                ..Default::default()
+            })
+        }
+
+        async fn send_prompt(&self, _prompt: &str) -> Result<()> {
+            *self.sends.lock().unwrap() += 1;
+            Ok(())
+        }
+
+        async fn approve_current_conversation(&self) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn dismiss_rate_limit_notice(&self) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn recover_current_surface(&self) -> Result<()> {
+            *self.recoveries.lock().unwrap() += 1;
+            Ok(())
+        }
+
+        async fn start_fresh_conversation(&self) -> Result<()> {
+            bail!("hydration recovery must not fresh-handoff the conversation")
+        }
+    }
+
     struct HandoffSurface {
         sends: Mutex<Vec<String>>,
     }
@@ -2820,6 +2900,28 @@ mod tests {
             state.selection_failed(Duration::from_secs(121)),
             ReasoningDecision::Wait
         );
+    }
+
+    #[tokio::test]
+    async fn shipping_run_prompt_stops_generic_hydration_recovery_after_two_attempts() {
+        let surface = HydrationLoadingSurface::new();
+        let clock = FakeClock::new();
+        let report = RunPrompt::new(&surface, &clock)
+            .execute(
+                "hydrate",
+                RunOptions {
+                    poll_interval: Duration::from_secs(1),
+                    timeout: Duration::from_secs(100),
+                    stale_reload_after: Duration::from_secs(1_000),
+                    dispatch_confirm_after: Duration::from_secs(1_000),
+                    ..RunOptions::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(report.state, RunState::Failed);
+        assert_eq!(surface.recovery_count(), 2);
+        assert_eq!(report.recoveries, 2);
     }
 
     #[test]
