@@ -8,31 +8,31 @@
   "target": {
     "repository": "bhrumom/fabushi-plugin-chatgpt-auto-confirm-rs",
     "spec": "docs/specs/desktop-chat-userscript-parity-rust-cli.md",
-    "lastVerifiedExactHead": "e640695525b129a87e26cdcf4e8a9dcae7405f53",
-    "lastVerifiedCiRun": 37041949091,
+    "lastVerifiedExactHead": "1fc19b514060f64e1397637b3ae18536e6e375c1",
+    "lastVerifiedCiRun": 37050356200,
     "lastVerifiedArtifact": {
-      "id": 11242309531,
+      "id": 11246316014,
       "name": "fabushi-chatgpt-auto-confirm-linux-x86_64",
-      "sha256": "9ccc257313edc82f6b45ddda4d086f800c552571ed35cabae7b14169c22fcfe5"
+      "sha256": "18d9cd4ad45629cf47034cf2ab68ba96ca2e3fb6ae996267e88ce859eb1dc060"
     },
     "lastVerifiedArtifacts": [
       {
-        "id": 11242309531,
+        "id": 11246316014,
         "name": "fabushi-chatgpt-auto-confirm-linux-x86_64",
-        "headSha": "e640695525b129a87e26cdcf4e8a9dcae7405f53",
-        "sha256": "9ccc257313edc82f6b45ddda4d086f800c552571ed35cabae7b14169c22fcfe5"
+        "headSha": "1fc19b514060f64e1397637b3ae18536e6e375c1",
+        "sha256": "18d9cd4ad45629cf47034cf2ab68ba96ca2e3fb6ae996267e88ce859eb1dc060"
       },
       {
-        "id": 11242834095,
+        "id": 11246570971,
         "name": "fabushi-chatgpt-auto-confirm-macos-aarch64-apple-darwin",
-        "headSha": "e640695525b129a87e26cdcf4e8a9dcae7405f53",
-        "sha256": "2fafb31e801e00d925339bf873ae3282cdb8158e51bdc7b343fa29a12c6260a9"
+        "headSha": "1fc19b514060f64e1397637b3ae18536e6e375c1",
+        "sha256": "045d55cd8491c80a81ca44a4e0e0b78aaf596e9d2660431c267aeabb0a94de0d"
       },
       {
-        "id": 11244060724,
+        "id": 11246621544,
         "name": "fabushi-chatgpt-auto-confirm-macos-x86_64-apple-darwin",
-        "headSha": "e640695525b129a87e26cdcf4e8a9dcae7405f53",
-        "sha256": "6b991119e012598d133a2eae0a77ea1aeee9376779ae516f6751526b0181ace2"
+        "headSha": "1fc19b514060f64e1397637b3ae18536e6e375c1",
+        "sha256": "4ec93c80959ef299be324d4ff32e603ed167e645e47e75dfbdddd1485ae405b7"
       }
     ]
   },
@@ -154,10 +154,13 @@
         "in_flight_owned_observation_durably_binds_conversation_ref_once proves pre-terminal crash-survivable binding without poll-time revision churn",
         "macOS AX adapter hashes the unique selected AXLink AXURL into an opaque ConversationRef and exact-matches the same opaque identity for AXPress rebinding; ambiguous/missing links and sensitive dialog/sheet surfaces fail closed",
         "DurableRunSurface observe() now rebinds to the task's persisted ConversationRef before projection, startup reconciliation is task-scoped, and fresh-conversation journaling atomically clears the stale bound ref",
-        "crash-left rebind_conversation effects settle only when startup observation exactly matches the durable target ConversationRef; mismatch remains pending and fail-closed"
+        "crash-left rebind_conversation effects settle only when startup observation exactly matches the durable target ConversationRef; mismatch remains pending and fail-closed",
+        "shipping DesktopRuntime continuous loop already persists Work results, creates a fresh Review phase with current taskId/runId/round identity, requires strict MAHAYANA_TASK_REPORT_V1, applies status=next into durable current_next + next Work round, and resumes incomplete Work/Review phases after restart",
+        "continuous_phase_execution_plan is shared by fresh and resumed production phases so authoritative prompt, RecoveryEnvelope context, taskId/runId/phase/round identity, Review identity, and fresh-vs-resume conversation boundary cannot drift between orchestration paths",
+        "continuous_phase_plan_preserves_identity_context_and_fresh_phase_boundaries deterministically proves fresh Work/Review phase boundaries, Review task/round binding, stale quoted report isolation, status=next next-Work prompt/context, and restart-resume without a destructive fresh-conversation action"
       ],
       "missing": [
-        "exact-artifact real acceptance",
+        "exact-artifact real multi-round Work -> Review -> Work acceptance",
         "macOS exact-head compile/test and live ConversationRef projection/rebind acceptance",
         "live concurrent-task acceptance"
       ]
@@ -352,10 +355,14 @@
         "macOS arm64 artifact 11226960989 sha256:176dfd318357ca1335f8a99eed95fdecba885a2a1f1b7a63a4b67e826cbf3f71 and macOS x86_64 artifact 11226871819 sha256:a53ff36fbe97864b830562cb845f34c386cdc13ef9c0d9babba6e70d5b0a9009 are from the same exact-head run",
         "exact-head run 37028529796 at 39632937749698d5b3582d97f08be89280ceca20 passed architecture/fmt/workspace tests/clippy/release packaging on Linux, macOS aarch64, and macOS x86_64; both macOS jobs executed attachment_readiness_is_bound_to_exact_file_name_semantics, conversation_ref_projection_is_strong_opaque_and_fail_closed_on_ambiguity, macOS rebind contracts, and startup reconciliation tests",
         "Linux artifact 11235699064 / fabushi-chatgpt-auto-confirm-linux-x86_64 / sha256:4262f2978cb62b931e4fdc31e8aa68d54acc5300c30e71dac674067bb137a153 was downloaded to htch-runtime; device-side ZIP sha256 matched exactly and packaged doctor/status attached to the real AT-SPI ChatGPT application",
-        "the 39632937 packaged Gate E canary safely failed before Send because the composer contained a stale prior Fabushi continuous prepared draft; read-only AT-SPI inspection proved the draft ended in [Fabushi:f985...], exposing a production stale-draft recovery gap rather than a user-draft ownership failure"
+        "the 39632937 packaged Gate E canary safely failed before Send because the composer contained a stale prior Fabushi continuous prepared draft; read-only AT-SPI inspection proved the draft ended in [Fabushi:f985...], exposing a production stale-draft recovery gap rather than a user-draft ownership failure",
+        "exact-head run 37050356200 is green at 1fc19b514060f64e1397637b3ae18536e6e375c1 across Linux, macOS aarch64, and macOS x86_64; every job passed architecture, fmt, workspace tests, clippy, release build, and artifact upload",
+        "artifacts from run 37050356200: Linux 11246316014 sha256:18d9cd4ad45629cf47034cf2ab68ba96ca2e3fb6ae996267e88ce859eb1dc060; macOS arm64 11246570971 sha256:045d55cd8491c80a81ca44a4e0e0b78aaf596e9d2660431c267aeabb0a94de0d; macOS x86_64 11246621544 sha256:4ec93c80959ef299be324d4ff32e603ed167e645e47e75dfbdddd1485ae405b7",
+        "Linux artifact 11246316014 was downloaded to htch-runtime and device-side ZIP sha256 matched GitHub exactly; packaged binary sha256 is 62f9910a2c3f45e1d2d78090ebe5efc4466fdd8a91a4f372be8be1dcf0d34126",
+        "the 1fc19b5 packaged status/doctor currently fail before app attach because /usr/bin/chatgpt is absent; read-only device application enumeration likewise shows no installed/running ChatGPT desktop application, so Gates E/F remain environment-blocked without any device-controller mutation"
       ],
       "missing": [
-        "restore/install a real ChatGPT desktop application on htch-runtime without using the device controller to substitute CLI actions",
+        "restore/install a real ChatGPT desktop application on htch-runtime without using the device controller to substitute CLI actions; current read-only enumeration has no ChatGPT application and /usr/bin/chatgpt is absent",
         "current exact-head packaged-artifact reasoning/Send/terminal journey",
         "current exact-head packaged-artifact Linux attachment journey",
         "current exact-head packaged-artifact authorization journey when a real conversation-scoped authorization card can be safely observed"
