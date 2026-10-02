@@ -149,16 +149,50 @@ impl SqliteStore {
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
             .context("configure SQLite busy timeout")?;
-        connection
-            .pragma_update(None, "journal_mode", "WAL")
-            .context("enable SQLite WAL")?;
+        let journal_mode: String = connection
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .context("read SQLite journal mode")?;
+        if !journal_mode.eq_ignore_ascii_case("wal") {
+            connection
+                .pragma_update(None, "journal_mode", "WAL")
+                .context("enable SQLite WAL")?;
+        }
         connection
             .pragma_update(None, "foreign_keys", "ON")
             .context("enable SQLite foreign keys")?;
 
         let mut store = Self { connection };
-        store.migrate()?;
+        if !store.schema_is_current()? {
+            store.migrate()?;
+        }
         Ok(store)
+    }
+
+    fn schema_is_current(&self) -> Result<bool> {
+        let has_schema_meta: bool = self
+            .connection
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM sqlite_master
+                     WHERE type='table' AND name='schema_meta'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .context("inspect SQLite schema metadata")?;
+        if !has_schema_meta {
+            return Ok(false);
+        }
+        let version = self
+            .connection
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key='schema_version'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .context("read SQLite schema version")?;
+        Ok(version == Some(SCHEMA_VERSION))
     }
 
     fn migrate(&mut self) -> Result<()> {
@@ -1432,6 +1466,35 @@ mod tests {
             prepared_dispatch: None,
             prepared_approval: None,
         }
+    }
+
+    #[test]
+    fn steady_state_open_does_not_require_a_schema_write_lock() {
+        let root = std::env::temp_dir().join(format!(
+            "fabushi-sqlite-open-lock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("state.sqlite3");
+        let mut first = SqliteStore::open(&path).unwrap();
+        let transaction = first.connection.transaction().unwrap();
+        transaction
+            .execute(
+                "INSERT INTO tasks(task_id, revision, state_json, updated_at_unix_ms)
+                 VALUES('lock-holder', 0, '{}', 1)",
+                [],
+            )
+            .unwrap();
+
+        let second = SqliteStore::open(&path).unwrap();
+        assert_eq!(second.schema_version().unwrap(), SCHEMA_VERSION);
+
+        transaction.rollback().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
