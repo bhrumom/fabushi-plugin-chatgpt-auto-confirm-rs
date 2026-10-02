@@ -143,18 +143,18 @@
         "shared production SupervisorClock + durable task_wakes scheduling in crates/runtime/src/lib.rs and sqlite-store",
         "rate_limit_deferred_task_does_not_block_runnable_task, due_task_selection_round_robins_only_due_tasks, scheduler_rotation_keeps_ui_single_writer_without_duplicate_send, durable_wait_fails_closed_when_supervisor_is_unavailable, dispatch_confirmation_holds_foreground_until_owner_yields, authorization_settlement_releases_foreground_for_other_tasks, and restart_wait_uses_original_durable_deadline",
         "two-phase durable wake arming fixes SQLite-latency ordering while preserving absolute deadlines; supervisor shutdown after final external handle is deterministic",
-        "CLI daemon + DesktopRuntime::resume_active_continuous_tasks enumerate durable active incomplete tasks and resume the sole safe task",
-        "startup_scan_enumerates_only_active_incomplete_continuous_tasks and startup_daemon_fails_closed_before_desktop_mutation_with_multiple_active_tasks prove startup orchestration and fail-closed multi-task behavior before ConversationRef rebinding exists",
+        "CLI daemon + DesktopRuntime::resume_active_continuous_tasks enumerate durable active incomplete tasks and resume all safely bound tasks as independent RunWorkers behind one DesktopSessionActor",
+        "startup_daemon_resumes_two_bound_server_side_reviews_under_one_session_actor proves two independently running server-side conversations are rebound and resumed without duplicate Send; startup_daemon_fails_closed_for_incomplete_phase_without_conversation_ref and startup_daemon_fails_closed_for_orphan_destructive_effect preserve fail-closed startup semantics",
         "Linux desktop AT-SPI projects an opaque hashed ConversationRef only from one unambiguous current/selected accessibility link with a native URI; transcript/title text alone cannot create identity",
         "ChatSurfacePort/DesktopSessionActor/DurableRunSurface now expose journaled single-writer rebind_conversation, and incomplete single-task resume rebinds to the persisted ConversationRef before validating the exact dispatch marker",
         "startup scan preserves durable ConversationRef while ambiguous/missing refs and sensitive/authorization surfaces fail closed",
         "DurableRunSurface now captures the current ConversationRef during an in-flight phase as soon as the exact durable dispatch marker has strong user-turn ownership; the state-only transition is idempotent and wrong-dispatch/weak-ownership observations cannot overwrite it",
         "in_flight_owned_observation_durably_binds_conversation_ref_once proves pre-terminal crash-survivable binding without poll-time revision churn",
-        "macOS AX adapter hashes the unique selected AXLink AXURL into an opaque ConversationRef and exact-matches the same opaque identity for AXPress rebinding; ambiguous/missing links and sensitive dialog/sheet surfaces fail closed"
+        "macOS AX adapter hashes the unique selected AXLink AXURL into an opaque ConversationRef and exact-matches the same opaque identity for AXPress rebinding; ambiguous/missing links and sensitive dialog/sheet surfaces fail closed",
+        "DurableRunSurface observe() now rebinds to the task's persisted ConversationRef before projection, startup reconciliation is task-scoped, and fresh-conversation journaling atomically clears the stale bound ref"
       ],
       "missing": [
         "exact-artifact real acceptance",
-        "production daemon rotation across multiple independently running server-side conversations",
         "macOS exact-head compile/test and live ConversationRef projection/rebind acceptance",
         "live concurrent-task acceptance"
       ]
