@@ -8,31 +8,31 @@
   "target": {
     "repository": "bhrumom/fabushi-plugin-chatgpt-auto-confirm-rs",
     "spec": "docs/specs/desktop-chat-userscript-parity-rust-cli.md",
-    "lastVerifiedExactHead": "eede5504d48583e6bd72dd51f054c50c6dbabf26",
-    "lastVerifiedCiRun": 37059254691,
+    "lastVerifiedExactHead": "fa3d09e0775befbf197128b38f6f1822a0b676ac",
+    "lastVerifiedCiRun": 37063076168,
     "lastVerifiedArtifact": {
-      "id": 11249014383,
+      "id": 11251144391,
       "name": "fabushi-chatgpt-auto-confirm-linux-x86_64",
-      "sha256": "a5eccb82b592f91b209f3ca8b38ecd03afa34077d6302e03a560553c9659193f"
+      "sha256": "b293e06c1e4addd90a5704929b6de02f7a9de24a39cd51e87b700cb286f0e64b"
     },
     "lastVerifiedArtifacts": [
       {
-        "id": 11249014383,
+        "id": 11251144391,
         "name": "fabushi-chatgpt-auto-confirm-linux-x86_64",
-        "headSha": "eede5504d48583e6bd72dd51f054c50c6dbabf26",
-        "sha256": "a5eccb82b592f91b209f3ca8b38ecd03afa34077d6302e03a560553c9659193f"
+        "headSha": "fa3d09e0775befbf197128b38f6f1822a0b676ac",
+        "sha256": "b293e06c1e4addd90a5704929b6de02f7a9de24a39cd51e87b700cb286f0e64b"
       },
       {
-        "id": 11250497832,
+        "id": 11251039603,
         "name": "fabushi-chatgpt-auto-confirm-macos-aarch64-apple-darwin",
-        "headSha": "eede5504d48583e6bd72dd51f054c50c6dbabf26",
-        "sha256": "dd6c74a87200eb03077fbba54a5a0a68a22f4e8b41af3bb875e6d217d8513e78"
+        "headSha": "fa3d09e0775befbf197128b38f6f1822a0b676ac",
+        "sha256": "db974b2ca033c3012f9ed21052414adff87d8353ad15710d70b968cff91c9158"
       },
       {
-        "id": 11250947768,
+        "id": 11251945665,
         "name": "fabushi-chatgpt-auto-confirm-macos-x86_64-apple-darwin",
-        "headSha": "eede5504d48583e6bd72dd51f054c50c6dbabf26",
-        "sha256": "3508f4d137cf8820ca657cbe9046e62ed5c551f975df3e8e40044a1dfaea41fe"
+        "headSha": "fa3d09e0775befbf197128b38f6f1822a0b676ac",
+        "sha256": "8d87830c2647c9cb2bf1bcfaea6dd130676ae3466784e169533264d5f4ed424a"
       }
     ]
   },
