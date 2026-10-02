@@ -6771,7 +6771,10 @@ mod actor_tests {
         let run_b = RunId::new("run-b");
         let run_c = RunId::new("run-c");
         let now = unix_time_ms().unwrap();
-        let base = now + 500;
+        // Keep the three deadlines distinct even under heavily contended CI hosts.
+        // Once every wake is overdue, the production contract intentionally
+        // round-robins due tasks instead of preserving historical deadline order.
+        let base = now + 5_000;
         let mut store = SqliteStore::open(&path).unwrap();
         store
             .arm_task_wake(
