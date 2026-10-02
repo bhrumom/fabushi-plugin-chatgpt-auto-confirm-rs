@@ -2625,43 +2625,14 @@ impl DesktopRuntime {
 
         let phase = state.phase;
         let round = state.round;
-        let prompt = match phase {
-            Phase::Work => state.work_instruction(),
-            Phase::Review => state.review_instruction()?,
-        };
-        let mut phase_options = options.clone();
-        phase_options.run_phase = Some(phase);
-        phase_options.run_round = Some(round);
-        phase_options.review_identity = (phase == Phase::Review).then(|| ReviewRunIdentity {
-            task_id: state.task_id.clone(),
-            run_id: candidate.run_id.clone(),
-            phase,
-            round,
-        });
-        phase_options.recovery_context = Some(RecoveryRunContext {
-            task_id: state.task_id.clone(),
-            run_id: candidate.run_id.clone(),
-            phase,
-            round,
-            goal_revision: state.goal_revision,
-            authoritative_instruction: prompt.clone(),
-            previous_work_result: state.previous_work_result.clone(),
-            current_next: state.current_next.clone(),
-            original_goal: state.goal.clone(),
-            completed: state
-                .previous_work_result
-                .iter()
-                .map(|value| format!("previous Work result: {value}"))
-                .collect(),
-            remaining: vec![
-                state
-                    .current_next
-                    .clone()
-                    .unwrap_or_else(|| state.goal.clone()),
-            ],
-            blockers: Vec::new(),
-        });
-        phase_options.expected_dispatch_id = Some(candidate.dispatch_id.clone());
+        let mut phase_plan = continuous_phase_execution_plan(
+            state,
+            &candidate.run_id,
+            options,
+            false,
+            task_scoped_reconciliation,
+        )?;
+        phase_plan.options.expected_dispatch_id = Some(candidate.dispatch_id.clone());
 
         let worker = RunWorker::new(
             self.desktop_session().await?.clone(),
@@ -2694,7 +2665,9 @@ impl DesktopRuntime {
             return Ok(None);
         }
 
-        let report = worker.resume_existing(&prompt, phase_options).await?;
+        let report = worker
+            .resume_existing(&phase_plan.prompt, phase_plan.options)
+            .await?;
         Ok(Some((candidate.run_id, report)))
     }
 
@@ -3110,54 +3083,20 @@ impl DesktopRuntime {
                 }),
             )?;
 
-            let prompt = match phase {
-                Phase::Work => state.work_instruction(),
-                Phase::Review => state.review_instruction()?,
-            };
-            let mut phase_options = options.clone();
-            phase_options.run_phase = Some(phase);
-            phase_options.run_round = Some(round);
-            phase_options.review_identity = (phase == Phase::Review).then(|| ReviewRunIdentity {
-                task_id: task_id.clone(),
-                run_id: run_id.clone(),
-                phase,
-                round,
-            });
-            phase_options.recovery_context = Some(RecoveryRunContext {
-                task_id: task_id.clone(),
-                run_id: run_id.clone(),
-                phase,
-                round,
-                goal_revision: state.goal_revision,
-                authoritative_instruction: prompt.clone(),
-                previous_work_result: state.previous_work_result.clone(),
-                current_next: state.current_next.clone(),
-                original_goal: state.goal.clone(),
-                completed: state
-                    .previous_work_result
-                    .iter()
-                    .map(|value| format!("previous Work result: {value}"))
-                    .collect(),
-                remaining: vec![
-                    state
-                        .current_next
-                        .clone()
-                        .unwrap_or_else(|| state.goal.clone()),
-                ],
-                blockers: Vec::new(),
-            });
+            let phase_plan = continuous_phase_execution_plan(
+                &state,
+                &run_id,
+                &options,
+                true,
+                task_scoped_reconciliation,
+            )?;
 
             let report = self
                 .run_prompt_with_identity(
-                    &prompt,
+                    &phase_plan.prompt,
                     state.reasoning_preset,
-                    phase_options,
-                    RunPromptIdentity {
-                        task_id: task_id.clone(),
-                        run_id: run_id.clone(),
-                        start_fresh: true,
-                        task_scoped_reconciliation,
-                    },
+                    phase_plan.options,
+                    phase_plan.identity,
                 )
                 .await?;
             if report.state != RunState::Complete {
@@ -3318,6 +3257,70 @@ impl DesktopRuntime {
         options.expected_dispatch_id = Some(dispatch_id);
         worker.execute(prompt, options).await
     }
+}
+
+struct ContinuousPhaseExecutionPlan {
+    prompt: String,
+    options: RunOptions,
+    identity: RunPromptIdentity,
+}
+
+fn continuous_phase_execution_plan(
+    state: &ContinuousTaskState,
+    run_id: &RunId,
+    base_options: &RunOptions,
+    start_fresh: bool,
+    task_scoped_reconciliation: bool,
+) -> Result<ContinuousPhaseExecutionPlan> {
+    let phase = state.phase;
+    let round = state.round;
+    let prompt = match phase {
+        Phase::Work => state.work_instruction(),
+        Phase::Review => state.review_instruction()?,
+    };
+    let mut options = base_options.clone();
+    options.run_phase = Some(phase);
+    options.run_round = Some(round);
+    options.review_identity = (phase == Phase::Review).then(|| ReviewRunIdentity {
+        task_id: state.task_id.clone(),
+        run_id: run_id.clone(),
+        phase,
+        round,
+    });
+    options.recovery_context = Some(RecoveryRunContext {
+        task_id: state.task_id.clone(),
+        run_id: run_id.clone(),
+        phase,
+        round,
+        goal_revision: state.goal_revision,
+        authoritative_instruction: prompt.clone(),
+        previous_work_result: state.previous_work_result.clone(),
+        current_next: state.current_next.clone(),
+        original_goal: state.goal.clone(),
+        completed: state
+            .previous_work_result
+            .iter()
+            .map(|value| format!("previous Work result: {value}"))
+            .collect(),
+        remaining: vec![
+            state
+                .current_next
+                .clone()
+                .unwrap_or_else(|| state.goal.clone()),
+        ],
+        blockers: Vec::new(),
+    });
+
+    Ok(ContinuousPhaseExecutionPlan {
+        prompt,
+        options,
+        identity: RunPromptIdentity {
+            task_id: state.task_id.clone(),
+            run_id: run_id.clone(),
+            start_fresh,
+            task_scoped_reconciliation,
+        },
+    })
 }
 
 fn incomplete_phase_matches_state(
@@ -6116,6 +6119,110 @@ VmRSS:	   512 kB
                 .push(conversation_ref.as_str().to_owned());
             Ok(true)
         }
+    }
+
+    #[test]
+    fn continuous_phase_plan_preserves_identity_context_and_fresh_phase_boundaries() {
+        let task_id = TaskId::new("task-continuous-plan");
+        let base_options = RunOptions::default();
+        let work_state = ContinuousTaskState::new(
+            task_id.clone(),
+            "original goal".into(),
+            ReasoningPreset::ExtraHigh,
+        );
+        let work_run = RunId::new("run-work-1");
+        let work_plan = continuous_phase_execution_plan(
+            &work_state,
+            &work_run,
+            &base_options,
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(work_plan.options.run_phase, Some(Phase::Work));
+        assert_eq!(work_plan.options.run_round, Some(Round::new(1)));
+        assert!(work_plan.options.review_identity.is_none());
+        assert!(work_plan.identity.start_fresh);
+        assert_eq!(work_plan.identity.task_id, task_id);
+        assert_eq!(work_plan.identity.run_id, work_run);
+        let work_context = work_plan.options.recovery_context.unwrap();
+        assert_eq!(work_context.authoritative_instruction, work_plan.prompt);
+        assert_eq!(work_context.original_goal, "original goal");
+        assert!(work_context.previous_work_result.is_none());
+
+        let review_state = work_state.after_work_result(
+            "round-1 work result with stale quoted report {\"taskId\":\"old\",\"round\":9}".into(),
+        );
+        let review_run = RunId::new("run-review-1");
+        let review_plan = continuous_phase_execution_plan(
+            &review_state,
+            &review_run,
+            &base_options,
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(review_plan.options.run_phase, Some(Phase::Review));
+        assert_eq!(review_plan.options.run_round, Some(Round::new(1)));
+        assert!(review_plan.identity.start_fresh);
+        let review_identity = review_plan.options.review_identity.as_ref().unwrap();
+        assert_eq!(review_identity.task_id, task_id);
+        assert_eq!(review_identity.run_id, review_run);
+        assert_eq!(review_identity.phase, Phase::Review);
+        assert_eq!(review_identity.round, Round::new(1));
+        assert!(review_plan.prompt.contains("MAHAYANA_TASK_REPORT_V1"));
+        assert!(review_plan.prompt.contains("taskId=\"task-continuous-plan\""));
+        assert!(review_plan.prompt.contains("round=1"));
+        let review_context = review_plan.options.recovery_context.as_ref().unwrap();
+        assert_eq!(
+            review_context.previous_work_result.as_deref(),
+            Some("round-1 work result with stale quoted report {\"taskId\":\"old\",\"round\":9}")
+        );
+        assert_eq!(review_context.authoritative_instruction, review_plan.prompt);
+
+        let next_state = review_state
+            .apply_review(fabushi_chatgpt_application::ReviewReport {
+                task_id: task_id.clone(),
+                round: Round::new(1),
+                status: fabushi_chatgpt_domain::ReviewStatus::Next,
+                summary: "more work remains".into(),
+                next: Some("do only the next required work".into()),
+            })
+            .unwrap();
+        let next_work_run = RunId::new("run-work-2");
+        let next_work_plan = continuous_phase_execution_plan(
+            &next_state,
+            &next_work_run,
+            &base_options,
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(next_work_plan.options.run_phase, Some(Phase::Work));
+        assert_eq!(next_work_plan.options.run_round, Some(Round::new(2)));
+        assert!(next_work_plan.identity.start_fresh);
+        assert!(next_work_plan.prompt.starts_with("do only the next required work"));
+        assert!(next_work_plan.prompt.contains("original goal"));
+        assert!(next_work_plan.prompt.contains("round-1 work result"));
+        let next_context = next_work_plan.options.recovery_context.as_ref().unwrap();
+        assert_eq!(next_context.current_next.as_deref(), Some("do only the next required work"));
+        assert_eq!(next_context.original_goal, "original goal");
+        assert_eq!(next_context.round, Round::new(2));
+
+        let resumed_review_plan = continuous_phase_execution_plan(
+            &review_state,
+            &review_run,
+            &base_options,
+            false,
+            true,
+        )
+        .unwrap();
+        assert!(!resumed_review_plan.identity.start_fresh);
+        assert!(resumed_review_plan.identity.task_scoped_reconciliation);
+        assert_eq!(
+            resumed_review_plan.options.review_identity.unwrap().run_id,
+            review_run
+        );
     }
 
     #[tokio::test]
