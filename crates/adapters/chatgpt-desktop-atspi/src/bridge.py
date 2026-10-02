@@ -825,6 +825,39 @@ def hash_text(value):
     import hashlib
     return hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()
 
+def surface_generation(items):
+    # Opaque evidence for the currently mounted ChatGPT renderer surface.
+    # The raw AT-SPI process/object identity never leaves this adapter.
+    candidates = [
+        item for item in items
+        if item["visible"]
+        and item["role"] in ("document web", "document")
+        and node_name(item["node"]) == "ChatGPT"
+    ]
+    if len(candidates) != 1:
+        return None
+    node = candidates[0]["node"]
+    parts = []
+    for getter_name in ("get_process_id", "get_accessible_id", "get_id"):
+        getter = getattr(node, getter_name, None)
+        if getter is None:
+            continue
+        try:
+            value = getter()
+        except Exception:
+            continue
+        if value is not None and str(value):
+            parts.append(getter_name + "=" + str(value))
+    try:
+        value = getattr(node, "path", None)
+    except Exception:
+        value = None
+    if value is not None and str(value):
+        parts.append("path=" + str(value))
+    if not parts:
+        return None
+    return hash_text("|".join(parts))
+
 def current_reasoning(items):
     mapping = {
         "instant": "instant",
@@ -956,6 +989,7 @@ def snapshot():
         "assistant_response_ownership": "strong" if marker and response_boundary else "none",
         "conversation_ref": conversation_ref,
         "conversation_fingerprint": conversation_fingerprint,
+        "surface_generation": surface_generation(items),
         "assistant_visible_prose": prose,
         "assistant_visible_work_trace": work_trace,
         "streaming_or_busy": stop,
@@ -1238,8 +1272,21 @@ def start_fresh():
     return True
 
 def recover():
+    before_items = flattened(find_app())
+    before_generation = surface_generation(before_items)
+    if before_generation is None:
+        raise RuntimeError("ChatGPT surface generation is unavailable; refusing unverifiable reload")
     pyatspi.Registry.generateKeyboardEvent(0, "r", pyatspi.KEY_PRESSRELEASE | pyatspi.KEY_CONTROL)
-    return True
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        time.sleep(0.1)
+        try:
+            after_generation = surface_generation(flattened(find_app()))
+        except Exception:
+            continue
+        if after_generation is not None and after_generation != before_generation:
+            return True
+    raise RuntimeError("ChatGPT reload did not expose a distinct surface generation")
 
 def approve():
     app = find_app()
