@@ -215,6 +215,30 @@ mod tests {
     }
 
     #[test]
+    fn fresh_conversation_refuses_unrelated_draft_before_new_chat_action() {
+        use std::process::Command as StdCommand;
+        let wrapper = format!(
+            "import sys,types; sys.modules['pyatspi']=types.SimpleNamespace(); sys.argv=['bridge','contract-fresh-draft-safety']; exec({:?})",
+            BRIDGE
+        );
+        let output = StdCommand::new("python3")
+            .arg("-c")
+            .arg(wrapper)
+            .output()
+            .expect("python3 must execute deterministic fresh-draft safety contract");
+        assert!(
+            output.status.success(),
+            "contract failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "true");
+        assert!(BRIDGE.contains(
+            "ChatGPT composer contains an unrelated draft; refusing destructive fresh conversation"
+        ));
+    }
+
+    #[test]
     fn dispatch_marker_projection_excludes_composer_draft_and_hidden_history() {
         use std::process::Command as StdCommand;
         let wrapper = format!(
