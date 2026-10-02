@@ -142,6 +142,10 @@ enum DesktopMutation {
     DismissHarmlessPopup {
         reply: oneshot::Sender<Result<bool>>,
     },
+    RetryStreamCacheExpired {
+        failure_identity: String,
+        reply: oneshot::Sender<Result<bool>>,
+    },
     RecoverCurrentSurface {
         reply: oneshot::Sender<Result<()>>,
     },
@@ -242,6 +246,12 @@ async fn execute_mutation(surface: &dyn ChatSurfacePort, mutation: DesktopMutati
         DesktopMutation::DismissHarmlessPopup { reply } => {
             let _ = reply.send(surface.dismiss_harmless_popup().await);
         }
+        DesktopMutation::RetryStreamCacheExpired {
+            failure_identity,
+            reply,
+        } => {
+            let _ = reply.send(surface.retry_stream_cache_expired(&failure_identity).await);
+        }
         DesktopMutation::RecoverCurrentSurface { reply } => {
             let _ = reply.send(surface.recover_current_surface().await);
         }
@@ -258,7 +268,8 @@ fn reject_mutation(mutation: DesktopMutation, error: anyhow::Error) {
         | DesktopMutation::AttachFile { reply, .. }
         | DesktopMutation::ApproveCurrentConversation { reply }
         | DesktopMutation::DismissRateLimitNotice { reply }
-        | DesktopMutation::DismissHarmlessPopup { reply } => {
+        | DesktopMutation::DismissHarmlessPopup { reply }
+        | DesktopMutation::RetryStreamCacheExpired { reply, .. } => {
             let _ = reply.send(Err(anyhow::anyhow!(message)));
         }
         DesktopMutation::SendPrompt { reply, .. }
@@ -314,6 +325,15 @@ impl ChatSurfacePort for DesktopSessionActorHandle {
     async fn dismiss_harmless_popup(&self) -> Result<bool> {
         self.request(|reply| DesktopMutation::DismissHarmlessPopup { reply })
             .await
+    }
+
+    async fn retry_stream_cache_expired(&self, failure_identity: &str) -> Result<bool> {
+        let failure_identity = failure_identity.to_owned();
+        self.request(|reply| DesktopMutation::RetryStreamCacheExpired {
+            failure_identity,
+            reply,
+        })
+        .await
     }
 
     async fn recover_current_surface(&self) -> Result<()> {
@@ -1124,6 +1144,45 @@ impl ChatSurfacePort for DurableRunSurface {
             self.surface.dismiss_harmless_popup(),
         )
         .await
+    }
+
+    async fn retry_stream_cache_expired(&self, failure_identity: &str) -> Result<bool> {
+        let _mutation_permit = self.mutation_permit().await;
+        let mut journal = self.journal.lock().await;
+        if journal.store.effect_identity_seen(
+            &journal.task_id,
+            &journal.run_id,
+            "retry_stream_cache_expired",
+            failure_identity,
+        )? {
+            return Ok(false);
+        }
+        let effect_id = journal.begin(
+            "retry_stream_cache_expired",
+            json!({"failureIdentity": failure_identity}).to_string(),
+            None,
+            None,
+        )?;
+        drop(journal);
+
+        let result = self
+            .surface
+            .retry_stream_cache_expired(failure_identity)
+            .await;
+        let (ok, detail) = match &result {
+            Ok(true) => (
+                true,
+                "response-local Stream cache expired Retry action accepted".to_owned(),
+            ),
+            Ok(false) => (
+                false,
+                "response-local Stream cache expired Retry action unavailable".to_owned(),
+            ),
+            Err(error) => (false, error.to_string()),
+        };
+        let journal = self.journal.lock().await;
+        journal.settle(effect_id, ok, &detail)?;
+        result
     }
 
     async fn recover_current_surface(&self) -> Result<()> {

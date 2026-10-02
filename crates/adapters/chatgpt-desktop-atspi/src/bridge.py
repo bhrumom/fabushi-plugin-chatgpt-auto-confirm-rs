@@ -334,6 +334,35 @@ def dismiss_harmless_popup():
     return bool(action(harmless[0][1]["node"]))
 
 
+def is_stream_cache_expired_item(item):
+    value = normalized(item).strip().rstrip(".!。！")
+    return value in CACHE_EXPIRED_TEXT
+
+
+def retry_stream_cache_expired():
+    app = find_app()
+    items = flattened(app)
+    marker, marker_index = marker_info(items)
+    if not marker or marker_index < 0:
+        return False
+    response_scope, response_text_items, _ = latest_owned_response(items, marker_index)
+    if response_scope is None:
+        return False
+    cache_text = [item for item in response_text_items if is_stream_cache_expired_item(item)]
+    if not cache_text:
+        return False
+    retry = [
+        item for item in items
+        if item["visible"] and item["enabled"]
+        and item["role"] in ACTION_ROLES
+        and is_descendant(item["node"], response_scope)
+        and any(word in normalized(item) for word in RETRY_WORDS)
+    ]
+    if len(retry) != 1:
+        return False
+    return bool(action(retry[0]["node"]))
+
+
 ACTIVITY_TEXT_ROLES = ("static", "paragraph", "text", "status", "notification", "alert")
 INTERACTIVE_ACTIVITY_ROLES = (
     "push button", "button", "toggle button", "entry", "menu item", "link", "check box", "radio button"
@@ -562,7 +591,9 @@ def snapshot():
     unable_load = any(t in all_text for t in UNABLE_LOAD_TEXT)
     interrupted = any(t in all_text for t in INTERRUPTED_TEXT)
     length_limit = any(t in all_text for t in LENGTH_LIMIT_TEXT)
-    cache_expired = any(t in all_text for t in CACHE_EXPIRED_TEXT)
+    cache_expired = bool(response_scope) and any(
+        is_stream_cache_expired_item(item) for item in response_text_items
+    )
     polling_timeout = any(t in all_text for t in POLL_TIMEOUT_TEXT)
     retryable = any(
         item["enabled"] and item["role"] in ("push button", "button")
@@ -996,6 +1027,8 @@ def main():
         result = dismiss_rate_limit()
     elif op == "dismiss-harmless-popup":
         result = dismiss_harmless_popup()
+    elif op == "retry-stream-cache-expired":
+        result = retry_stream_cache_expired()
     elif op == "reasoning":
         result = reasoning()
     elif op == "set-reasoning":

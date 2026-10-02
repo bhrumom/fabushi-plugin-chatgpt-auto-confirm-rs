@@ -85,6 +85,9 @@ pub trait ChatSurfacePort: Send + Sync {
     async fn dismiss_harmless_popup(&self) -> Result<bool> {
         Ok(false)
     }
+    async fn retry_stream_cache_expired(&self, _failure_identity: &str) -> Result<bool> {
+        Ok(false)
+    }
     async fn recover_current_surface(&self) -> Result<()>;
     async fn start_fresh_conversation(&self) -> Result<()>;
 }
@@ -503,6 +506,40 @@ impl<'a> RunPrompt<'a> {
                 continue;
             }
 
+            if snapshot.stream_cache_expired {
+                let failure_identity = stream_cache_failure_identity(&snapshot);
+                terminal_since = None;
+                if self
+                    .surface
+                    .retry_stream_cache_expired(&failure_identity)
+                    .await?
+                {
+                    self.clock
+                        .sleep_for(WakeReason::Poll, options.poll_interval)
+                        .await?;
+                    continue;
+                }
+                if !self.destructive_handoff_is_safe().await? {
+                    self.clock
+                        .sleep_for(WakeReason::AuthorizationSafetyCheck, options.poll_interval)
+                        .await?;
+                    continue;
+                }
+                let recovery_prompt =
+                    recovery_handoff_prompt(prompt, options.recovery_context.as_ref(), &snapshot)?;
+                self.surface.start_fresh_conversation().await?;
+                self.surface.send_prompt(&recovery_prompt).await?;
+                dispatch_preconfirmed = false;
+                recoveries += 1;
+                dispatched = now;
+                progress = now;
+                fingerprint.clear();
+                if let Some(tracker) = review_tracker.as_mut() {
+                    *tracker = ReviewSettlementTracker::default();
+                }
+                continue;
+            }
+
             if snapshot.connection_interrupted
                 || snapshot.stream_polling_timeout
                 || snapshot.conversation_length_limit
@@ -909,6 +946,30 @@ impl TerminalStabilityTracker {
         };
         now.saturating_sub(self.since.unwrap_or(now)) >= required
     }
+}
+
+fn stream_cache_failure_identity(snapshot: &ChatSurfaceSnapshot) -> String {
+    let conversation = snapshot
+        .conversation_fingerprint
+        .as_ref()
+        .map(|value| value.as_str())
+        .unwrap_or("");
+    let user_turn = snapshot
+        .user_turn_boundary
+        .as_ref()
+        .map(|value| value.as_str())
+        .unwrap_or("");
+    let response = snapshot
+        .assistant_response_boundary
+        .as_ref()
+        .map(|value| value.as_str())
+        .unwrap_or("");
+    let progress = snapshot
+        .progress_fingerprint
+        .as_ref()
+        .map(|value| value.as_str())
+        .unwrap_or("");
+    format!("{conversation}|{user_turn}|{response}|{progress}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1988,6 +2049,8 @@ mod tests {
         dismiss_rate_limit: bool,
         dismiss_popup: bool,
         popup_dismissals: Mutex<u32>,
+        retry_stream_cache_once: bool,
+        stream_cache_retries: Mutex<u32>,
     }
 
     impl ScriptedSurface {
@@ -2001,6 +2064,8 @@ mod tests {
                 dismiss_rate_limit: false,
                 dismiss_popup: false,
                 popup_dismissals: Mutex::new(0),
+                retry_stream_cache_once: false,
+                stream_cache_retries: Mutex::new(0),
             }
         }
 
@@ -2016,6 +2081,15 @@ mod tests {
 
         fn popup_dismiss_count(&self) -> u32 {
             *self.popup_dismissals.lock().unwrap()
+        }
+
+        fn with_stream_cache_retry(mut self) -> Self {
+            self.retry_stream_cache_once = true;
+            self
+        }
+
+        fn stream_cache_retry_count(&self) -> u32 {
+            *self.stream_cache_retries.lock().unwrap()
         }
 
         fn send_count(&self) -> usize {
@@ -2055,6 +2129,15 @@ mod tests {
         async fn dismiss_harmless_popup(&self) -> Result<bool> {
             if self.dismiss_popup {
                 *self.popup_dismissals.lock().unwrap() += 1;
+                return Ok(true);
+            }
+            Ok(false)
+        }
+
+        async fn retry_stream_cache_expired(&self, _failure_identity: &str) -> Result<bool> {
+            let mut retries = self.stream_cache_retries.lock().unwrap();
+            if self.retry_stream_cache_once && *retries == 0 {
+                *retries += 1;
                 return Ok(true);
             }
             Ok(false)
@@ -3118,6 +3201,64 @@ mod tests {
 
         assert_eq!(report.state, RunState::Complete);
         assert_eq!(surface.popup_dismiss_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn shipping_run_prompt_retries_same_stream_cache_failure_once_then_fresh_handoffs() {
+        let before = ChatSurfaceSnapshot {
+            user_turn_boundary: Some(UserTurnBoundary::new("u0")),
+            ..Default::default()
+        };
+        let cache_failure = ChatSurfaceSnapshot {
+            app_healthy: true,
+            composer_ready: true,
+            user_turn_boundary: Some(UserTurnBoundary::new("u1")),
+            user_turn_ownership: OwnershipConfidence::Strong,
+            assistant_response_boundary: Some(AssistantResponseBoundary::new("a1")),
+            assistant_response_ownership: OwnershipConfidence::Strong,
+            conversation_fingerprint: Some(ConversationFingerprint::new("c1")),
+            stream_cache_expired: true,
+            retryable_error: true,
+            ..Default::default()
+        };
+        let final_snapshot = ChatSurfaceSnapshot {
+            app_healthy: true,
+            composer_ready: true,
+            user_turn_boundary: Some(UserTurnBoundary::new("u2")),
+            user_turn_ownership: OwnershipConfidence::Strong,
+            assistant_response_boundary: Some(AssistantResponseBoundary::new("a2")),
+            assistant_response_ownership: OwnershipConfidence::Strong,
+            response_local_copy: true,
+            ..Default::default()
+        };
+        let surface = ScriptedSurface::new(vec![
+            before,
+            cache_failure.clone(),
+            cache_failure,
+            final_snapshot.clone(),
+            final_snapshot.clone(),
+            final_snapshot.clone(),
+            final_snapshot.clone(),
+            final_snapshot,
+        ])
+        .with_stream_cache_retry();
+        let clock = FakeClock::new();
+        let options = RunOptions {
+            poll_interval: Duration::from_secs(1),
+            timeout: Duration::from_secs(30),
+            stale_reload_after: Duration::from_secs(1_000),
+            ..RunOptions::default()
+        };
+
+        let report = RunPrompt::new(&surface, &clock)
+            .execute("prepared prompt", options)
+            .await
+            .unwrap();
+
+        assert_eq!(report.state, RunState::Complete);
+        assert_eq!(surface.stream_cache_retry_count(), 1);
+        assert_eq!(surface.fresh_count(), 1);
+        assert_eq!(surface.send_count(), 2);
     }
 
     #[tokio::test]

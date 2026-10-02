@@ -575,6 +575,31 @@ impl SqliteStore {
             .context("read pending effects")
     }
 
+    pub fn effect_identity_seen(
+        &self,
+        task_id: &TaskId,
+        run_id: &RunId,
+        effect_kind: &str,
+        failure_identity: &str,
+    ) -> Result<bool> {
+        let seen: i64 = self.connection.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM effect_outbox
+                 WHERE task_id=?1 AND run_id=?2 AND effect_kind=?3
+                   AND json_extract(effect_payload_json, '$.failureIdentity')=?4
+                   AND status IN ('pending','settled')
+             )",
+            params![
+                task_id.as_str(),
+                run_id.as_str(),
+                effect_kind,
+                failure_identity,
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(seen != 0)
+    }
+
     pub fn review_settlement(
         &self,
         task_id: &TaskId,
@@ -1418,6 +1443,51 @@ mod tests {
         let effects = store.pending_effects(10).unwrap();
         assert_eq!(effects.len(), 1);
         assert_eq!(effects[0].idempotency_key, "effect-1");
+    }
+
+    #[test]
+    fn effect_identity_guard_survives_settlement() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        let task_id = TaskId::new("task-cache-retry");
+        let run_id = RunId::new("run-cache-retry");
+        store
+            .record_transition(
+                &TransitionRecord {
+                    task_id: task_id.clone(),
+                    run_id: run_id.clone(),
+                    expected_revision: 0,
+                    next_revision: 1,
+                    event_kind: "retry_stream_cache_expired_prepared".into(),
+                    event_payload_json: r#"{"failureIdentity":"failure-1"}"#.into(),
+                    materialized_state_json: "{}".into(),
+                    effect_kind: "retry_stream_cache_expired".into(),
+                    effect_payload_json: r#"{"failureIdentity":"failure-1"}"#.into(),
+                    idempotency_key: "cache-retry-1".into(),
+                    prepared_dispatch: None,
+                    prepared_approval: None,
+                },
+                123,
+            )
+            .unwrap();
+        assert!(
+            store
+                .effect_identity_seen(&task_id, &run_id, "retry_stream_cache_expired", "failure-1",)
+                .unwrap()
+        );
+        let effect = store.pending_effects(10).unwrap().remove(0);
+        store
+            .settle_effect(effect.id, r#"{"ok":true}"#, 456)
+            .unwrap();
+        assert!(
+            store
+                .effect_identity_seen(&task_id, &run_id, "retry_stream_cache_expired", "failure-1",)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .effect_identity_seen(&task_id, &run_id, "retry_stream_cache_expired", "failure-2",)
+                .unwrap()
+        );
     }
 
     #[test]

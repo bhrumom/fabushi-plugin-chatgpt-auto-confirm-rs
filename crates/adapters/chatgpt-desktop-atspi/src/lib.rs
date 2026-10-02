@@ -138,6 +138,10 @@ impl ChatSurfacePort for ChatGptDesktopAtspi {
         self.bridge("dismiss-harmless-popup", None).await
     }
 
+    async fn retry_stream_cache_expired(&self, _failure_identity: &str) -> Result<bool> {
+        self.bridge("retry-stream-cache-expired", None).await
+    }
+
     async fn recover_current_surface(&self) -> Result<()> {
         let recovered: bool = self.bridge("recover", None).await?;
         if !recovered {
@@ -231,6 +235,15 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "true");
+    }
+
+    #[test]
+    fn stream_cache_expired_projection_and_retry_are_response_local() {
+        assert!(BRIDGE.contains("is_stream_cache_expired_item"));
+        assert!(BRIDGE.contains("response_text_items"));
+        assert!(BRIDGE.contains("is_descendant(item[\"node\"], response_scope)"));
+        assert!(BRIDGE.contains("retry-stream-cache-expired"));
+        assert!(!BRIDGE.contains("cache_expired = any(t in all_text for t in CACHE_EXPIRED_TEXT)"));
     }
 
     #[test]
