@@ -34,6 +34,16 @@ INTERRUPTED_TEXT = ("connection interrupted", "连接中断")
 LENGTH_LIMIT_TEXT = ("conversation is too long", "maximum length", "对话过长", "达到对话长度")
 CACHE_EXPIRED_TEXT = ("stream cache expired", "流缓存已过期")
 POLL_TIMEOUT_TEXT = ("stream polling timeout", "轮询超时")
+SAFE_POPUP_DISMISS_LABELS = (
+    "close", "dismiss", "later", "not now", "maybe later", "skip",
+    "关闭", "稍后", "以后再说", "跳过",
+)
+SENSITIVE_POPUP_WORDS = (
+    "login", "log in", "sign in", "authorization", "authorize", "permission", "consent",
+    "account", "verify", "verification", "security", "payment", "billing", "purchase", "subscribe",
+    "登录", "登陆", "授权", "权限", "同意", "账号", "账户", "验证", "安全验证", "支付", "付款", "订阅",
+)
+DIALOG_ROLES = ("dialog", "alert dialog", "alertdialog")
 
 def walk(root, limit=14000):
     stack = [root]
@@ -282,6 +292,48 @@ def authorization_cards(items):
     return cards
 
 
+def popup_dialogs(items):
+    return [item for item in items if item["visible"] and item["role"] in DIALOG_ROLES]
+
+
+def dialog_items(items, dialog):
+    return [item for item in items if item["visible"] and is_descendant(item["node"], dialog["node"])]
+
+
+def popup_semantics(items, auth_cards=None):
+    auth_cards = authorization_cards(items) if auth_cards is None else auth_cards
+    harmless = []
+    blocked = []
+    for dialog in popup_dialogs(items):
+        nested_auth = any(
+            is_descendant(card["container"], dialog["node"])
+            or is_descendant(dialog["node"], card["container"])
+            for card in auth_cards
+        )
+        scoped = dialog_items(items, dialog)
+        material = " ".join(normalized(item) for item in scoped).lower()
+        sensitive = nested_auth or any(word in material for word in SENSITIVE_POPUP_WORDS)
+        dismiss = [
+            item for item in scoped
+            if item["role"] in ACTION_ROLES and item["enabled"]
+            and any(label in SAFE_POPUP_DISMISS_LABELS for label in item_labels(item))
+        ]
+        if not sensitive and len(dismiss) == 1:
+            harmless.append((dialog, dismiss[0]))
+        else:
+            blocked.append(dialog)
+    return harmless, blocked
+
+
+def dismiss_harmless_popup():
+    app = find_app()
+    items = flattened(app)
+    harmless, blocked = popup_semantics(items)
+    if blocked or len(harmless) != 1:
+        return False
+    return bool(action(harmless[0][1]["node"]))
+
+
 ACTIVITY_TEXT_ROLES = ("static", "paragraph", "text", "status", "notification", "alert")
 INTERACTIVE_ACTIVITY_ROLES = (
     "push button", "button", "toggle button", "entry", "menu item", "link", "check box", "radio button"
@@ -503,6 +555,7 @@ def snapshot():
     auth_cards = authorization_cards(items)
     auth_present = bool(auth_cards)
     auth_actionable = any(card["actionable"] for card in auth_cards)
+    harmless_popups, blocked_popups = popup_semantics(items, auth_cards)
 
     all_text = "\n".join((item["text"] or item["name"]) for item in items if item["visible"]).lower()
     rate_limit = any(t in all_text for t in RATE_LIMIT_TEXT)
@@ -565,7 +618,9 @@ def snapshot():
         "reasoning_picker_available": picker,
         "selected_reasoning_preset": selected,
         "attachment_ready": any_attachment_ready(items),
-        "blocker_or_modal": False,
+        "harmless_popup_present": bool(harmless_popups),
+        "sensitive_or_unknown_popup_present": bool(blocked_popups),
+        "blocker_or_modal": bool(harmless_popups or blocked_popups),
         "progress_fingerprint": progress,
     }
 
@@ -826,6 +881,61 @@ def set_reasoning(target):
     close_reasoning_menu(app)
     return verified
 
+def popup_contract_self_test():
+    class FakeNode:
+        def __init__(self, node_role, name, parent=None, attributes=None):
+            self._role = node_role
+            self.name = name
+            self.parent = parent
+            self._attributes = attributes or []
+        def getRoleName(self):
+            return self._role
+        def getAttributes(self):
+            return self._attributes
+
+    def item(node, enabled=True):
+        return {
+            "node": node,
+            "role": node.getRoleName(),
+            "name": node.name,
+            "text": node.name,
+            "visible": True,
+            "enabled": enabled,
+        }
+
+    safe_dialog = FakeNode("dialog", "Product tip")
+    safe_text = FakeNode("paragraph", "Try this new feature", safe_dialog)
+    safe_close = FakeNode("push button", "Close", safe_dialog)
+    harmless, blocked = popup_semantics([item(safe_dialog), item(safe_text), item(safe_close)], [])
+    if len(harmless) != 1 or blocked or not same_node(harmless[0][1]["node"], safe_close):
+        return False
+
+    sensitive_dialog = FakeNode("dialog", "Account verification")
+    sensitive_text = FakeNode("paragraph", "Verify your account", sensitive_dialog)
+    sensitive_close = FakeNode("push button", "Close", sensitive_dialog)
+    harmless, blocked = popup_semantics(
+        [item(sensitive_dialog), item(sensitive_text), item(sensitive_close)], []
+    )
+    if harmless or len(blocked) != 1:
+        return False
+
+    auth_dialog = FakeNode("dialog", "Connector access")
+    auth_panel = FakeNode("panel", "Approval", auth_dialog)
+    auth_allow = FakeNode("push button", "Allow", auth_panel)
+    auth_reject = FakeNode("push button", "Reject", auth_panel)
+    auth_options = FakeNode("push button", "Options", auth_panel, ["haspopup:true"])
+    auth_close = FakeNode("push button", "Close", auth_dialog)
+    auth_items = [
+        item(auth_dialog), item(auth_panel), item(auth_allow), item(auth_reject),
+        item(auth_options), item(auth_close),
+    ]
+    cards = authorization_cards(auth_items)
+    if len(cards) != 1:
+        return False
+    harmless, blocked = popup_semantics(auth_items, cards)
+    return not harmless and len(blocked) == 1
+
+
 def response_boundary_contract_self_test():
     class FakeNode:
         def __init__(self, node_role, name, parent=None):
@@ -866,6 +976,8 @@ def main():
     op = sys.argv[1]
     if op == "contract-response-boundary":
         result = response_boundary_contract_self_test()
+    elif op == "contract-popup":
+        result = popup_contract_self_test()
     elif op == "snapshot":
         result = snapshot()
     elif op == "send":
@@ -882,6 +994,8 @@ def main():
         result = approve()
     elif op == "dismiss-rate-limit":
         result = dismiss_rate_limit()
+    elif op == "dismiss-harmless-popup":
+        result = dismiss_harmless_popup()
     elif op == "reasoning":
         result = reasoning()
     elif op == "set-reasoning":

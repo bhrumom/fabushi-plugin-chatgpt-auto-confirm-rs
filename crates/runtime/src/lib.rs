@@ -139,6 +139,9 @@ enum DesktopMutation {
     DismissRateLimitNotice {
         reply: oneshot::Sender<Result<bool>>,
     },
+    DismissHarmlessPopup {
+        reply: oneshot::Sender<Result<bool>>,
+    },
     RecoverCurrentSurface {
         reply: oneshot::Sender<Result<()>>,
     },
@@ -236,6 +239,9 @@ async fn execute_mutation(surface: &dyn ChatSurfacePort, mutation: DesktopMutati
         DesktopMutation::DismissRateLimitNotice { reply } => {
             let _ = reply.send(surface.dismiss_rate_limit_notice().await);
         }
+        DesktopMutation::DismissHarmlessPopup { reply } => {
+            let _ = reply.send(surface.dismiss_harmless_popup().await);
+        }
         DesktopMutation::RecoverCurrentSurface { reply } => {
             let _ = reply.send(surface.recover_current_surface().await);
         }
@@ -251,7 +257,8 @@ fn reject_mutation(mutation: DesktopMutation, error: anyhow::Error) {
         DesktopMutation::SetReasoning { reply, .. }
         | DesktopMutation::AttachFile { reply, .. }
         | DesktopMutation::ApproveCurrentConversation { reply }
-        | DesktopMutation::DismissRateLimitNotice { reply } => {
+        | DesktopMutation::DismissRateLimitNotice { reply }
+        | DesktopMutation::DismissHarmlessPopup { reply } => {
             let _ = reply.send(Err(anyhow::anyhow!(message)));
         }
         DesktopMutation::SendPrompt { reply, .. }
@@ -301,6 +308,11 @@ impl ChatSurfacePort for DesktopSessionActorHandle {
 
     async fn dismiss_rate_limit_notice(&self) -> Result<bool> {
         self.request(|reply| DesktopMutation::DismissRateLimitNotice { reply })
+            .await
+    }
+
+    async fn dismiss_harmless_popup(&self) -> Result<bool> {
+        self.request(|reply| DesktopMutation::DismissHarmlessPopup { reply })
             .await
     }
 
@@ -1101,6 +1113,15 @@ impl ChatSurfacePort for DurableRunSurface {
             "dismiss_rate_limit_notice",
             json!({}),
             self.surface.dismiss_rate_limit_notice(),
+        )
+        .await
+    }
+
+    async fn dismiss_harmless_popup(&self) -> Result<bool> {
+        self.record_and_settle(
+            "dismiss_harmless_popup",
+            json!({"class": "harmless_explicit_dismiss"}),
+            self.surface.dismiss_harmless_popup(),
         )
         .await
     }

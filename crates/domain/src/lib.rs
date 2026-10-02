@@ -159,6 +159,8 @@ pub struct ChatSurfaceSnapshot {
     pub reasoning_picker_available: bool,
     pub selected_reasoning_preset: Option<ReasoningPreset>,
     pub attachment_ready: bool,
+    pub harmless_popup_present: bool,
+    pub sensitive_or_unknown_popup_present: bool,
     pub blocker_or_modal: bool,
     pub progress_fingerprint: Option<ProgressFingerprint>,
 }

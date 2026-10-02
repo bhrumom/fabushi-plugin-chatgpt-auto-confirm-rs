@@ -134,6 +134,10 @@ impl ChatSurfacePort for ChatGptDesktopAtspi {
         self.bridge("dismiss-rate-limit", None).await
     }
 
+    async fn dismiss_harmless_popup(&self) -> Result<bool> {
+        self.bridge("dismiss-harmless-popup", None).await
+    }
+
     async fn recover_current_surface(&self) -> Result<()> {
         let recovered: bool = self.bridge("recover", None).await?;
         if !recovered {
@@ -194,6 +198,39 @@ mod tests {
             "copy_after = response_local_copy_evidence(items, marker_index, response_scope)"
         ));
         assert!(!BRIDGE.contains("prose = \"\\n\".join(after_text"));
+    }
+
+    #[test]
+    fn popup_projection_is_semantic_and_fail_closed() {
+        assert!(BRIDGE.contains("DIALOG_ROLES"));
+        assert!(BRIDGE.contains("SAFE_POPUP_DISMISS_LABELS"));
+        assert!(BRIDGE.contains("SENSITIVE_POPUP_WORDS"));
+        assert!(BRIDGE.contains("nested_auth"));
+        assert!(BRIDGE.contains("len(dismiss) == 1"));
+        assert!(BRIDGE.contains("sensitive_or_unknown_popup_present"));
+        assert!(BRIDGE.contains("dismiss-harmless-popup"));
+    }
+
+    #[test]
+    fn popup_contract_executes_safe_sensitive_and_authorization_fixtures() {
+        use std::process::Command as StdCommand;
+
+        let wrapper = format!(
+            "import sys,types; sys.modules['pyatspi']=types.SimpleNamespace(); sys.argv=['bridge','contract-popup']; exec({:?})",
+            BRIDGE
+        );
+        let output = StdCommand::new("python3")
+            .arg("-c")
+            .arg(wrapper)
+            .output()
+            .expect("python3 must execute deterministic popup contract");
+        assert!(
+            output.status.success(),
+            "contract failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "true");
     }
 
     #[test]

@@ -82,6 +82,9 @@ pub trait ChatSurfacePort: Send + Sync {
     }
     async fn approve_current_conversation(&self) -> Result<bool>;
     async fn dismiss_rate_limit_notice(&self) -> Result<bool>;
+    async fn dismiss_harmless_popup(&self) -> Result<bool> {
+        Ok(false)
+    }
     async fn recover_current_surface(&self) -> Result<()>;
     async fn start_fresh_conversation(&self) -> Result<()>;
 }
@@ -478,6 +481,24 @@ impl<'a> RunPrompt<'a> {
                 terminal_since = None;
                 self.clock
                     .sleep_for(WakeReason::AuthorizationSettlement, options.poll_interval)
+                    .await?;
+                continue;
+            }
+
+            if snapshot.harmless_popup_present {
+                terminal_since = None;
+                if self.surface.dismiss_harmless_popup().await? {
+                    self.clock
+                        .sleep_for(WakeReason::Poll, options.poll_interval)
+                        .await?;
+                    continue;
+                }
+            }
+
+            if snapshot.sensitive_or_unknown_popup_present {
+                terminal_since = None;
+                self.clock
+                    .sleep_for(WakeReason::Poll, options.poll_interval)
                     .await?;
                 continue;
             }
@@ -1965,6 +1986,8 @@ mod tests {
         sends: Mutex<Vec<String>>,
         fresh_conversations: Mutex<u32>,
         dismiss_rate_limit: bool,
+        dismiss_popup: bool,
+        popup_dismissals: Mutex<u32>,
     }
 
     impl ScriptedSurface {
@@ -1976,12 +1999,23 @@ mod tests {
                 sends: Mutex::new(Vec::new()),
                 fresh_conversations: Mutex::new(0),
                 dismiss_rate_limit: false,
+                dismiss_popup: false,
+                popup_dismissals: Mutex::new(0),
             }
         }
 
         fn with_rate_limit_dismiss(mut self) -> Self {
             self.dismiss_rate_limit = true;
             self
+        }
+
+        fn with_popup_dismiss(mut self) -> Self {
+            self.dismiss_popup = true;
+            self
+        }
+
+        fn popup_dismiss_count(&self) -> u32 {
+            *self.popup_dismissals.lock().unwrap()
         }
 
         fn send_count(&self) -> usize {
@@ -2016,6 +2050,14 @@ mod tests {
 
         async fn dismiss_rate_limit_notice(&self) -> Result<bool> {
             Ok(self.dismiss_rate_limit)
+        }
+
+        async fn dismiss_harmless_popup(&self) -> Result<bool> {
+            if self.dismiss_popup {
+                *self.popup_dismissals.lock().unwrap() += 1;
+                return Ok(true);
+            }
+            Ok(false)
         }
 
         async fn recover_current_surface(&self) -> Result<()> {
@@ -3026,6 +3068,89 @@ mod tests {
         let carry = bounded_conversation_carry(&source);
         assert_eq!(carry.chars().count(), MAX_CONVERSATION_CARRY_CHARS);
         assert!(carry.chars().all(|value| value == 'b'));
+    }
+
+    #[tokio::test]
+    async fn shipping_run_prompt_dismisses_only_harmless_popup_then_continues() {
+        let before = ChatSurfaceSnapshot {
+            user_turn_boundary: Some(UserTurnBoundary::new("u0")),
+            ..Default::default()
+        };
+        let popup = ChatSurfaceSnapshot {
+            app_healthy: true,
+            user_turn_boundary: Some(UserTurnBoundary::new("u1")),
+            user_turn_ownership: OwnershipConfidence::Strong,
+            harmless_popup_present: true,
+            blocker_or_modal: true,
+            ..Default::default()
+        };
+        let final_snapshot = ChatSurfaceSnapshot {
+            app_healthy: true,
+            user_turn_boundary: Some(UserTurnBoundary::new("u1")),
+            user_turn_ownership: OwnershipConfidence::Strong,
+            assistant_response_boundary: Some(AssistantResponseBoundary::new("a1")),
+            assistant_response_ownership: OwnershipConfidence::Strong,
+            response_local_copy: true,
+            ..Default::default()
+        };
+        let surface = ScriptedSurface::new(vec![
+            before,
+            popup,
+            final_snapshot.clone(),
+            final_snapshot.clone(),
+            final_snapshot.clone(),
+            final_snapshot.clone(),
+            final_snapshot,
+        ])
+        .with_popup_dismiss();
+        let clock = FakeClock::new();
+        let options = RunOptions {
+            poll_interval: Duration::from_secs(1),
+            timeout: Duration::from_secs(30),
+            stale_reload_after: Duration::from_secs(1_000),
+            ..RunOptions::default()
+        };
+
+        let report = RunPrompt::new(&surface, &clock)
+            .execute("prepared prompt", options)
+            .await
+            .unwrap();
+
+        assert_eq!(report.state, RunState::Complete);
+        assert_eq!(surface.popup_dismiss_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn shipping_run_prompt_never_dismisses_sensitive_or_unknown_popup() {
+        let before = ChatSurfaceSnapshot {
+            user_turn_boundary: Some(UserTurnBoundary::new("u0")),
+            ..Default::default()
+        };
+        let blocked = ChatSurfaceSnapshot {
+            app_healthy: true,
+            user_turn_boundary: Some(UserTurnBoundary::new("u1")),
+            user_turn_ownership: OwnershipConfidence::Strong,
+            sensitive_or_unknown_popup_present: true,
+            blocker_or_modal: true,
+            ..Default::default()
+        };
+        let surface = ScriptedSurface::new(vec![before, blocked.clone(), blocked.clone(), blocked])
+            .with_popup_dismiss();
+        let clock = FakeClock::new();
+        let options = RunOptions {
+            poll_interval: Duration::from_secs(1),
+            timeout: Duration::from_secs(2),
+            stale_reload_after: Duration::from_secs(1_000),
+            ..RunOptions::default()
+        };
+
+        let report = RunPrompt::new(&surface, &clock)
+            .execute("prepared prompt", options)
+            .await
+            .unwrap();
+
+        assert_eq!(report.state, RunState::Failed);
+        assert_eq!(surface.popup_dismiss_count(), 0);
     }
 
     #[test]
