@@ -212,11 +212,14 @@
         "crates/runtime/src/lib.rs",
         "crates/cli/src/main.rs",
         "popup_semantics classifies accessibility dialogs without leaking AT-SPI roles upstream, excludes bounded authorization cards from generic dismissal, and exposes only one explicit harmless dismiss action",
-        "popup_contract_executes_safe_sensitive_and_authorization_fixtures plus shipping RunPrompt harmless/sensitive popup behavioral contracts"
+        "popup_contract_executes_safe_sensitive_and_authorization_fixtures plus shipping RunPrompt harmless/sensitive popup behavioral contracts",
+        "Stream cache expired is projected only from the latest assistant response scope owned by the current Fabushi user turn; page-global or historical text cannot trigger recovery",
+        "shipping RunPrompt invokes response-local Retry through DesktopSessionActor/DurableRunSurface, journals failureIdentity before UI mutation, and effect_identity_seen prevents a second Retry for the same failure identity across restart",
+        "shipping_run_prompt_retries_same_stream_cache_failure_once_then_fresh_handoffs, effect_identity_guard_survives_settlement, and stream_cache_expired_projection_and_retry_are_response_local"
       ],
       "missing": [
         "macOS native attachment parity",
-        "stream retry and review-report projection hardening",
+        "review-report projection hardening",
         "real authorization and terminal acceptance"
       ]
     },
