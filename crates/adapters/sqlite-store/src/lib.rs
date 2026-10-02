@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use fabushi_chatgpt_domain::{DispatchId, RunId, TaskId};
+use fabushi_chatgpt_domain::{AttachmentId, DispatchId, RunId, TaskId};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::Value;
 
@@ -36,6 +36,16 @@ pub struct StateTransitionRecord {
 pub struct PreparedDispatch {
     pub dispatch_id: DispatchId,
     pub prepared_intent_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentRecord {
+    pub attachment_id: AttachmentId,
+    pub task_id: TaskId,
+    pub file_name: String,
+    pub sha256: String,
+    pub storage_ref: String,
+    pub metadata_json: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -837,6 +847,50 @@ impl SqliteStore {
             .context("read latest incomplete continuous phase")
     }
 
+    pub fn upsert_attachment(&self, attachment: &AttachmentRecord) -> Result<()> {
+        validate_json(&attachment.metadata_json, "attachment metadata")?;
+        self.connection.execute(
+            "INSERT INTO attachments(attachment_id, task_id, file_name, sha256, storage_ref, metadata_json)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(attachment_id) DO UPDATE SET
+               task_id=excluded.task_id,
+               file_name=excluded.file_name,
+               sha256=excluded.sha256,
+               storage_ref=excluded.storage_ref,
+               metadata_json=excluded.metadata_json",
+            params![
+                attachment.attachment_id.as_str(),
+                attachment.task_id.as_str(),
+                attachment.file_name,
+                attachment.sha256,
+                attachment.storage_ref,
+                attachment.metadata_json,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn task_attachments(&self, task_id: &TaskId) -> Result<Vec<AttachmentRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT attachment_id, task_id, file_name, sha256, storage_ref, metadata_json
+             FROM attachments
+             WHERE task_id=?1
+             ORDER BY attachment_id ASC",
+        )?;
+        let rows = statement.query_map([task_id.as_str()], |row| {
+            Ok(AttachmentRecord {
+                attachment_id: AttachmentId::new(row.get::<_, String>(0)?),
+                task_id: TaskId::new(row.get::<_, String>(1)?),
+                file_name: row.get(2)?,
+                sha256: row.get(3)?,
+                storage_ref: row.get(4)?,
+                metadata_json: row.get(5)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("read task attachments")
+    }
+
     pub fn task_wake(&self, task_id: &TaskId) -> Result<Option<TaskWakeRecord>> {
         self.connection
             .query_row(
@@ -1621,5 +1675,47 @@ mod tests {
             .unwrap();
         assert_eq!(approval.state, "settling");
         assert_eq!(approval.settlement_until_unix_ms, Some(12_345));
+    }
+    #[test]
+    fn task_attachments_are_persisted_by_task_identity() {
+        let store = SqliteStore::in_memory().unwrap();
+        let task = TaskId::new("task-attachments");
+        let other = TaskId::new("task-other");
+        store
+            .upsert_attachment(&AttachmentRecord {
+                attachment_id: AttachmentId::new("attachment-b"),
+                task_id: task.clone(),
+                file_name: "b.txt".into(),
+                sha256: "sha-b".into(),
+                storage_ref: "/store/b.txt".into(),
+                metadata_json: r#"{"byteLen":2}"#.into(),
+            })
+            .unwrap();
+        store
+            .upsert_attachment(&AttachmentRecord {
+                attachment_id: AttachmentId::new("attachment-a"),
+                task_id: task.clone(),
+                file_name: "a.txt".into(),
+                sha256: "sha-a".into(),
+                storage_ref: "/store/a.txt".into(),
+                metadata_json: r#"{"byteLen":1}"#.into(),
+            })
+            .unwrap();
+        store
+            .upsert_attachment(&AttachmentRecord {
+                attachment_id: AttachmentId::new("attachment-other"),
+                task_id: other,
+                file_name: "other.txt".into(),
+                sha256: "sha-other".into(),
+                storage_ref: "/store/other.txt".into(),
+                metadata_json: r#"{"byteLen":5}"#.into(),
+            })
+            .unwrap();
+
+        let attachments = store.task_attachments(&task).unwrap();
+        assert_eq!(attachments.len(), 2);
+        assert_eq!(attachments[0].attachment_id.as_str(), "attachment-a");
+        assert_eq!(attachments[1].attachment_id.as_str(), "attachment-b");
+        assert_eq!(attachments[0].task_id, task);
     }
 }

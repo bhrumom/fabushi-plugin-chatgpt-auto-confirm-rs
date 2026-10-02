@@ -9,6 +9,7 @@ rust-version.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 fabushi-chatgpt-application = { path = "../application" }
+fabushi-chatgpt-attachment-store = { path = "../adapters/attachment-store" }
 fabushi-chatgpt-cdp = { path = "../adapters/chatgpt-cdp" }
 fabushi-chatgpt-domain = { path = "../domain" }
 fabushi-chatgpt-sqlite-store = { path = "../adapters/sqlite-store" }

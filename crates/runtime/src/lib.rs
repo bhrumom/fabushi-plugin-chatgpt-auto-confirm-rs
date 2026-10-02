@@ -6,6 +6,7 @@ use fabushi_chatgpt_application::{
     RecoveryRunContext, ReviewRunIdentity, ReviewSettlementKey, ReviewSettlementPort,
     RunControlPort, RunPrompt, WakeReason, parse_strict_review_report,
 };
+use fabushi_chatgpt_attachment_store::AttachmentStore;
 #[cfg(target_os = "linux")]
 use fabushi_chatgpt_desktop_atspi::ChatGptDesktopAtspi;
 #[cfg(target_os = "macos")]
@@ -13,8 +14,8 @@ use fabushi_chatgpt_desktop_macos::{ChatGptDesktopMacProcess, ChatGptDesktopMacS
 #[cfg(target_os = "linux")]
 use fabushi_chatgpt_desktop_process::ChatGptDesktopProcess;
 use fabushi_chatgpt_sqlite_store::{
-    IncompleteContinuousPhase, PreparedApproval, PreparedDispatch, ReviewSettlementRecord,
-    SqliteStore, StateTransitionRecord, TransitionRecord, UiSessionLease,
+    AttachmentRecord, IncompleteContinuousPhase, PreparedApproval, PreparedDispatch,
+    ReviewSettlementRecord, SqliteStore, StateTransitionRecord, TransitionRecord, UiSessionLease,
 };
 use std::collections::HashMap;
 use std::io::Read;
@@ -28,7 +29,7 @@ use tokio::time::MissedTickBehavior;
 pub use fabushi_chatgpt_application::RunOptions;
 pub use fabushi_chatgpt_cdp::ChatGptCdp;
 use fabushi_chatgpt_domain::{
-    AuthorizationSettlementState, ConversationFingerprint, DispatchId, GoalRevision,
+    AttachmentId, AuthorizationSettlementState, ConversationFingerprint, DispatchId, GoalRevision,
     OwnershipConfidence, RunId, UserTurnBoundary,
 };
 pub use fabushi_chatgpt_domain::{
@@ -1583,6 +1584,75 @@ impl DesktopRuntime {
         self
     }
 
+    fn attachment_store_root(&self) -> PathBuf {
+        if let Some(root) = std::env::var_os("FABUSHI_CHATGPT_ATTACHMENT_DIR") {
+            return PathBuf::from(root);
+        }
+        self.state_db_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("attachments")
+    }
+
+    fn stage_task_attachments(
+        &self,
+        task_id: &TaskId,
+        paths: &[PathBuf],
+    ) -> Result<Vec<AttachmentId>> {
+        if paths.is_empty() {
+            return Ok(SqliteStore::open(&self.state_db_path)?
+                .task_attachments(task_id)?
+                .into_iter()
+                .map(|record| record.attachment_id)
+                .collect());
+        }
+        let attachment_store = AttachmentStore::open(self.attachment_store_root())?;
+        let sqlite = SqliteStore::open(&self.state_db_path)?;
+        let mut ids = Vec::with_capacity(paths.len());
+        for path in paths {
+            let bytes =
+                std::fs::read(path).with_context(|| format!("read task attachment {path:?}"))?;
+            let file_name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("attachment path has no UTF-8 file name: {path:?}")
+                })?;
+            let content_sha = format!("{:x}", Sha256::digest(&bytes));
+            let mut identity = Sha256::new();
+            identity.update(task_id.as_str().as_bytes());
+            identity.update([0]);
+            identity.update(file_name.as_bytes());
+            identity.update([0]);
+            identity.update(content_sha.as_bytes());
+            let attachment_id = AttachmentId::new(format!("attachment-{:x}", identity.finalize()));
+            let stored =
+                attachment_store.persist_bytes(attachment_id.clone(), file_name, &bytes)?;
+            sqlite.upsert_attachment(&AttachmentRecord {
+                attachment_id: attachment_id.clone(),
+                task_id: task_id.clone(),
+                file_name: stored.file_name,
+                sha256: stored.sha256,
+                storage_ref: stored.storage_ref.to_string_lossy().into_owned(),
+                metadata_json: json!({ "byteLen": stored.byte_len }).to_string(),
+            })?;
+            ids.push(attachment_id);
+        }
+        Ok(ids)
+    }
+
+    fn fail_closed_if_native_attachments_pending(&self, task_id: &TaskId) -> Result<()> {
+        let attachments = SqliteStore::open(&self.state_db_path)?.task_attachments(task_id)?;
+        if attachments.is_empty() {
+            return Ok(());
+        }
+        bail!(
+            "task has {} persisted attachment(s), but the desktop-native attachment effect/readiness adapter is not available yet; refusing text-only Send",
+            attachments.len()
+        )
+    }
+
     async fn desktop_session(&self) -> Result<&DesktopSessionActorHandle> {
         self.desktop_session
             .get_or_try_init(|| async {
@@ -1905,6 +1975,20 @@ impl DesktopRuntime {
         requested_reasoning: ReasoningPreset,
         options: RunOptions,
     ) -> Result<RunReport> {
+        self.run_continuous_with_attachments(task_id, goal, requested_reasoning, options, &[])
+            .await
+    }
+
+    pub async fn run_continuous_with_attachments(
+        &self,
+        task_id: TaskId,
+        goal: &str,
+        requested_reasoning: ReasoningPreset,
+        options: RunOptions,
+        attachment_paths: &[PathBuf],
+    ) -> Result<RunReport> {
+        self.stage_task_attachments(&task_id, attachment_paths)?;
+        self.fail_closed_if_native_attachments_pending(&task_id)?;
         let loaded_state = self.load_continuous_task_state(&task_id)?;
         let resumed_existing = loaded_state.is_some();
         let mut state = match loaded_state {
@@ -2120,12 +2204,26 @@ impl DesktopRuntime {
         requested_reasoning: ReasoningPreset,
         options: RunOptions,
     ) -> Result<RunReport> {
+        self.run_prompt_with_attachments(prompt, requested_reasoning, options, &[])
+            .await
+    }
+
+    pub async fn run_prompt_with_attachments(
+        &self,
+        prompt: &str,
+        requested_reasoning: ReasoningPreset,
+        options: RunOptions,
+        attachment_paths: &[PathBuf],
+    ) -> Result<RunReport> {
         let identity_marker = dispatch_marker()?;
+        let task_id = TaskId::new(format!("task-{identity_marker}"));
+        self.stage_task_attachments(&task_id, attachment_paths)?;
+        self.fail_closed_if_native_attachments_pending(&task_id)?;
         self.run_prompt_with_identity(
             prompt,
             requested_reasoning,
             options,
-            TaskId::new(format!("task-{identity_marker}")),
+            task_id,
             RunId::new(format!("run-{identity_marker}")),
             false,
         )
@@ -3295,6 +3393,53 @@ mod actor_tests {
         async fn ensure_running(&self) -> Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn task_attachment_ingestion_persists_bytes_metadata_and_fails_closed_before_send() {
+        let root = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-attachment-ingestion-{}-{}",
+            std::process::id(),
+            dispatch_marker().unwrap()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let state_db = root.join("state.sqlite3");
+        let input = root.join("notes.txt");
+        std::fs::write(&input, b"attachment payload").unwrap();
+        let runtime = DesktopRuntime::new(LifecycleTestProcess, FakeSurface::default())
+            .with_state_db_path(state_db.clone());
+        let task_id = TaskId::new("task-attachment-ingestion");
+
+        let ids = runtime
+            .stage_task_attachments(&task_id, std::slice::from_ref(&input))
+            .unwrap();
+        assert_eq!(ids.len(), 1);
+        let records = SqliteStore::open(&state_db)
+            .unwrap()
+            .task_attachments(&task_id)
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].attachment_id, ids[0]);
+        assert_eq!(records[0].file_name, "notes.txt");
+        assert_eq!(
+            std::fs::read(&records[0].storage_ref).unwrap(),
+            b"attachment payload"
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&records[0].metadata_json).unwrap()["byteLen"],
+            18
+        );
+
+        let error = runtime
+            .fail_closed_if_native_attachments_pending(&task_id)
+            .unwrap_err();
+        assert!(error.to_string().contains("refusing text-only Send"));
+        assert_eq!(
+            runtime.stage_task_attachments(&task_id, &[]).unwrap(),
+            ids,
+            "restart/resume must recover persisted task attachment identity"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

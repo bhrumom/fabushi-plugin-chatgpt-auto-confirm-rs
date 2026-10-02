@@ -8,12 +8,12 @@
   "target": {
     "repository": "bhrumom/fabushi-plugin-chatgpt-auto-confirm-rs",
     "spec": "docs/specs/desktop-chat-userscript-parity-rust-cli.md",
-    "lastVerifiedExactHead": "4e4c865b3822ff9dd827c6dc6f5416308c2962f0",
-    "lastVerifiedCiRun": 36988199042,
+    "lastVerifiedExactHead": "4e24b107315827c1c398be809f5726d5c73cb0f1",
+    "lastVerifiedCiRun": 36990315718,
     "lastVerifiedArtifact": {
-      "id": 11218830078,
+      "id": 11219432631,
       "name": "fabushi-chatgpt-auto-confirm-linux-x86_64",
-      "sha256": "d1a1b590570a2e279cc9f1f4dac9fd8a8268301e93db2196855decb18b87bf09"
+      "sha256": "d5db20b959d5df9391dbaec8fee0a7d5f96a425f9b24708e115a6cd4bc5c9471"
     }
   },
   "rules": {
@@ -119,7 +119,8 @@
         "fresh-handoff dispatch rotation is production-wired and covered by fresh_handoff_rotates_durable_dispatch_identity_and_visible_marker",
         "pre-scheduler exact-head run 36990315718 passed architecture/fmt/workspace tests/clippy/release packaging on Linux and both macOS targets at 4e24b107315827c1c398be809f5726d5c73cb0f1",
         "shared production SupervisorClock + durable task_wakes scheduling in crates/runtime/src/lib.rs and sqlite-store",
-        "rate_limit_deferred_task_does_not_block_runnable_task, due_task_selection_round_robins_only_due_tasks, scheduler_rotation_keeps_ui_single_writer_without_duplicate_send, durable_wait_fails_closed_when_supervisor_is_unavailable, dispatch_confirmation_holds_foreground_until_owner_yields, authorization_settlement_releases_foreground_for_other_tasks, and restart_wait_uses_original_durable_deadline"
+        "rate_limit_deferred_task_does_not_block_runnable_task, due_task_selection_round_robins_only_due_tasks, scheduler_rotation_keeps_ui_single_writer_without_duplicate_send, durable_wait_fails_closed_when_supervisor_is_unavailable, dispatch_confirmation_holds_foreground_until_owner_yields, authorization_settlement_releases_foreground_for_other_tasks, and restart_wait_uses_original_durable_deadline",
+        "two-phase durable wake arming fixes SQLite-latency ordering while preserving absolute deadlines; supervisor shutdown after final external handle is deterministic"
       ],
       "missing": [
         "exact-artifact real acceptance",
@@ -236,7 +237,8 @@
         "attachment_backoff_leaves_other_tasks_runnable",
         "authorization_settlement_is_task_scoped_not_global",
         "deferred_tasks_wake_in_deadline_order",
-        "restart_wait_uses_original_durable_deadline"
+        "restart_wait_uses_original_durable_deadline",
+        "two-phase durable wake arming fixes SQLite-latency ordering while preserving absolute deadlines; supervisor shutdown after final external handle is deterministic"
       ],
       "missing": [
         "cross-process durable UI lease acceptance on htch-runtime",
@@ -251,10 +253,13 @@
       "status": "partial",
       "evidence": [
         "crates/adapters/attachment-store/src/lib.rs",
-        "crates/adapters/attachment-store/Cargo.toml"
+        "crates/adapters/attachment-store/Cargo.toml",
+        "crates/runtime/src/lib.rs stages task-scoped attachment bytes through attachment-store and persists SQLite metadata before any desktop run",
+        "crates/cli/src/main.rs exposes repeatable --attachment for send and continuous",
+        "task_attachments_are_persisted_by_task_identity",
+        "task_attachment_ingestion_persists_bytes_metadata_and_fails_closed_before_send"
       ],
       "missing": [
-        "SQLite metadata wiring",
         "native desktop attachment effect",
         "45s readiness/backoff",
         "fresh-chat reattach",

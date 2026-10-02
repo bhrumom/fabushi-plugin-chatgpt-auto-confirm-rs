@@ -31,6 +31,8 @@ enum Commands {
         poll_ms: u64,
         #[arg(long, default_value_t = 3)]
         reasoning: u8,
+        #[arg(long = "attachment")]
+        attachments: Vec<PathBuf>,
     },
     Continuous {
         #[arg(long)]
@@ -45,6 +47,8 @@ enum Commands {
         poll_ms: u64,
         #[arg(long, default_value_t = 3)]
         reasoning: u8,
+        #[arg(long = "attachment")]
+        attachments: Vec<PathBuf>,
     },
     Pause {
         #[arg(long)]
@@ -123,6 +127,7 @@ async fn main() -> Result<()> {
             timeout_seconds,
             poll_ms,
             reasoning,
+            attachments,
         } => {
             let runtime = DesktopRuntime::default();
             let options = RunOptions {
@@ -136,7 +141,7 @@ async fn main() -> Result<()> {
             let requested_reasoning = ReasoningPreset::from_index(reasoning)
                 .ok_or_else(|| anyhow::anyhow!("reasoning must be one of 0,1,2,3,4"))?;
             let report = runtime
-                .run_prompt(&prompt, requested_reasoning, options)
+                .run_prompt_with_attachments(&prompt, requested_reasoning, options, &attachments)
                 .await
                 .context("ChatGPT desktop automation run failed")?;
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -148,6 +153,7 @@ async fn main() -> Result<()> {
             timeout_seconds,
             poll_ms,
             reasoning,
+            attachments,
         } => {
             let runtime = DesktopRuntime::default();
             let options = RunOptions {
@@ -159,7 +165,13 @@ async fn main() -> Result<()> {
             let requested_reasoning = ReasoningPreset::from_index(reasoning)
                 .ok_or_else(|| anyhow::anyhow!("reasoning must be one of 0,1,2,3,4"))?;
             let report = runtime
-                .run_continuous(TaskId::new(task_id), &goal, requested_reasoning, options)
+                .run_continuous_with_attachments(
+                    TaskId::new(task_id),
+                    &goal,
+                    requested_reasoning,
+                    options,
+                    &attachments,
+                )
                 .await
                 .context("ChatGPT desktop continuous automation run failed")?;
             println!("{}", serde_json::to_string_pretty(&report)?);
