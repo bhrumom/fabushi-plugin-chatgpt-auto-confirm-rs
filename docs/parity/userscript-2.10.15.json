@@ -119,7 +119,7 @@
         "fresh-handoff dispatch rotation is production-wired and covered by fresh_handoff_rotates_durable_dispatch_identity_and_visible_marker",
         "pre-scheduler exact-head run 36990315718 passed architecture/fmt/workspace tests/clippy/release packaging on Linux and both macOS targets at 4e24b107315827c1c398be809f5726d5c73cb0f1",
         "shared production SupervisorClock + durable task_wakes scheduling in crates/runtime/src/lib.rs and sqlite-store",
-        "rate_limit_deferred_task_does_not_block_runnable_task, due_task_selection_round_robins_only_due_tasks, scheduler_rotation_keeps_ui_single_writer_without_duplicate_send, durable_wait_fails_closed_when_supervisor_is_unavailable, and restart_wait_uses_original_durable_deadline"
+        "rate_limit_deferred_task_does_not_block_runnable_task, due_task_selection_round_robins_only_due_tasks, scheduler_rotation_keeps_ui_single_writer_without_duplicate_send, durable_wait_fails_closed_when_supervisor_is_unavailable, dispatch_confirmation_holds_foreground_until_owner_yields, authorization_settlement_releases_foreground_for_other_tasks, and restart_wait_uses_original_durable_deadline"
       ],
       "missing": [
         "exact-artifact real acceptance",

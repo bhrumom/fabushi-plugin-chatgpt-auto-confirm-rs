@@ -58,6 +58,10 @@ impl WakeReason {
     pub fn is_durable(self) -> bool {
         !matches!(self, Self::Poll)
     }
+
+    pub fn holds_foreground(self) -> bool {
+        matches!(self, Self::DispatchConfirmation)
+    }
 }
 
 #[async_trait]

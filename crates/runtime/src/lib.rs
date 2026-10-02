@@ -19,9 +19,9 @@ use fabushi_chatgpt_sqlite_store::{
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::{OnceCell, mpsc, oneshot};
+use tokio::sync::{Notify, OnceCell, mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 
 pub use fabushi_chatgpt_application::RunOptions;
@@ -414,8 +414,19 @@ struct PendingApprovalSettlement {
 }
 
 #[derive(Clone)]
+struct DurableRunIdentity {
+    task_id: TaskId,
+    run_id: RunId,
+    dispatch_id: DispatchId,
+    phase: Phase,
+    round: Round,
+}
+
+#[derive(Clone)]
 struct DurableRunSurface {
     surface: DesktopSessionActorHandle,
+    task_id: TaskId,
+    foreground_gate: ForegroundGate,
     journal: Arc<Mutex<DurableRunJournal>>,
     dispatch_id: Arc<Mutex<DispatchId>>,
     phase: Phase,
@@ -426,17 +437,18 @@ struct DurableRunSurface {
 }
 
 impl DurableRunSurface {
-    fn new(
+    fn new_with_identity(
         surface: DesktopSessionActorHandle,
         state_db_path: &Path,
-        task_id: TaskId,
-        run_id: RunId,
-        dispatch_id: DispatchId,
-        phase: Phase,
-        round: Round,
+        identity: DurableRunIdentity,
+        foreground_gate: ForegroundGate,
     ) -> Result<Self> {
-        let journal = DurableRunJournal::open(state_db_path, task_id, run_id)?;
-        let phase_label = match phase {
+        let journal = DurableRunJournal::open(
+            state_db_path,
+            identity.task_id.clone(),
+            identity.run_id.clone(),
+        )?;
+        let phase_label = match identity.phase {
             Phase::Work => "work",
             Phase::Review => "review",
         };
@@ -460,7 +472,7 @@ impl DurableRunSurface {
             let Some(record) = journal.store.approval_fingerprint(fingerprint)? else {
                 continue;
             };
-            if record.phase != phase_label || record.round != i64::from(round.get()) {
+            if record.phase != phase_label || record.round != i64::from(identity.round.get()) {
                 bail!("durable approval identity does not match requested phase/round");
             }
             let Some(until) = record.settlement_until_unix_ms else {
@@ -484,14 +496,44 @@ impl DurableRunSurface {
 
         Ok(Self {
             surface,
+            task_id: identity.task_id,
+            foreground_gate,
             journal: Arc::new(Mutex::new(journal)),
-            dispatch_id: Arc::new(Mutex::new(dispatch_id)),
-            phase,
-            round,
+            dispatch_id: Arc::new(Mutex::new(identity.dispatch_id)),
+            phase: identity.phase,
+            round: identity.round,
             pending_reasoning: Arc::new(Mutex::new(None)),
             pending_send: Arc::new(Mutex::new(None)),
             pending_approval: Arc::new(Mutex::new(restored_approval)),
         })
+    }
+
+    #[cfg(test)]
+    fn new(
+        surface: DesktopSessionActorHandle,
+        state_db_path: &Path,
+        task_id: TaskId,
+        run_id: RunId,
+        dispatch_id: DispatchId,
+        phase: Phase,
+        round: Round,
+    ) -> Result<Self> {
+        Self::new_with_identity(
+            surface,
+            state_db_path,
+            DurableRunIdentity {
+                task_id,
+                run_id,
+                dispatch_id,
+                phase,
+                round,
+            },
+            ForegroundGate::default(),
+        )
+    }
+
+    async fn mutation_permit(&self) -> ForegroundMutationPermit {
+        self.foreground_gate.acquire_mutation(&self.task_id).await
     }
 
     async fn record_and_settle<T>(
@@ -503,6 +545,7 @@ impl DurableRunSurface {
     where
         T: Send,
     {
+        let _mutation_permit = self.mutation_permit().await;
         let effect_id = {
             let mut journal = self.journal.lock().await;
             journal.begin(effect_kind, payload.to_string(), None, None)?
@@ -639,6 +682,7 @@ impl ChatSurfacePort for DurableRunSurface {
     }
 
     async fn set_reasoning_preset(&self, preset: ReasoningPreset) -> Result<bool> {
+        let _mutation_permit = self.mutation_permit().await;
         let existing = self.pending_reasoning.lock().await.clone();
         if let Some(existing) = existing.as_ref()
             && existing.target != preset
@@ -677,6 +721,8 @@ impl ChatSurfacePort for DurableRunSurface {
     }
 
     async fn send_prompt(&self, prompt: &str) -> Result<()> {
+        self.foreground_gate.acquire_exclusive(&self.task_id).await;
+        let _mutation_permit = self.mutation_permit().await;
         let baseline = self.surface.observe().await?.user_turn_boundary;
         let dispatch_id = self.dispatch_id.lock().await.clone();
         let prepared_prompt = format!("{prompt}\n\n[Fabushi:{}]", dispatch_id.as_str());
@@ -720,6 +766,7 @@ impl ChatSurfacePort for DurableRunSurface {
     }
 
     async fn approve_current_conversation(&self) -> Result<bool> {
+        let _mutation_permit = self.mutation_permit().await;
         if self.pending_approval.lock().await.is_some() {
             bail!("approval effect is already pending semantic settlement");
         }
@@ -817,6 +864,7 @@ impl ChatSurfacePort for DurableRunSurface {
     }
 
     async fn start_fresh_conversation(&self) -> Result<()> {
+        self.foreground_gate.acquire_exclusive(&self.task_id).await;
         self.settle_pending_send_for_recovery().await?;
         self.record_and_settle(
             "start_fresh_conversation",
@@ -921,10 +969,96 @@ impl RunControlPort for SqliteRunControl {
     }
 }
 
+#[derive(Default)]
+struct ForegroundGateState {
+    exclusive_task: Option<String>,
+    mutation_active: bool,
+}
+
+#[derive(Clone, Default)]
+struct ForegroundGate {
+    state: Arc<StdMutex<ForegroundGateState>>,
+    notify: Arc<Notify>,
+}
+
+struct ForegroundMutationPermit {
+    gate: ForegroundGate,
+}
+
+impl Drop for ForegroundMutationPermit {
+    fn drop(&mut self) {
+        let mut state = self
+            .gate
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.mutation_active = false;
+        drop(state);
+        self.gate.notify.notify_waiters();
+    }
+}
+
+impl ForegroundGate {
+    async fn acquire_mutation(&self, task_id: &TaskId) -> ForegroundMutationPermit {
+        loop {
+            let notified = self.notify.notified();
+            {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let allowed = state
+                    .exclusive_task
+                    .as_deref()
+                    .is_none_or(|owner| owner == task_id.as_str());
+                if allowed && !state.mutation_active {
+                    state.mutation_active = true;
+                    return ForegroundMutationPermit { gate: self.clone() };
+                }
+            }
+            notified.await;
+        }
+    }
+
+    async fn acquire_exclusive(&self, task_id: &TaskId) {
+        loop {
+            let notified = self.notify.notified();
+            {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let compatible = state
+                    .exclusive_task
+                    .as_deref()
+                    .is_none_or(|owner| owner == task_id.as_str());
+                if compatible && !state.mutation_active {
+                    state.exclusive_task = Some(task_id.as_str().to_owned());
+                    return;
+                }
+            }
+            notified.await;
+        }
+    }
+
+    fn release_exclusive(&self, task_id: &TaskId) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.exclusive_task.as_deref() == Some(task_id.as_str()) {
+            state.exclusive_task = None;
+            drop(state);
+            self.notify.notify_waiters();
+        }
+    }
+}
+
 #[derive(Clone)]
 struct SupervisorHandle {
     sender: mpsc::Sender<SupervisorMessage>,
     state_db_path: PathBuf,
+    foreground_gate: ForegroundGate,
 }
 
 struct SupervisorSleepRequest {
@@ -954,6 +1088,7 @@ impl SupervisorHandle {
         Self {
             sender,
             state_db_path,
+            foreground_gate: ForegroundGate::default(),
         }
     }
 
@@ -964,6 +1099,11 @@ impl SupervisorHandle {
         reason: WakeReason,
         duration: Duration,
     ) -> Result<()> {
+        if reason.holds_foreground() {
+            self.foreground_gate.acquire_exclusive(task_id).await;
+        } else {
+            self.foreground_gate.release_exclusive(task_id);
+        }
         let (reply_tx, reply_rx) = oneshot::channel();
         let request = SupervisorSleepRequest {
             task_id: task_id.clone(),
@@ -998,6 +1138,9 @@ impl SupervisorHandle {
             return Ok(());
         }
         let remaining_ms = existing.wake_at_unix_ms.saturating_sub(now) as u64;
+        if existing.reason == WakeReason::DispatchConfirmation.as_str() {
+            self.foreground_gate.acquire_exclusive(task_id).await;
+        }
         let (reply_tx, reply_rx) = oneshot::channel();
         self.sender
             .send(SupervisorMessage::Sleep(SupervisorSleepRequest {
@@ -1014,6 +1157,9 @@ impl SupervisorHandle {
             .await
             .map_err(|_| anyhow::anyhow!("fair supervisor dropped durable wake waiter"))??;
         Ok(())
+    }
+    fn release_foreground(&self, task_id: &TaskId) {
+        self.foreground_gate.release_exclusive(task_id);
     }
 }
 
@@ -1196,6 +1342,14 @@ pub struct RunWorker {
     clock: SupervisorClock,
 }
 
+impl Drop for RunWorker {
+    fn drop(&mut self) {
+        self.clock
+            .supervisor
+            .release_foreground(&self.clock.task_id);
+    }
+}
+
 impl RunWorker {
     fn new(
         surface: DesktopSessionActorHandle,
@@ -1204,14 +1358,17 @@ impl RunWorker {
         supervisor: SupervisorHandle,
     ) -> Result<Self> {
         Ok(Self {
-            surface: DurableRunSurface::new(
+            surface: DurableRunSurface::new_with_identity(
                 surface,
                 state_db_path,
-                identity.task_id.clone(),
-                identity.run_id.clone(),
-                identity.dispatch_id,
-                identity.phase,
-                identity.round,
+                DurableRunIdentity {
+                    task_id: identity.task_id.clone(),
+                    run_id: identity.run_id.clone(),
+                    dispatch_id: identity.dispatch_id.clone(),
+                    phase: identity.phase,
+                    round: identity.round,
+                },
+                supervisor.foreground_gate.clone(),
             )?,
             review_settlement: SqliteReviewSettlement {
                 path: state_db_path.to_path_buf(),
@@ -3200,6 +3357,7 @@ mod actor_tests {
         let supervisor = SupervisorHandle {
             sender,
             state_db_path: path.clone(),
+            foreground_gate: ForegroundGate::default(),
         };
         let error = supervisor
             .sleep_for(
@@ -3222,6 +3380,81 @@ mod actor_tests {
                 .unwrap()
                 .is_none()
         );
+        cleanup_scheduler_path(&path);
+    }
+
+    #[tokio::test]
+    async fn dispatch_confirmation_holds_foreground_until_owner_yields() {
+        let path = scheduler_test_path("foreground-dispatch");
+        let supervisor = SupervisorHandle::spawn(path.clone());
+        let task_a = TaskId::new("task-a");
+        let run_a = RunId::new("run-a");
+        let gate = supervisor.foreground_gate.clone();
+        let supervisor_a = supervisor.clone();
+        let task_a_wait = task_a.clone();
+        let run_a_wait = run_a.clone();
+        let waiting = tokio::spawn(async move {
+            supervisor_a
+                .sleep_for(
+                    &task_a_wait,
+                    &run_a_wait,
+                    WakeReason::DispatchConfirmation,
+                    Duration::from_millis(50),
+                )
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let mut other = tokio::spawn(async move {
+            let _permit = gate.acquire_mutation(&TaskId::new("task-b")).await;
+            "task-b"
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut other)
+                .await
+                .is_err()
+        );
+        waiting.await.unwrap();
+        assert!(!other.is_finished());
+        supervisor
+            .sleep_for(&task_a, &run_a, WakeReason::Poll, Duration::from_millis(5))
+            .await
+            .unwrap();
+        assert_eq!(other.await.unwrap(), "task-b");
+        cleanup_scheduler_path(&path);
+    }
+
+    #[tokio::test]
+    async fn authorization_settlement_releases_foreground_for_other_tasks() {
+        let path = scheduler_test_path("foreground-authorization");
+        let supervisor = SupervisorHandle::spawn(path.clone());
+        supervisor
+            .foreground_gate
+            .acquire_exclusive(&TaskId::new("task-a"))
+            .await;
+        let supervisor_a = supervisor.clone();
+        let waiting = tokio::spawn(async move {
+            supervisor_a
+                .sleep_for(
+                    &TaskId::new("task-a"),
+                    &RunId::new("run-a"),
+                    WakeReason::AuthorizationSettlement,
+                    Duration::from_millis(60),
+                )
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let permit = tokio::time::timeout(
+            Duration::from_millis(20),
+            supervisor
+                .foreground_gate
+                .acquire_mutation(&TaskId::new("task-b")),
+        )
+        .await
+        .expect("authorization settlement must not globally hold foreground");
+        drop(permit);
+        waiting.await.unwrap();
         cleanup_scheduler_path(&path);
     }
 
