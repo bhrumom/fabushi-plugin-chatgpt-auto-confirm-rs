@@ -33,7 +33,8 @@ pub use fabushi_chatgpt_application::RunOptions;
 pub use fabushi_chatgpt_cdp::ChatGptCdp;
 use fabushi_chatgpt_domain::{
     AttachmentId, AuthorizationSettlementState, ConversationFingerprint, ConversationRef,
-    DispatchId, GoalRevision, HydrationState, OwnershipConfidence, RunId, UserTurnBoundary,
+    DispatchId, GoalRevision, HydrationState, OwnershipConfidence, RunId, SurfaceGeneration,
+    UserTurnBoundary,
 };
 pub use fabushi_chatgpt_domain::{
     ChatSurfaceSnapshot, Phase, ReasoningPreset, Round, RunReport, RunState, TaskId,
@@ -3421,6 +3422,10 @@ fn recovery_effect_payload(snapshot: &ChatSurfaceSnapshot) -> serde_json::Value 
             .current_dispatch_id
             .as_ref()
             .map(|value| value.as_str()),
+        "baselineSurfaceGeneration": snapshot
+            .surface_generation
+            .as_ref()
+            .map(|value| value.as_str()),
         "baselineHydration": snapshot.hydration,
         "baselineAppHealthy": snapshot.app_healthy,
         "baselineComposerReady": snapshot.composer_ready,
@@ -3480,6 +3485,25 @@ fn recovery_postcondition(
         && !snapshot.connection_interrupted)
 }
 
+fn recovery_surface_generation_changed(
+    snapshot: &ChatSurfaceSnapshot,
+    payload: &serde_json::Value,
+) -> bool {
+    let baseline_generation = payload
+        .get("baselineSurfaceGeneration")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty());
+    let observed_generation = snapshot
+        .surface_generation
+        .as_ref()
+        .map(|value| value.as_str())
+        .filter(|value| !value.is_empty());
+    matches!(
+        (baseline_generation, observed_generation),
+        (Some(before), Some(after)) if before != after
+    )
+}
+
 fn recovery_effect_postcondition(
     snapshot: &ChatSurfaceSnapshot,
     payload: &serde_json::Value,
@@ -3489,7 +3513,13 @@ fn recovery_effect_postcondition(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     if !explicit_load_attempt {
-        return recovery_postcondition(snapshot, payload);
+        if recovery_baseline_was_observably_degraded(payload) {
+            return recovery_postcondition(snapshot, payload);
+        }
+        return Ok(
+            recovery_postcondition(snapshot, payload)?
+                && recovery_surface_generation_changed(snapshot, payload),
+        );
     }
 
     let baseline_conversation = payload
@@ -3703,17 +3733,25 @@ fn reconcile_pending_effect(
             .context(
                 "parse pending surface-recovery effect payload during startup reconciliation",
             )?;
-        if recovery_baseline_was_observably_degraded(&payload)
-            && recovery_postcondition(snapshot, &payload)?
-        {
+        let baseline_degraded = recovery_baseline_was_observably_degraded(&payload);
+        let recovered_degraded_surface =
+            baseline_degraded && recovery_postcondition(snapshot, &payload)?;
+        let proved_healthy_reload =
+            !baseline_degraded && recovery_effect_postcondition(snapshot, &payload)?;
+        if recovered_degraded_surface || proved_healthy_reload {
             store.settle_effect(
                 effect.id,
                 &json!({
                     "ok": true,
-                    "detail": "startup reconciliation observed recovered surface postcondition without replaying reload",
+                    "detail": if proved_healthy_reload {
+                        "startup reconciliation proved crash-left reload from an independently changed surface generation"
+                    } else {
+                        "startup reconciliation observed recovered degraded-surface postcondition without replaying reload"
+                    },
                     "conversationFingerprint": snapshot.conversation_fingerprint.as_ref().map(|value| value.as_str()),
                     "userTurnBoundary": snapshot.user_turn_boundary.as_ref().map(|value| value.as_str()),
                     "dispatchId": snapshot.current_dispatch_id.as_ref().map(|value| value.as_str()),
+                    "surfaceGeneration": snapshot.surface_generation.as_ref().map(|value| value.as_str()),
                 })
                 .to_string(),
                 unix_time_ms()?,
@@ -4890,10 +4928,64 @@ VmRSS:	   512 kB
     }
 
     #[test]
-    fn startup_reconciliation_keeps_healthy_stall_recovery_pending_after_crash() {
+    fn startup_reconciliation_keeps_pre_reload_healthy_stall_effect_pending() {
         let mut store = SqliteStore::in_memory().unwrap();
-        let task_id = TaskId::new("task-recover-healthy-stall");
-        let run_id = RunId::new("run-recover-healthy-stall");
+        let task_id = TaskId::new("task-recover-healthy-stall-before");
+        let run_id = RunId::new("run-recover-healthy-stall-before");
+        let baseline = ChatSurfaceSnapshot {
+            app_healthy: true,
+            composer_ready: true,
+            current_dispatch_id: Some(DispatchId::new("dispatch-recover")),
+            user_turn_boundary: Some(UserTurnBoundary::new("turn-recover")),
+            conversation_fingerprint: Some(ConversationFingerprint::new("conversation-recover")),
+            surface_generation: Some(SurfaceGeneration::new("surface-before")),
+            hydration: HydrationState::Ready,
+            ..Default::default()
+        };
+        create_pending_recovery(&mut store, &task_id, &run_id, &baseline);
+
+        let effect = store.pending_effects(10).unwrap().remove(0);
+        assert_eq!(
+            reconcile_pending_effect(&mut store, &baseline, &effect).unwrap(),
+            StartupReconcileOutcome::Clear
+        );
+        assert_eq!(store.pending_effects(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn startup_reconciliation_settles_post_reload_healthy_stall_from_generation_proof() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        let task_id = TaskId::new("task-recover-healthy-stall-after");
+        let run_id = RunId::new("run-recover-healthy-stall-after");
+        let baseline = ChatSurfaceSnapshot {
+            app_healthy: true,
+            composer_ready: true,
+            current_dispatch_id: Some(DispatchId::new("dispatch-recover")),
+            user_turn_boundary: Some(UserTurnBoundary::new("turn-recover")),
+            conversation_fingerprint: Some(ConversationFingerprint::new("conversation-recover")),
+            surface_generation: Some(SurfaceGeneration::new("surface-before")),
+            hydration: HydrationState::Ready,
+            ..Default::default()
+        };
+        create_pending_recovery(&mut store, &task_id, &run_id, &baseline);
+
+        let observed = ChatSurfaceSnapshot {
+            surface_generation: Some(SurfaceGeneration::new("surface-after")),
+            ..baseline.clone()
+        };
+        let effect = store.pending_effects(10).unwrap().remove(0);
+        assert_eq!(
+            reconcile_pending_effect(&mut store, &observed, &effect).unwrap(),
+            StartupReconcileOutcome::SettledObservedRecovery
+        );
+        assert!(store.pending_effects(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn startup_reconciliation_keeps_healthy_stall_ambiguity_pending_without_generation_proof() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        let task_id = TaskId::new("task-recover-healthy-stall-ambiguous");
+        let run_id = RunId::new("run-recover-healthy-stall-ambiguous");
         let baseline = ChatSurfaceSnapshot {
             app_healthy: true,
             composer_ready: true,
