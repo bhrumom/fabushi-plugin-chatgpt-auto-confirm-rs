@@ -8,31 +8,31 @@
   "target": {
     "repository": "bhrumom/fabushi-plugin-chatgpt-auto-confirm-rs",
     "spec": "docs/specs/desktop-chat-userscript-parity-rust-cli.md",
-    "lastVerifiedExactHead": "1fc19b514060f64e1397637b3ae18536e6e375c1",
-    "lastVerifiedCiRun": 37050356200,
+    "lastVerifiedExactHead": "6b9e1b8512957885df8eb83d6275a26363dd77df",
+    "lastVerifiedCiRun": 37054592733,
     "lastVerifiedArtifact": {
-      "id": 11246316014,
+      "id": 11248151562,
       "name": "fabushi-chatgpt-auto-confirm-linux-x86_64",
-      "sha256": "18d9cd4ad45629cf47034cf2ab68ba96ca2e3fb6ae996267e88ce859eb1dc060"
+      "sha256": "7ad3b464076e4fd0db2ec53db158fb8de5c5a39cb95e72e7ddc424117bb4139a"
     },
     "lastVerifiedArtifacts": [
       {
-        "id": 11246316014,
+        "id": 11248151562,
         "name": "fabushi-chatgpt-auto-confirm-linux-x86_64",
-        "headSha": "1fc19b514060f64e1397637b3ae18536e6e375c1",
-        "sha256": "18d9cd4ad45629cf47034cf2ab68ba96ca2e3fb6ae996267e88ce859eb1dc060"
+        "headSha": "6b9e1b8512957885df8eb83d6275a26363dd77df",
+        "sha256": "7ad3b464076e4fd0db2ec53db158fb8de5c5a39cb95e72e7ddc424117bb4139a"
       },
       {
-        "id": 11246570971,
+        "id": 11248855715,
         "name": "fabushi-chatgpt-auto-confirm-macos-aarch64-apple-darwin",
-        "headSha": "1fc19b514060f64e1397637b3ae18536e6e375c1",
-        "sha256": "045d55cd8491c80a81ca44a4e0e0b78aaf596e9d2660431c267aeabb0a94de0d"
+        "headSha": "6b9e1b8512957885df8eb83d6275a26363dd77df",
+        "sha256": "648c295a5c5b5c3d8b0ea8e5f7ada0b0e8474760c11bebaaf30084027d488676"
       },
       {
-        "id": 11246621544,
+        "id": 11247932849,
         "name": "fabushi-chatgpt-auto-confirm-macos-x86_64-apple-darwin",
-        "headSha": "1fc19b514060f64e1397637b3ae18536e6e375c1",
-        "sha256": "4ec93c80959ef299be324d4ff32e603ed167e645e47e75dfbdddd1485ae405b7"
+        "headSha": "6b9e1b8512957885df8eb83d6275a26363dd77df",
+        "sha256": "f4cdd8df3b92916cac7fef14b6b5e6ed12568755c9777a5fdb33480095ca232a"
       }
     ]
   },
@@ -230,11 +230,12 @@
         "SQLite schema v4 task_deletions tombstone makes task deletion crash-resumable across database cleanup and attachment-byte cleanup",
         "task_delete_is_transactional_and_refuses_pending_effects plus restart_finishes_crash_left_task_attachment_cleanup prove fail-closed deletion and restart cleanup",
         "recover_current_surface now journals the pre-reload semantic baseline and only settles after same conversation/user-turn/dispatch identity is ready and degraded error/hydration state has cleared",
+        "healthy-stall reload now persists an opaque adapter-supplied surface generation; startup reconciliation settles a crash-left reload only when the same conversation/user-turn/dispatch identity is restored and the generation independently changed, while pre-reload or unobservable ambiguity remains pending",
         "startup_reconciliation_settles_recovery_only_from_same_identity_ready_surface and startup_reconciliation_keeps_healthy_stall_recovery_pending_after_crash prove crash-left degraded recovery is reconcilable while ambiguous healthy-stall reload remains pending",
         "explicit-load crash-left recoveries can be settled as ambiguous/accounted without replay only when a durable numbered load-failure attempt already exists; supervision resumes at the preserved absolute retry deadline"
       ],
       "missing": [
-        "healthy-stall reload remains intentionally fail-closed after a crash because the current desktop snapshot has no independent reload-generation proof",
+        "exact-head packaged-artifact live healthy-stall reload/crash-restart acceptance",
         "exact-artifact task lifecycle acceptance",
         "real crash/restart acceptance"
       ]
@@ -356,9 +357,9 @@
         "exact-head run 37028529796 at 39632937749698d5b3582d97f08be89280ceca20 passed architecture/fmt/workspace tests/clippy/release packaging on Linux, macOS aarch64, and macOS x86_64; both macOS jobs executed attachment_readiness_is_bound_to_exact_file_name_semantics, conversation_ref_projection_is_strong_opaque_and_fail_closed_on_ambiguity, macOS rebind contracts, and startup reconciliation tests",
         "Linux artifact 11235699064 / fabushi-chatgpt-auto-confirm-linux-x86_64 / sha256:4262f2978cb62b931e4fdc31e8aa68d54acc5300c30e71dac674067bb137a153 was downloaded to htch-runtime; device-side ZIP sha256 matched exactly and packaged doctor/status attached to the real AT-SPI ChatGPT application",
         "the 39632937 packaged Gate E canary safely failed before Send because the composer contained a stale prior Fabushi continuous prepared draft; read-only AT-SPI inspection proved the draft ended in [Fabushi:f985...], exposing a production stale-draft recovery gap rather than a user-draft ownership failure",
-        "exact-head run 37050356200 is green at 1fc19b514060f64e1397637b3ae18536e6e375c1 across Linux, macOS aarch64, and macOS x86_64; every job passed architecture, fmt, workspace tests, clippy, release build, and artifact upload",
-        "artifacts from run 37050356200: Linux 11246316014 sha256:18d9cd4ad45629cf47034cf2ab68ba96ca2e3fb6ae996267e88ce859eb1dc060; macOS arm64 11246570971 sha256:045d55cd8491c80a81ca44a4e0e0b78aaf596e9d2660431c267aeabb0a94de0d; macOS x86_64 11246621544 sha256:4ec93c80959ef299be324d4ff32e603ed167e645e47e75dfbdddd1485ae405b7",
-        "Linux artifact 11246316014 was downloaded to htch-runtime and device-side ZIP sha256 matched GitHub exactly; packaged binary sha256 is 62f9910a2c3f45e1d2d78090ebe5efc4466fdd8a91a4f372be8be1dcf0d34126",
+        "exact-head run 37054592733 is green at 6b9e1b8512957885df8eb83d6275a26363dd77df across Linux, macOS aarch64, and macOS x86_64; every job passed architecture, fmt, workspace tests, clippy, release build, and artifact upload",
+        "artifacts from run 37054592733: Linux 11248151562 sha256:7ad3b464076e4fd0db2ec53db158fb8de5c5a39cb95e72e7ddc424117bb4139a; macOS arm64 11248855715 sha256:648c295a5c5b5c3d8b0ea8e5f7ada0b0e8474760c11bebaaf30084027d488676; macOS x86_64 11247932849 sha256:f4cdd8df3b92916cac7fef14b6b5e6ed12568755c9777a5fdb33480095ca232a",
+        "Linux artifact 11248151562 was downloaded to htch-runtime and device-side ZIP sha256 matched GitHub exactly; packaged binary sha256 is 62f9910a2c3f45e1d2d78090ebe5efc4466fdd8a91a4f372be8be1dcf0d34126",
         "the 1fc19b5 packaged status/doctor currently fail before app attach because /usr/bin/chatgpt is absent; read-only device application enumeration likewise shows no installed/running ChatGPT desktop application, so Gates E/F remain environment-blocked without any device-controller mutation"
       ],
       "missing": [
