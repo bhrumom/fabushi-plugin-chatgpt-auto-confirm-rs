@@ -2457,6 +2457,54 @@ impl DesktopRuntime {
             .context("parse durable continuous orchestration state")
     }
 
+    pub fn active_continuous_tasks(&self) -> Result<Vec<ContinuousTaskState>> {
+        let store = SqliteStore::open(&self.state_db_path)?;
+        let mut states = Vec::new();
+        for (_task_id, raw) in store.task_states_json()? {
+            let root: serde_json::Value = serde_json::from_str(&raw)
+                .context("parse durable task state during startup scan")?;
+            let Some(orchestration) = root.get("orchestration") else {
+                continue;
+            };
+            let state: ContinuousTaskState = serde_json::from_value(orchestration.clone())
+                .context("parse durable continuous orchestration state during startup scan")?;
+            if state.lifecycle == ContinuousTaskLifecycle::Active && !state.completed {
+                states.push(state);
+            }
+        }
+        states.sort_by(|left, right| left.task_id.as_str().cmp(right.task_id.as_str()));
+        Ok(states)
+    }
+
+    pub async fn resume_active_continuous_tasks(
+        &self,
+        options: RunOptions,
+    ) -> Result<Vec<RunReport>> {
+        let states = self.active_continuous_tasks()?;
+        if states.len() > 1 {
+            let ids = states
+                .iter()
+                .map(|state| state.task_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "multiple active continuous tasks require opaque ConversationRef reopen/rebind before startup daemon may mutate the shared desktop UI: {ids}"
+            );
+        }
+        let Some(state) = states.into_iter().next() else {
+            return Ok(Vec::new());
+        };
+        let report = self
+            .run_continuous(
+                state.task_id.clone(),
+                &state.goal,
+                state.reasoning_preset,
+                options,
+            )
+            .await?;
+        Ok(vec![report])
+    }
+
     fn persist_continuous_task_state(
         &self,
         state: &ContinuousTaskState,
@@ -4976,6 +5024,91 @@ mod actor_tests {
             StartupReconcileOutcome::DeferredToRunWorker
         );
         assert_eq!(store.pending_effects(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn startup_scan_enumerates_only_active_incomplete_continuous_tasks() {
+        let path = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-startup-scan-{}-{}.sqlite3",
+            std::process::id(),
+            dispatch_marker().unwrap()
+        ));
+        let runtime = DesktopRuntime::new(LifecycleTestProcess, FakeSurface::default())
+            .with_state_db_path(path.clone());
+
+        let active = ContinuousTaskState::new(
+            TaskId::new("task-active"),
+            "active goal".into(),
+            ReasoningPreset::ExtraHigh,
+        );
+        let paused = ContinuousTaskState::new(
+            TaskId::new("task-paused"),
+            "paused goal".into(),
+            ReasoningPreset::ExtraHigh,
+        )
+        .pause();
+        let mut completed = ContinuousTaskState::new(
+            TaskId::new("task-complete"),
+            "complete goal".into(),
+            ReasoningPreset::ExtraHigh,
+        );
+        completed.completed = true;
+
+        for state in [&active, &paused, &completed] {
+            runtime
+                .persist_continuous_task_state(
+                    state,
+                    &RunId::new(format!("run-{}", state.task_id.as_str())),
+                    "continuous_task_created",
+                    json!({}),
+                )
+                .unwrap();
+        }
+
+        let states = runtime.active_continuous_tasks().unwrap();
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].task_id, active.task_id);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[tokio::test]
+    async fn startup_daemon_fails_closed_before_desktop_mutation_with_multiple_active_tasks() {
+        let path = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-startup-multi-{}-{}.sqlite3",
+            std::process::id(),
+            dispatch_marker().unwrap()
+        ));
+        let runtime = DesktopRuntime::new(LifecycleTestProcess, FakeSurface::default())
+            .with_state_db_path(path.clone());
+
+        for suffix in ["a", "b"] {
+            let state = ContinuousTaskState::new(
+                TaskId::new(format!("task-{suffix}")),
+                format!("goal-{suffix}"),
+                ReasoningPreset::ExtraHigh,
+            );
+            runtime
+                .persist_continuous_task_state(
+                    &state,
+                    &RunId::new(format!("run-{suffix}")),
+                    "continuous_task_created",
+                    json!({}),
+                )
+                .unwrap();
+        }
+
+        let error = runtime
+            .resume_active_continuous_tasks(RunOptions::default())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("ConversationRef reopen/rebind"));
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
     }
 
     #[test]

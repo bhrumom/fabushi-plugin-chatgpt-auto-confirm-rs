@@ -1251,6 +1251,22 @@ impl SqliteStore {
             .context("read task revision")
     }
 
+    pub fn task_states_json(&self) -> Result<Vec<(TaskId, String)>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT task_id, state_json FROM tasks ORDER BY task_id")
+            .context("prepare task state enumeration")?;
+        let rows = statement
+            .query_map([], |row| {
+                let task_id: String = row.get(0)?;
+                let state_json: String = row.get(1)?;
+                Ok((TaskId::new(task_id), state_json))
+            })
+            .context("enumerate durable task states")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("collect durable task states")
+    }
+
     pub fn acquire_ui_session_lease(
         &mut self,
         lease_name: &str,

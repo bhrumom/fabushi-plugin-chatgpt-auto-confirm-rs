@@ -50,6 +50,14 @@ enum Commands {
         #[arg(long = "attachment")]
         attachments: Vec<PathBuf>,
     },
+    Daemon {
+        #[arg(long, default_value_t = true)]
+        auto_confirm: bool,
+        #[arg(long, default_value_t = 3600)]
+        timeout_seconds: u64,
+        #[arg(long, default_value_t = 900)]
+        poll_ms: u64,
+    },
     Pause {
         #[arg(long)]
         task_id: String,
@@ -185,6 +193,23 @@ async fn main() -> Result<()> {
                 .await
                 .context("ChatGPT desktop continuous automation run failed")?;
             println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Commands::Daemon {
+            auto_confirm,
+            timeout_seconds,
+            poll_ms,
+        } => {
+            let runtime = DesktopRuntime::default();
+            let reports = runtime
+                .resume_active_continuous_tasks(RunOptions {
+                    timeout: Duration::from_secs(timeout_seconds),
+                    poll_interval: Duration::from_millis(poll_ms),
+                    auto_confirm,
+                    ..RunOptions::default()
+                })
+                .await
+                .context("ChatGPT desktop durable startup orchestration failed")?;
+            println!("{}", serde_json::to_string_pretty(&reports)?);
         }
         Commands::Pause { task_id } => {
             let runtime = DesktopRuntime::default();
