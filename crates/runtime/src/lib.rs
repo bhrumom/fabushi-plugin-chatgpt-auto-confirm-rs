@@ -48,6 +48,7 @@ const DESKTOP_UI_LEASE_TTL_MS: i64 = 15_000;
 const DESKTOP_UI_LEASE_HEARTBEAT: Duration = Duration::from_secs(5);
 const STARTUP_PENDING_EFFECT_LIMIT: usize = 256;
 
+#[cfg(target_os = "linux")]
 fn parse_linux_proc_memory_status(status: &str) -> serde_json::Value {
     fn kib_value(status: &str, key: &str) -> Option<u64> {
         status.lines().find_map(|line| {
@@ -74,7 +75,7 @@ fn parse_linux_proc_memory_status(status: &str) -> serde_json::Value {
 pub fn process_memory_diagnostics() -> serde_json::Value {
     #[cfg(target_os = "linux")]
     {
-        return match std::fs::read_to_string("/proc/self/status") {
+        match std::fs::read_to_string("/proc/self/status") {
             Ok(status) => parse_linux_proc_memory_status(&status),
             Err(error) => json!({
                 "supported": false,
@@ -83,7 +84,7 @@ pub fn process_memory_diagnostics() -> serde_json::Value {
                 "reason": error.to_string(),
                 "policy": "diagnostic-only"
             }),
-        };
+        }
     }
 
     #[cfg(not(target_os = "linux"))]
