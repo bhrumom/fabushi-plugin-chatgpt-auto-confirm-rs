@@ -2,9 +2,10 @@ use anyhow::{Result, bail};
 use async_trait::async_trait;
 use fabushi_chatgpt_domain::{
     ApprovalSettlementKey, AssistantResponseBoundary, AuthorizationSettlementState,
-    ChatSurfaceSnapshot, ConversationFingerprint, DispatchId, GoalRevision, HydrationState,
-    OwnershipConfidence, Phase, ReasoningPreset, RecoveryEnvelope, RecoveryEnvelopeV1,
-    ReviewStatus, Round, RunId, RunReport, RunState, StrictReviewReportEvidence, TaskId,
+    ChatSurfaceSnapshot, ConversationFingerprint, ConversationRef, DispatchId, GoalRevision,
+    HydrationState, OwnershipConfidence, Phase, ReasoningPreset, RecoveryEnvelope,
+    RecoveryEnvelopeV1, ReviewStatus, Round, RunId, RunReport, RunState,
+    StrictReviewReportEvidence, TaskId,
 };
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -90,6 +91,9 @@ pub trait ChatSurfacePort: Send + Sync {
     }
     async fn recover_current_surface(&self) -> Result<()>;
     async fn start_fresh_conversation(&self) -> Result<()>;
+    async fn rebind_conversation(&self, _conversation_ref: &ConversationRef) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1727,6 +1731,8 @@ pub struct ContinuousTaskState {
     pub current_next: Option<String>,
     pub reasoning_preset: ReasoningPreset,
     #[serde(default)]
+    pub conversation_ref: Option<ConversationRef>,
+    #[serde(default)]
     pub lifecycle: ContinuousTaskLifecycle,
     #[serde(default)]
     pub completed: bool,
@@ -1743,9 +1749,17 @@ impl ContinuousTaskState {
             previous_work_result: None,
             current_next: None,
             reasoning_preset,
+            conversation_ref: None,
             lifecycle: ContinuousTaskLifecycle::Active,
             completed: false,
         }
+    }
+
+    pub fn bind_conversation_ref(mut self, conversation_ref: Option<ConversationRef>) -> Self {
+        if conversation_ref.is_some() {
+            self.conversation_ref = conversation_ref;
+        }
+        self
     }
 
     pub fn pause(mut self) -> Self {
@@ -3427,6 +3441,7 @@ mod tests {
             previous_work_result: None,
             current_next: None,
             reasoning_preset: ReasoningPreset::ExtraHigh,
+            conversation_ref: None,
             lifecycle: ContinuousTaskLifecycle::Active,
             completed: false,
         }

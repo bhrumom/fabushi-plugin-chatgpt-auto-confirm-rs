@@ -144,11 +144,16 @@
         "rate_limit_deferred_task_does_not_block_runnable_task, due_task_selection_round_robins_only_due_tasks, scheduler_rotation_keeps_ui_single_writer_without_duplicate_send, durable_wait_fails_closed_when_supervisor_is_unavailable, dispatch_confirmation_holds_foreground_until_owner_yields, authorization_settlement_releases_foreground_for_other_tasks, and restart_wait_uses_original_durable_deadline",
         "two-phase durable wake arming fixes SQLite-latency ordering while preserving absolute deadlines; supervisor shutdown after final external handle is deterministic",
         "CLI daemon + DesktopRuntime::resume_active_continuous_tasks enumerate durable active incomplete tasks and resume the sole safe task",
-        "startup_scan_enumerates_only_active_incomplete_continuous_tasks and startup_daemon_fails_closed_before_desktop_mutation_with_multiple_active_tasks prove startup orchestration and fail-closed multi-task behavior before ConversationRef rebinding exists"
+        "startup_scan_enumerates_only_active_incomplete_continuous_tasks and startup_daemon_fails_closed_before_desktop_mutation_with_multiple_active_tasks prove startup orchestration and fail-closed multi-task behavior before ConversationRef rebinding exists",
+        "Linux desktop AT-SPI projects an opaque hashed ConversationRef only from one unambiguous current/selected accessibility link with a native URI; transcript/title text alone cannot create identity",
+        "ChatSurfacePort/DesktopSessionActor/DurableRunSurface now expose journaled single-writer rebind_conversation, and incomplete single-task resume rebinds to the persisted ConversationRef before validating the exact dispatch marker",
+        "startup scan preserves durable ConversationRef while ambiguous/missing refs and sensitive/authorization surfaces fail closed"
       ],
       "missing": [
         "exact-artifact real acceptance",
-        "desktop opaque ConversationRef navigation/rebinding for safe rotation across independently running server-side conversations",
+        "capture/reconcile the current in-flight phase ConversationRef early enough for crash-mid-phase multi-task startup",
+        "production daemon rotation across multiple independently running server-side conversations",
+        "macOS ConversationRef projection/rebind parity",
         "live concurrent-task acceptance"
       ]
     },

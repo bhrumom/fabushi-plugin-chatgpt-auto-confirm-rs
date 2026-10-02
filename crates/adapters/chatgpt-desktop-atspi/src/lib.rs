@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use fabushi_chatgpt_application::ChatSurfacePort;
-use fabushi_chatgpt_domain::{ChatSurfaceSnapshot, ReasoningPreset};
+use fabushi_chatgpt_domain::{ChatSurfaceSnapshot, ConversationRef, ReasoningPreset};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -157,11 +157,39 @@ impl ChatSurfacePort for ChatGptDesktopAtspi {
         }
         Ok(())
     }
+
+    async fn rebind_conversation(&self, conversation_ref: &ConversationRef) -> Result<bool> {
+        self.bridge("rebind", Some(conversation_ref.as_str())).await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conversation_ref_projection_is_strong_opaque_and_fail_closed_on_ambiguity() {
+        use std::process::Command as StdCommand;
+        let wrapper = format!(
+            "import sys,types; sys.modules['pyatspi']=types.SimpleNamespace(); sys.argv=['bridge','contract-conversation-ref']; exec({:?})",
+            BRIDGE
+        );
+        let output = StdCommand::new("python3")
+            .arg("-c")
+            .arg(wrapper)
+            .output()
+            .expect("python3 must execute deterministic conversation-ref contract");
+        assert!(
+            output.status.success(),
+            "contract failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "true");
+        assert!(BRIDGE.contains("opaque_conversation_ref"));
+        assert!(BRIDGE.contains("len(matches) != 1"));
+        assert!(BRIDGE.contains("elif op == \"rebind\":"));
+    }
 
     #[test]
     fn bridge_is_atspi_and_fail_closed_for_persistent_authorization() {

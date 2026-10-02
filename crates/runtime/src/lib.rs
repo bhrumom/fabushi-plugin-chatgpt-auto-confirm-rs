@@ -31,8 +31,8 @@ use tokio::time::MissedTickBehavior;
 pub use fabushi_chatgpt_application::RunOptions;
 pub use fabushi_chatgpt_cdp::ChatGptCdp;
 use fabushi_chatgpt_domain::{
-    AttachmentId, AuthorizationSettlementState, ConversationFingerprint, DispatchId, GoalRevision,
-    HydrationState, OwnershipConfidence, RunId, UserTurnBoundary,
+    AttachmentId, AuthorizationSettlementState, ConversationFingerprint, ConversationRef,
+    DispatchId, GoalRevision, HydrationState, OwnershipConfidence, RunId, UserTurnBoundary,
 };
 pub use fabushi_chatgpt_domain::{
     ChatSurfaceSnapshot, Phase, ReasoningPreset, Round, RunReport, RunState, TaskId,
@@ -152,6 +152,10 @@ enum DesktopMutation {
     StartFreshConversation {
         reply: oneshot::Sender<Result<()>>,
     },
+    RebindConversation {
+        conversation_ref: ConversationRef,
+        reply: oneshot::Sender<Result<bool>>,
+    },
 }
 
 #[derive(Clone)]
@@ -258,6 +262,12 @@ async fn execute_mutation(surface: &dyn ChatSurfacePort, mutation: DesktopMutati
         DesktopMutation::StartFreshConversation { reply } => {
             let _ = reply.send(surface.start_fresh_conversation().await);
         }
+        DesktopMutation::RebindConversation {
+            conversation_ref,
+            reply,
+        } => {
+            let _ = reply.send(surface.rebind_conversation(&conversation_ref).await);
+        }
     }
 }
 
@@ -269,7 +279,8 @@ fn reject_mutation(mutation: DesktopMutation, error: anyhow::Error) {
         | DesktopMutation::ApproveCurrentConversation { reply }
         | DesktopMutation::DismissRateLimitNotice { reply }
         | DesktopMutation::DismissHarmlessPopup { reply }
-        | DesktopMutation::RetryStreamCacheExpired { reply, .. } => {
+        | DesktopMutation::RetryStreamCacheExpired { reply, .. }
+        | DesktopMutation::RebindConversation { reply, .. } => {
             let _ = reply.send(Err(anyhow::anyhow!(message)));
         }
         DesktopMutation::SendPrompt { reply, .. }
@@ -344,6 +355,15 @@ impl ChatSurfacePort for DesktopSessionActorHandle {
     async fn start_fresh_conversation(&self) -> Result<()> {
         self.request(|reply| DesktopMutation::StartFreshConversation { reply })
             .await
+    }
+
+    async fn rebind_conversation(&self, conversation_ref: &ConversationRef) -> Result<bool> {
+        let conversation_ref = conversation_ref.clone();
+        self.request(|reply| DesktopMutation::RebindConversation {
+            conversation_ref,
+            reply,
+        })
+        .await
     }
 }
 
@@ -1267,6 +1287,15 @@ impl ChatSurfacePort for DurableRunSurface {
         *self.dispatch_id.lock().await = DispatchId::new(dispatch_marker()?);
         Ok(())
     }
+
+    async fn rebind_conversation(&self, conversation_ref: &ConversationRef) -> Result<bool> {
+        self.record_and_settle(
+            "rebind_conversation",
+            json!({"conversationRef": conversation_ref.as_str()}),
+            self.surface.rebind_conversation(conversation_ref),
+        )
+        .await
+    }
 }
 
 struct SqliteReviewSettlement {
@@ -2095,6 +2124,11 @@ impl ChatSurfacePort for ReattachingDesktopSurface {
         self.require_running_for_mutation().await?;
         self.surface.start_fresh_conversation().await
     }
+
+    async fn rebind_conversation(&self, conversation_ref: &ConversationRef) -> Result<bool> {
+        self.require_running_for_mutation().await?;
+        self.surface.rebind_conversation(conversation_ref).await
+    }
 }
 
 pub struct DesktopRuntime {
@@ -2374,7 +2408,18 @@ impl DesktopRuntime {
         }
 
         let session = self.desktop_session().await?.clone();
-        let snapshot = session.observe().await?;
+        let mut snapshot = session.observe().await?;
+        if let Some(conversation_ref) = state.conversation_ref.as_ref()
+            && snapshot.conversation_ref.as_ref() != Some(conversation_ref)
+        {
+            if !session.rebind_conversation(conversation_ref).await? {
+                return Ok(None);
+            }
+            snapshot = session.observe().await?;
+            if snapshot.conversation_ref.as_ref() != Some(conversation_ref) {
+                return Ok(None);
+            }
+        }
         if !snapshot_matches_dispatch(&snapshot, &candidate.dispatch_id) {
             return Ok(None);
         }
@@ -2699,7 +2744,7 @@ impl DesktopRuntime {
         if state.lifecycle == ContinuousTaskLifecycle::Paused {
             return Ok(RunReport {
                 state: RunState::Paused,
-                conversation_ref: None,
+                conversation_ref: state.conversation_ref.clone(),
                 assistant_text: state.previous_work_result.clone().unwrap_or_default(),
                 approvals_clicked: 0,
                 recoveries: 0,
@@ -2711,7 +2756,7 @@ impl DesktopRuntime {
         if state.lifecycle == ContinuousTaskLifecycle::Cancelled {
             return Ok(RunReport {
                 state: RunState::Cancelled,
-                conversation_ref: None,
+                conversation_ref: state.conversation_ref.clone(),
                 assistant_text: state.previous_work_result.clone().unwrap_or_default(),
                 approvals_clicked: 0,
                 recoveries: 0,
@@ -2723,7 +2768,7 @@ impl DesktopRuntime {
         if state.completed {
             return Ok(RunReport {
                 state: RunState::Complete,
-                conversation_ref: None,
+                conversation_ref: state.conversation_ref.clone(),
                 assistant_text: state.previous_work_result.clone().unwrap_or_default(),
                 approvals_clicked: 0,
                 recoveries: 0,
@@ -2742,6 +2787,7 @@ impl DesktopRuntime {
                 return Ok(report);
             }
 
+            state = state.bind_conversation_ref(report.conversation_ref.clone());
             let phase = state.phase;
             let round = state.round;
             match phase {
@@ -2848,6 +2894,8 @@ impl DesktopRuntime {
             if report.state != RunState::Complete {
                 return Ok(report);
             }
+
+            state = state.bind_conversation_ref(report.conversation_ref.clone());
 
             match phase {
                 Phase::Work => {
@@ -3588,6 +3636,11 @@ mod actor_tests {
         async fn start_fresh_conversation(&self) -> Result<()> {
             self.mutation().await;
             Ok(())
+        }
+
+        async fn rebind_conversation(&self, _conversation_ref: &ConversationRef) -> Result<bool> {
+            self.mutation().await;
+            Ok(true)
         }
     }
 
@@ -5040,7 +5093,10 @@ mod actor_tests {
             TaskId::new("task-active"),
             "active goal".into(),
             ReasoningPreset::ExtraHigh,
-        );
+        )
+        .bind_conversation_ref(Some(ConversationRef::new(
+            "atspi:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )));
         let paused = ContinuousTaskState::new(
             TaskId::new("task-paused"),
             "paused goal".into(),
@@ -5068,6 +5124,7 @@ mod actor_tests {
         let states = runtime.active_continuous_tasks().unwrap();
         assert_eq!(states.len(), 1);
         assert_eq!(states[0].task_id, active.task_id);
+        assert_eq!(states[0].conversation_ref, active.conversation_ref);
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
@@ -5942,10 +5999,18 @@ mod actor_tests {
         let actor = DesktopSessionActorHandle::spawn(actor_surface);
         let left = actor.clone();
         let right = actor.clone();
-        let (send, fresh) =
-            tokio::join!(left.send_prompt("hello"), right.start_fresh_conversation(),);
+        let third = actor.clone();
+        let conversation_ref = ConversationRef::new(
+            "atspi:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        );
+        let (send, fresh, rebind) = tokio::join!(
+            left.send_prompt("hello"),
+            right.start_fresh_conversation(),
+            third.rebind_conversation(&conversation_ref),
+        );
         send.unwrap();
         fresh.unwrap();
+        assert!(rebind.unwrap());
         assert_eq!(fake.max_active_mutations.load(Ordering::SeqCst), 1);
     }
 }

@@ -2,6 +2,7 @@ import json
 import re
 import sys
 import time
+import hashlib
 
 import pyatspi
 
@@ -141,11 +142,95 @@ def flattened(app):
             "enabled": enabled(node),
             "visible": visible(node),
             "focused": state(node, pyatspi.STATE_FOCUSED),
+            "selected": state(node, pyatspi.STATE_SELECTED),
         })
     return out
 
 def normalized(item):
     return (item["name"] + "\n" + item["text"]).strip().lower()
+
+def node_attributes(node):
+    try:
+        return list(node.getAttributes())
+    except Exception:
+        return []
+
+def node_uri(node):
+    try:
+        link = node.queryHyperlink()
+        if getattr(link, "nAnchors", 0) == 1:
+            value = link.getURI(0)
+            if value:
+                return value.strip()
+    except Exception:
+        pass
+    attributes = node_attributes(node)
+    if isinstance(attributes, dict):
+        for key in ("url", "uri", "href"):
+            value = attributes.get(key)
+            if value:
+                return value.strip()
+    else:
+        for attr in attributes:
+            lower = str(attr).lower()
+            for prefix in ("url:", "uri:", "href:"):
+                if lower.startswith(prefix):
+                    value = str(attr)[len(prefix):].strip()
+                    if value:
+                        return value
+    return None
+
+def opaque_conversation_ref(uri):
+    return "atspi:" + hashlib.sha256(uri.encode("utf-8", "replace")).hexdigest()
+
+def strong_current_conversation_links(items):
+    matches = []
+    for item in items:
+        if item.get("role") not in ("link", "hyperlink") or not item.get("visible", True):
+            continue
+        uri = node_uri(item["node"])
+        if not uri:
+            continue
+        attributes = node_attributes(item["node"])
+        if isinstance(attributes, dict):
+            attrs = "\n".join(f"{key}:{value}" for key, value in attributes.items()).lower()
+        else:
+            attrs = "\n".join(str(value) for value in attributes).lower()
+        current = item.get("selected", False) or any(token in attrs for token in (
+            "aria-current:true", "aria-current:page", "current:true", "selected:true"
+        ))
+        if current:
+            matches.append((item, uri))
+    return matches
+
+def current_conversation_ref(items):
+    matches = strong_current_conversation_links(items)
+    if len(matches) != 1:
+        return None
+    return opaque_conversation_ref(matches[0][1])
+
+def rebind_conversation(target_ref):
+    if not re.fullmatch(r"atspi:[0-9a-f]{64}", target_ref or ""):
+        return False
+    app = find_app()
+    items = flattened(app)
+    auth_cards = authorization_cards(items)
+    harmless, blocked = popup_semantics(items, auth_cards)
+    if auth_cards or blocked:
+        return False
+    candidates = []
+    for item in items:
+        if item["role"] not in ("link", "hyperlink") or not item["visible"] or not item["enabled"]:
+            continue
+        uri = node_uri(item["node"])
+        if uri and opaque_conversation_ref(uri) == target_ref:
+            candidates.append(item)
+    if len(candidates) != 1:
+        return False
+    if not action(candidates[0]["node"]):
+        return False
+    time.sleep(0.35)
+    return current_conversation_ref(flattened(find_app())) == target_ref
 
 def action(node):
     act = node.queryAction()
@@ -776,6 +861,7 @@ def snapshot():
     response_boundary = hash_text(prose) if marker and prose else None
     strict_review_report = strict_review_report_projection(prose, response_boundary)
     conversation_fingerprint = hash_text((marker or "") + "|" + (response_boundary or "")) if marker else None
+    conversation_ref = current_conversation_ref(items)
     progress_material = prose + "|" + "\n".join(work_trace) + "|" + str(stop) + "|" + str(auth_present)
     progress = hash_text(progress_material) if marker else None
 
@@ -788,7 +874,7 @@ def snapshot():
         "user_turn_ownership": "strong" if marker else "none",
         "assistant_response_boundary": response_boundary,
         "assistant_response_ownership": "strong" if marker and response_boundary else "none",
-        "conversation_ref": None,
+        "conversation_ref": conversation_ref,
         "conversation_fingerprint": conversation_fingerprint,
         "assistant_visible_prose": prose,
         "assistant_visible_work_trace": work_trace,
@@ -1293,9 +1379,47 @@ def response_boundary_contract_self_test():
         return False
     return True
 
+def conversation_ref_contract_self_test():
+    class FakeHyperlink:
+        def __init__(self, uri):
+            self.uri = uri
+            self.nAnchors = 1
+        def getURI(self, index):
+            return self.uri if index == 0 else None
+    class FakeNode:
+        def __init__(self, node_role, name, uri=None, attributes=None):
+            self._role = node_role
+            self.name = name
+            self._uri = uri
+            self._attributes = attributes or []
+        def getRoleName(self):
+            return self._role
+        def getAttributes(self):
+            return self._attributes
+        def queryHyperlink(self):
+            if not self._uri:
+                raise RuntimeError("no hyperlink")
+            return FakeHyperlink(self._uri)
+    def item(node, selected=False):
+        return {"node":node,"role":node.getRoleName(),"name":node.name,"text":node.name,"visible":True,"enabled":True,"selected":selected}
+    uri = "chatgpt://conversation/native-opaque-123"
+    current = item(FakeNode("link", "Current title", uri), True)
+    transcript = item(FakeNode("link", "chatgpt://conversation/native-opaque-123", None), False)
+    ref = current_conversation_ref([transcript, current])
+    if ref != opaque_conversation_ref(uri):
+        return False
+    ambiguous = item(FakeNode("link", "Duplicate", "chatgpt://conversation/other"), True)
+    if current_conversation_ref([current, ambiguous]) is not None:
+        return False
+    attr_current = item(FakeNode("link", "Current", None, ["href:" + uri, "aria-current:page"]), False)
+    return current_conversation_ref([attr_current]) == opaque_conversation_ref(uri)
+
+
 def main():
     op = sys.argv[1]
-    if op == "contract-response-boundary":
+    if op == "contract-conversation-ref":
+        result = conversation_ref_contract_self_test()
+    elif op == "contract-response-boundary":
         result = response_boundary_contract_self_test()
     elif op == "contract-rate-limit":
         result = rate_limit_contract_self_test()
@@ -1309,6 +1433,8 @@ def main():
         result = send_prompt(sys.argv[2])
     elif op == "fresh":
         result = start_fresh()
+    elif op == "rebind":
+        result = rebind_conversation(sys.argv[2])
     elif op == "attach":
         result = attach_file(sys.argv[2])
     elif op == "attachment-ready":
