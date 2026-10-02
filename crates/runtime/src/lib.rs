@@ -6,7 +6,7 @@ use fabushi_chatgpt_application::{
     RecoveryRunContext, ReviewRunIdentity, ReviewSettlementKey, ReviewSettlementPort,
     RunControlPort, RunPrompt, WakeReason, parse_strict_review_report,
 };
-use fabushi_chatgpt_attachment_store::AttachmentStore;
+use fabushi_chatgpt_attachment_store::{AttachmentStore, StoredAttachment};
 #[cfg(target_os = "linux")]
 use fabushi_chatgpt_desktop_atspi::ChatGptDesktopAtspi;
 #[cfg(target_os = "macos")]
@@ -48,6 +48,7 @@ const STARTUP_PENDING_EFFECT_LIMIT: usize = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StartupReconcileOutcome {
     Clear,
+    DeferredToRunWorker,
     SettledObservedSend,
     SettledObservedReasoning,
     SettledObservedApproval,
@@ -121,6 +122,11 @@ enum DesktopMutation {
     SendPrompt {
         prompt: String,
         reply: oneshot::Sender<Result<()>>,
+    },
+    AttachFile {
+        file_name: String,
+        bytes: Vec<u8>,
+        reply: oneshot::Sender<Result<bool>>,
     },
     ApproveCurrentConversation {
         reply: oneshot::Sender<Result<bool>>,
@@ -212,6 +218,13 @@ async fn execute_mutation(surface: &dyn ChatSurfacePort, mutation: DesktopMutati
         DesktopMutation::SendPrompt { prompt, reply } => {
             let _ = reply.send(surface.send_prompt(&prompt).await);
         }
+        DesktopMutation::AttachFile {
+            file_name,
+            bytes,
+            reply,
+        } => {
+            let _ = reply.send(surface.attach_file(&file_name, &bytes).await);
+        }
         DesktopMutation::ApproveCurrentConversation { reply } => {
             let _ = reply.send(surface.approve_current_conversation().await);
         }
@@ -231,6 +244,7 @@ fn reject_mutation(mutation: DesktopMutation, error: anyhow::Error) {
     let message = error.to_string();
     match mutation {
         DesktopMutation::SetReasoning { reply, .. }
+        | DesktopMutation::AttachFile { reply, .. }
         | DesktopMutation::ApproveCurrentConversation { reply }
         | DesktopMutation::DismissRateLimitNotice { reply } => {
             let _ = reply.send(Err(anyhow::anyhow!(message)));
@@ -258,6 +272,21 @@ impl ChatSurfacePort for DesktopSessionActorHandle {
         let prompt = prompt.to_owned();
         self.request(|reply| DesktopMutation::SendPrompt { prompt, reply })
             .await
+    }
+
+    async fn attach_file(&self, file_name: &str, bytes: &[u8]) -> Result<bool> {
+        let file_name = file_name.to_owned();
+        let bytes = bytes.to_vec();
+        self.request(|reply| DesktopMutation::AttachFile {
+            file_name,
+            bytes,
+            reply,
+        })
+        .await
+    }
+
+    async fn attachment_ready(&self, file_name: &str) -> Result<bool> {
+        self.surface.attachment_ready(file_name).await
     }
 
     async fn approve_current_conversation(&self) -> Result<bool> {
@@ -429,6 +458,8 @@ struct DurableRunSurface {
     surface: DesktopSessionActorHandle,
     task_id: TaskId,
     foreground_gate: ForegroundGate,
+    supervisor: SupervisorHandle,
+    attachment_root: PathBuf,
     journal: Arc<Mutex<DurableRunJournal>>,
     dispatch_id: Arc<Mutex<DispatchId>>,
     phase: Phase,
@@ -436,6 +467,7 @@ struct DurableRunSurface {
     pending_reasoning: Arc<Mutex<Option<PendingReasoningSettlement>>>,
     pending_send: Arc<Mutex<Option<PendingSendSettlement>>>,
     pending_approval: Arc<Mutex<Option<PendingApprovalSettlement>>>,
+    pending_attachments: Arc<Mutex<HashMap<String, i64>>>,
 }
 
 impl DurableRunSurface {
@@ -443,7 +475,7 @@ impl DurableRunSurface {
         surface: DesktopSessionActorHandle,
         state_db_path: &Path,
         identity: DurableRunIdentity,
-        foreground_gate: ForegroundGate,
+        supervisor: SupervisorHandle,
     ) -> Result<Self> {
         let journal = DurableRunJournal::open(
             state_db_path,
@@ -456,7 +488,20 @@ impl DurableRunSurface {
         };
         let now = unix_time_ms()?;
         let mut restored_approval = None;
+        let mut restored_attachments = HashMap::new();
         for effect in journal.store.pending_effects(128)? {
+            if effect.task_id == journal.task_id.as_str()
+                && effect.run_id == journal.run_id.as_str()
+                && effect.effect_kind == "attach_file"
+            {
+                let payload: serde_json::Value = serde_json::from_str(&effect.effect_payload_json)
+                    .context("parse durable attachment effect while restoring run surface")?;
+                if let Some(file_name) = payload.get("fileName").and_then(serde_json::Value::as_str)
+                {
+                    restored_attachments.insert(file_name.to_owned(), effect.id);
+                }
+                continue;
+            }
             if effect.task_id != journal.task_id.as_str()
                 || effect.run_id != journal.run_id.as_str()
                 || effect.effect_kind != "approve_current_conversation"
@@ -499,7 +544,9 @@ impl DurableRunSurface {
         Ok(Self {
             surface,
             task_id: identity.task_id,
-            foreground_gate,
+            foreground_gate: supervisor.foreground_gate.clone(),
+            supervisor,
+            attachment_root: attachment_root_for_state_db(state_db_path),
             journal: Arc::new(Mutex::new(journal)),
             dispatch_id: Arc::new(Mutex::new(identity.dispatch_id)),
             phase: identity.phase,
@@ -507,6 +554,7 @@ impl DurableRunSurface {
             pending_reasoning: Arc::new(Mutex::new(None)),
             pending_send: Arc::new(Mutex::new(None)),
             pending_approval: Arc::new(Mutex::new(restored_approval)),
+            pending_attachments: Arc::new(Mutex::new(restored_attachments)),
         })
     }
 
@@ -530,7 +578,7 @@ impl DurableRunSurface {
                 phase,
                 round,
             },
-            ForegroundGate::default(),
+            SupervisorHandle::spawn(state_db_path.to_path_buf()),
         )
     }
 
@@ -562,6 +610,159 @@ impl DurableRunSurface {
             journal.settle(effect_id, settlement.0, &settlement.1)?;
         }
         result
+    }
+
+    async fn settle_pending_attachment_if_ready(&self, file_name: &str) -> Result<bool> {
+        if !self.surface.attachment_ready(file_name).await? {
+            return Ok(false);
+        }
+        if let Some(effect_id) = self.pending_attachments.lock().await.remove(file_name) {
+            let journal = self.journal.lock().await;
+            journal.settle(
+                effect_id,
+                true,
+                "attachment filename/preview readiness observed",
+            )?;
+        }
+        Ok(true)
+    }
+
+    async fn attach_required_file(&self, file_name: &str, bytes: &[u8]) -> Result<()> {
+        if self.settle_pending_attachment_if_ready(file_name).await? {
+            return Ok(());
+        }
+        let digest = format!("{:x}", Sha256::digest(bytes));
+        let effect_id = if let Some(existing) = self
+            .pending_attachments
+            .lock()
+            .await
+            .get(file_name)
+            .copied()
+        {
+            existing
+        } else {
+            let effect_id = {
+                let mut journal = self.journal.lock().await;
+                journal.begin(
+                    "attach_file",
+                    json!({"fileName": file_name, "sha256": digest}).to_string(),
+                    None,
+                    None,
+                )?
+            };
+            self.pending_attachments
+                .lock()
+                .await
+                .insert(file_name.to_owned(), effect_id);
+            effect_id
+        };
+        let accepted = {
+            let _mutation_permit = self.mutation_permit().await;
+            self.surface.attach_file(file_name, bytes).await?
+        };
+        if !accepted {
+            let journal = self.journal.lock().await;
+            journal.settle(
+                effect_id,
+                false,
+                "desktop attachment action was not accepted",
+            )?;
+            self.pending_attachments.lock().await.remove(file_name);
+            bail!("desktop attachment action was not accepted for {file_name}");
+        }
+        Ok(())
+    }
+
+    async fn ensure_required_attachments(&self) -> Result<()> {
+        let records = {
+            let journal = self.journal.lock().await;
+            journal.store.task_attachments(&self.task_id)?
+        };
+        if records.is_empty() {
+            return Ok(());
+        }
+        let store = AttachmentStore::open(&self.attachment_root)?;
+        for record in records {
+            let byte_len = serde_json::from_str::<serde_json::Value>(&record.metadata_json)
+                .context("parse persisted attachment metadata")?
+                .get("byteLen")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "persisted attachment metadata missing byteLen for {}",
+                        record.file_name
+                    )
+                })?;
+            let bytes = store.bytes(&StoredAttachment {
+                attachment_id: record.attachment_id.clone(),
+                file_name: record.file_name.clone(),
+                sha256: record.sha256.clone(),
+                byte_len,
+                storage_ref: PathBuf::from(&record.storage_ref),
+            })?;
+            let mut retry = 0_u32;
+            loop {
+                if self
+                    .settle_pending_attachment_if_ready(&record.file_name)
+                    .await?
+                {
+                    break;
+                }
+                self.attach_required_file(&record.file_name, &bytes).await?;
+                let readiness_deadline = unix_time_ms()?.saturating_add(45_000);
+                loop {
+                    if self
+                        .settle_pending_attachment_if_ready(&record.file_name)
+                        .await?
+                    {
+                        break;
+                    }
+                    if unix_time_ms()? >= readiness_deadline {
+                        break;
+                    }
+                    let run_id = { self.journal.lock().await.run_id.clone() };
+                    self.supervisor
+                        .sleep_for(
+                            &self.task_id,
+                            &run_id,
+                            WakeReason::AttachmentWait,
+                            Duration::from_secs(1),
+                        )
+                        .await?;
+                }
+                if self.surface.attachment_ready(&record.file_name).await? {
+                    self.settle_pending_attachment_if_ready(&record.file_name)
+                        .await?;
+                    break;
+                }
+                if let Some(effect_id) = self
+                    .pending_attachments
+                    .lock()
+                    .await
+                    .remove(&record.file_name)
+                {
+                    let journal = self.journal.lock().await;
+                    journal.settle(
+                        effect_id,
+                        false,
+                        "attachment readiness was not observed within 45 seconds",
+                    )?;
+                }
+                let shift = retry.min(4);
+                let backoff_secs = (5_u64 << shift).min(60);
+                retry = retry.saturating_add(1);
+                let run_id = { self.journal.lock().await.run_id.clone() };
+                self.supervisor
+                    .sleep_for(
+                        &self.task_id,
+                        &run_id,
+                        WakeReason::AttachmentWait,
+                        Duration::from_secs(backoff_secs),
+                    )
+                    .await?;
+            }
+        }
+        Ok(())
     }
 
     async fn settle_pending_reasoning_if_observed(
@@ -722,7 +923,17 @@ impl ChatSurfacePort for DurableRunSurface {
         result
     }
 
+    async fn attach_file(&self, file_name: &str, bytes: &[u8]) -> Result<bool> {
+        self.attach_required_file(file_name, bytes).await?;
+        Ok(true)
+    }
+
+    async fn attachment_ready(&self, file_name: &str) -> Result<bool> {
+        self.settle_pending_attachment_if_ready(file_name).await
+    }
+
     async fn send_prompt(&self, prompt: &str) -> Result<()> {
+        self.ensure_required_attachments().await?;
         self.foreground_gate.acquire_exclusive(&self.task_id).await;
         let _mutation_permit = self.mutation_permit().await;
         let baseline = self.surface.observe().await?.user_turn_boundary;
@@ -1446,7 +1657,7 @@ impl RunWorker {
                     phase: identity.phase,
                     round: identity.round,
                 },
-                supervisor.foreground_gate.clone(),
+                supervisor.clone(),
             )?,
             review_settlement: SqliteReviewSettlement {
                 path: state_db_path.to_path_buf(),
@@ -1642,6 +1853,7 @@ impl DesktopRuntime {
         Ok(ids)
     }
 
+    #[cfg(test)]
     fn fail_closed_if_native_attachments_pending(&self, task_id: &TaskId) -> Result<()> {
         let attachments = SqliteStore::open(&self.state_db_path)?.task_attachments(task_id)?;
         if attachments.is_empty() {
@@ -1749,7 +1961,7 @@ impl DesktopRuntime {
         let mut settled_any = false;
         for effect in pending {
             match reconcile_pending_effect(&mut store, &snapshot, &effect)? {
-                StartupReconcileOutcome::Clear => {}
+                StartupReconcileOutcome::Clear | StartupReconcileOutcome::DeferredToRunWorker => {}
                 StartupReconcileOutcome::SettledObservedSend
                 | StartupReconcileOutcome::SettledObservedReasoning
                 | StartupReconcileOutcome::SettledObservedApproval => {
@@ -1759,8 +1971,12 @@ impl DesktopRuntime {
         }
 
         let remaining = store.pending_effects(STARTUP_PENDING_EFFECT_LIMIT)?;
-        if !remaining.is_empty() {
-            let sample = remaining
+        let blocking = remaining
+            .iter()
+            .filter(|effect| effect.effect_kind != "attach_file")
+            .collect::<Vec<_>>();
+        if !blocking.is_empty() {
+            let sample = blocking
                 .iter()
                 .take(4)
                 .map(|effect| {
@@ -1988,7 +2204,6 @@ impl DesktopRuntime {
         attachment_paths: &[PathBuf],
     ) -> Result<RunReport> {
         self.stage_task_attachments(&task_id, attachment_paths)?;
-        self.fail_closed_if_native_attachments_pending(&task_id)?;
         let loaded_state = self.load_continuous_task_state(&task_id)?;
         let resumed_existing = loaded_state.is_some();
         let mut state = match loaded_state {
@@ -2218,7 +2433,6 @@ impl DesktopRuntime {
         let identity_marker = dispatch_marker()?;
         let task_id = TaskId::new(format!("task-{identity_marker}"));
         self.stage_task_attachments(&task_id, attachment_paths)?;
-        self.fail_closed_if_native_attachments_pending(&task_id)?;
         self.run_prompt_with_identity(
             prompt,
             requested_reasoning,
@@ -2423,6 +2637,17 @@ fn reconcile_pending_effect(
         return Ok(StartupReconcileOutcome::Clear);
     }
 
+    if effect.effect_kind == "attach_file" {
+        let payload: serde_json::Value = serde_json::from_str(&effect.effect_payload_json)
+            .context("parse pending attachment effect payload during startup reconciliation")?;
+        payload
+            .get("fileName")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("pending attachment effect is missing fileName"))?;
+        return Ok(StartupReconcileOutcome::DeferredToRunWorker);
+    }
+
     if effect.effect_kind == "set_reasoning" {
         let payload: serde_json::Value = serde_json::from_str(&effect.effect_payload_json)
             .context("parse pending reasoning effect payload during startup reconciliation")?;
@@ -2498,6 +2723,16 @@ fn reconcile_pending_effect(
         unix_time_ms()?,
     )?;
     Ok(StartupReconcileOutcome::SettledObservedSend)
+}
+
+fn attachment_root_for_state_db(state_db_path: &Path) -> PathBuf {
+    if let Some(root) = std::env::var_os("FABUSHI_CHATGPT_ATTACHMENT_DIR") {
+        return PathBuf::from(root);
+    }
+    state_db_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("attachments")
 }
 
 fn default_state_db_path() -> PathBuf {
@@ -3440,6 +3675,144 @@ mod actor_tests {
             "restart/resume must recover persisted task attachment identity"
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    struct AttachmentReadySurface {
+        ready: AtomicBool,
+        attach_count: AtomicUsize,
+        send_count: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ChatSurfacePort for AttachmentReadySurface {
+        async fn observe(&self) -> Result<ChatSurfaceSnapshot> {
+            Ok(ChatSurfaceSnapshot::default())
+        }
+
+        async fn set_reasoning_preset(&self, _preset: ReasoningPreset) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn attach_file(&self, file_name: &str, bytes: &[u8]) -> Result<bool> {
+            assert_eq!(file_name, "notes.txt");
+            assert_eq!(bytes, b"attachment payload");
+            self.attach_count.fetch_add(1, Ordering::SeqCst);
+            self.ready.store(true, Ordering::SeqCst);
+            Ok(true)
+        }
+
+        async fn attachment_ready(&self, file_name: &str) -> Result<bool> {
+            assert_eq!(file_name, "notes.txt");
+            Ok(self.ready.load(Ordering::SeqCst))
+        }
+
+        async fn send_prompt(&self, _prompt: &str) -> Result<()> {
+            assert!(
+                self.ready.load(Ordering::SeqCst),
+                "Send must not run before required attachment readiness"
+            );
+            self.send_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn approve_current_conversation(&self) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn dismiss_rate_limit_notice(&self) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn recover_current_surface(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn start_fresh_conversation(&self) -> Result<()> {
+            self.ready.store(false, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn required_attachment_precedes_send_and_fresh_chat_reattaches() {
+        let root = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-attachment-send-{}-{}",
+            std::process::id(),
+            dispatch_marker().unwrap()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let state_db = root.join("state.sqlite3");
+        let input = root.join("notes.txt");
+        std::fs::write(&input, b"attachment payload").unwrap();
+        let task_id = TaskId::new("task-attachment-send");
+        let runtime = DesktopRuntime::new(LifecycleTestProcess, FakeSurface::default())
+            .with_state_db_path(state_db.clone());
+        runtime
+            .stage_task_attachments(&task_id, std::slice::from_ref(&input))
+            .unwrap();
+
+        let raw = Arc::new(AttachmentReadySurface {
+            ready: AtomicBool::new(false),
+            attach_count: AtomicUsize::new(0),
+            send_count: AtomicUsize::new(0),
+        });
+        let actor = DesktopSessionActorHandle::spawn(raw.clone());
+        let durable = DurableRunSurface::new(
+            actor,
+            &state_db,
+            task_id,
+            RunId::new("run-attachment-send"),
+            DispatchId::new("dispatch-attachment-send"),
+            Phase::Work,
+            Round::new(1),
+        )
+        .unwrap();
+
+        durable.send_prompt("first").await.unwrap();
+        assert_eq!(raw.attach_count.load(Ordering::SeqCst), 1);
+        assert_eq!(raw.send_count.load(Ordering::SeqCst), 1);
+
+        durable.start_fresh_conversation().await.unwrap();
+        durable.send_prompt("second").await.unwrap();
+        assert_eq!(
+            raw.attach_count.load(Ordering::SeqCst),
+            2,
+            "fresh conversation must reattach task-persisted bytes before resend"
+        );
+        assert_eq!(raw.send_count.load(Ordering::SeqCst), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn startup_reconciliation_defers_attachment_to_task_scoped_worker() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        let task_id = TaskId::new("task-attachment-reconcile");
+        let run_id = RunId::new("run-attachment-reconcile");
+        store
+            .record_transition(
+                &TransitionRecord {
+                    task_id: task_id.clone(),
+                    run_id: run_id.clone(),
+                    expected_revision: 0,
+                    next_revision: 1,
+                    event_kind: "attach_file_prepared".into(),
+                    event_payload_json: json!({"fileName":"notes.txt","sha256":"abc"}).to_string(),
+                    materialized_state_json: "{}".into(),
+                    effect_kind: "attach_file".into(),
+                    effect_payload_json: json!({"fileName":"notes.txt","sha256":"abc"}).to_string(),
+                    idempotency_key: "attach-reconcile".into(),
+                    prepared_dispatch: None,
+                    prepared_approval: None,
+                },
+                100,
+            )
+            .unwrap();
+        let effect = store.pending_effects(10).unwrap().remove(0);
+        assert_eq!(
+            reconcile_pending_effect(&mut store, &ChatSurfaceSnapshot::default(), &effect).unwrap(),
+            StartupReconcileOutcome::DeferredToRunWorker
+        );
+        assert_eq!(store.pending_effects(10).unwrap().len(), 1);
     }
 
     #[tokio::test]

@@ -22,6 +22,10 @@ OPTIONS_WORDS = ("approval options", "options", "审批选项", "授权选项")
 COPY_WORDS = ("copy", "复制")
 STOP_WORDS = ("stop generating", "stop", "停止生成", "停止回答")
 SEND_WORDS = ("send", "send message", "发送", "发送消息")
+ATTACH_WORDS = ("attach", "attach files", "add files", "add photos & files", "添加文件", "附件")
+UPLOAD_WORDS = ("upload files", "upload from computer", "from computer", "上传文件", "从电脑上传")
+REMOVE_ATTACHMENT_WORDS = ("remove attachment", "remove file", "删除附件", "移除附件")
+FILE_CHOOSER_WORDS = ("open", "choose", "select", "upload", "file", "打开", "选择", "上传", "文件")
 RETRY_WORDS = ("retry", "重试")
 GOT_IT_WORDS = ("got it", "明白了", "知道了")
 RATE_LIMIT_TEXT = ("too many requests", "request too frequent", "请求过于频繁")
@@ -112,6 +116,7 @@ def flattened(app):
             "text": txt,
             "enabled": enabled(node),
             "visible": visible(node),
+            "focused": state(node, pyatspi.STATE_FOCUSED),
         })
     return out
 
@@ -523,10 +528,114 @@ def snapshot():
         "hydration": "ready" if composer else "loading",
         "reasoning_picker_available": picker,
         "selected_reasoning_preset": selected,
-        "attachment_ready": True,
+        "attachment_ready": any_attachment_ready(items),
         "blocker_or_modal": False,
         "progress_fingerprint": progress,
     }
+
+def attachment_ready_for(items, file_name):
+    wanted = file_name.strip().lower()
+    if not wanted:
+        return False
+    for item in items:
+        if not item["visible"]:
+            continue
+        value = normalized(item)
+        if wanted not in value:
+            continue
+        if item["role"] in ("push button", "button", "list item", "label"):
+            if value.strip() == wanted or any(word in value for word in REMOVE_ATTACHMENT_WORDS):
+                return True
+        if "attachment" in value or "uploaded" in value or "附件" in value:
+            return True
+    return False
+
+def any_attachment_ready(items):
+    return any(
+        item["visible"]
+        and item["role"] in ("push button", "button")
+        and any(word in normalized(item) for word in REMOVE_ATTACHMENT_WORDS)
+        for item in items
+    )
+
+def file_chooser_scope(node):
+    current = node
+    for _ in range(10):
+        current = parent_of(current)
+        if current is None:
+            return None
+        current_role = role(current)
+        current_label = (node_name(current) + " " + text_of(current)).strip().lower()
+        if current_role == "file chooser":
+            return current
+        if current_role in ("dialog", "window") and any(word in current_label for word in FILE_CHOOSER_WORDS):
+            return current
+    return None
+
+def desktop_flattened():
+    desktop = pyatspi.Registry.getDesktop(0)
+    out = []
+    for app in desktop:
+        try:
+            app_name = app.name or ""
+        except Exception:
+            app_name = ""
+        for item in flattened(app):
+            item["app_name"] = app_name
+            out.append(item)
+    return out
+
+def attach_file(path):
+    file_name = path.rsplit("/", 1)[-1]
+    app = find_app()
+    items = flattened(app)
+    if attachment_ready_for(items, file_name):
+        return True
+    trigger = find_named(items, ATTACH_WORDS, roles=("push button", "button", "toggle button"), actionable=True)
+    if trigger is None:
+        raise RuntimeError("ChatGPT attachment control not found")
+    if not action(trigger["node"]):
+        raise RuntimeError("ChatGPT attachment control action failed")
+    time.sleep(0.25)
+    items = flattened(app)
+    upload = find_named(items, UPLOAD_WORDS, roles=("menu item", "push button", "button"), actionable=True)
+    if upload is not None:
+        if not action(upload["node"]):
+            raise RuntimeError("ChatGPT upload-files action failed")
+        time.sleep(0.35)
+    # Native Electron file selection is outside the renderer tree. Open the
+    # location entry through the desktop keyboard path, then set the exact path
+    # through Accessibility rather than screen coordinates.
+    pyatspi.Registry.generateKeyboardEvent(0, "l", pyatspi.KEY_PRESSRELEASE | pyatspi.KEY_CONTROL)
+    time.sleep(0.15)
+    candidates = [
+        item for item in desktop_flattened()
+        if item["enabled"] and item["visible"] and item["role"] in ("entry", "text")
+        and item.get("app_name") not in APP_NAMES
+        and file_chooser_scope(item["node"]) is not None
+    ]
+    focused = [item for item in candidates if item["focused"]]
+    if len(focused) == 1:
+        entry = focused[0]["node"]
+    else:
+        location = [
+            item for item in candidates
+            if any(word in normalized(item) for word in ("location", "file name", "filename", "位置", "文件名"))
+        ]
+        if len(location) != 1:
+            raise RuntimeError(
+                "native attachment file chooser did not expose exactly one focused/location entry"
+            )
+        entry = location[0]["node"]
+    try:
+        entry.queryEditableText().setTextContents(path)
+    except Exception as exc:
+        raise RuntimeError("native attachment file chooser location is not editable") from exc
+    pyatspi.Registry.generateKeyboardEvent(65293, None, pyatspi.KEY_SYM)
+    return True
+
+def attachment_ready(file_name):
+    return attachment_ready_for(flattened(find_app()), file_name)
 
 def send_prompt(prompt):
     app = find_app()
@@ -689,6 +798,10 @@ def main():
         result = send_prompt(sys.argv[2])
     elif op == "fresh":
         result = start_fresh()
+    elif op == "attach":
+        result = attach_file(sys.argv[2])
+    elif op == "attachment-ready":
+        result = attachment_ready(sys.argv[2])
     elif op == "recover":
         result = recover()
     elif op == "approve":

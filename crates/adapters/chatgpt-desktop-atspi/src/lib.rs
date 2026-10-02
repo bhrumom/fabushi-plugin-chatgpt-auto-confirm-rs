@@ -4,6 +4,8 @@ use fabushi_chatgpt_application::ChatSurfacePort;
 use fabushi_chatgpt_domain::{ChatSurfaceSnapshot, ReasoningPreset};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::fs;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
@@ -90,6 +92,40 @@ impl ChatSurfacePort for ChatGptDesktopAtspi {
         Ok(())
     }
 
+    async fn attach_file(&self, file_name: &str, bytes: &[u8]) -> Result<bool> {
+        let candidate = file_name.trim();
+        if candidate.is_empty()
+            || candidate.contains('/')
+            || candidate.contains('\\')
+            || candidate.contains('\0')
+        {
+            bail!("unsafe desktop attachment file name");
+        }
+        let digest = format!("{:x}", Sha256::digest(bytes));
+        let staging_root = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from))
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+            .unwrap_or_else(std::env::temp_dir);
+        let directory = staging_root
+            .join("fabushi-chatgpt-auto-confirm")
+            .join("attachments")
+            .join(&digest);
+        fs::create_dir_all(&directory)
+            .with_context(|| format!("create native attachment staging directory {directory:?}"))?;
+        let path = directory.join(candidate);
+        fs::write(&path, bytes)
+            .with_context(|| format!("write native attachment staging file {path:?}"))?;
+        let path = path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("native attachment staging path is not UTF-8"))?;
+        self.bridge("attach", Some(path)).await
+    }
+
+    async fn attachment_ready(&self, file_name: &str) -> Result<bool> {
+        self.bridge("attachment-ready", Some(file_name)).await
+    }
+
     async fn approve_current_conversation(&self) -> Result<bool> {
         self.bridge("approve", None).await
     }
@@ -170,6 +206,18 @@ mod tests {
         assert!(BRIDGE.contains("KEY_SYM"));
         assert!(BRIDGE.contains("reasoning_position"));
         assert!(BRIDGE.contains("next_position == current"));
+    }
+
+    #[test]
+    fn attachment_projection_is_filename_bound_and_native_action_is_fail_closed() {
+        assert!(BRIDGE.contains("def attachment_ready_for(items, file_name):"));
+        assert!(BRIDGE.contains("wanted not in value"));
+        assert!(BRIDGE.contains("def file_chooser_scope(node):"));
+        assert!(BRIDGE.contains("len(focused) == 1"));
+        assert!(BRIDGE.contains("len(location) != 1"));
+        assert!(!BRIDGE.contains("\"attachment_ready\": True"));
+        assert!(BRIDGE.contains("elif op == \"attach\":"));
+        assert!(BRIDGE.contains("elif op == \"attachment-ready\":"));
     }
 
     #[test]

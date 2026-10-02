@@ -71,6 +71,12 @@ pub trait ChatSurfacePort: Send + Sync {
         Ok(false)
     }
     async fn send_prompt(&self, prompt: &str) -> Result<()>;
+    async fn attach_file(&self, _file_name: &str, _bytes: &[u8]) -> Result<bool> {
+        Ok(false)
+    }
+    async fn attachment_ready(&self, _file_name: &str) -> Result<bool> {
+        Ok(false)
+    }
     async fn expected_dispatch_id(&self) -> Result<Option<DispatchId>> {
         Ok(None)
     }

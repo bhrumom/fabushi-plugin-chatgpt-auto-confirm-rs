@@ -258,13 +258,17 @@
         "crates/runtime/src/lib.rs stages task-scoped attachment bytes through attachment-store and persists SQLite metadata before any desktop run",
         "crates/cli/src/main.rs exposes repeatable --attachment for send and continuous",
         "task_attachments_are_persisted_by_task_identity",
-        "task_attachment_ingestion_persists_bytes_metadata_and_fails_closed_before_send"
+        "task_attachment_ingestion_persists_bytes_metadata_and_fails_closed_before_send",
+        "ChatSurfacePort exposes semantic attach_file(file_name, bytes) and attachment_ready(file_name) without OS paths in domain/application",
+        "DesktopSessionActor serializes native attachment mutation; DurableRunSurface journals attach_file before mutation and settles only after filename/preview readiness",
+        "Linux AT-SPI bridge selects attachment controls semantically, drives the native file chooser without screen coordinates, and fails closed on ambiguous chooser entries",
+        "required_attachment_precedes_send_and_fresh_chat_reattaches",
+        "startup_reconciliation_defers_attachment_to_task_scoped_worker",
+        "45-second readiness window plus 5/10/20/40/60-second task-scoped Supervisor AttachmentWait backoff is production-wired"
       ],
       "missing": [
-        "native desktop attachment effect",
-        "45s readiness/backoff",
-        "fresh-chat reattach",
-        "real acceptance"
+        "exact-head packaged-artifact live Linux attachment acceptance on a real ChatGPT desktop accessibility surface",
+        "macOS native attachment action/readiness parity"
       ]
     },
     {
