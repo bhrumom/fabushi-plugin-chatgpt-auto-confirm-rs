@@ -117,11 +117,13 @@
         "crates/runtime/src/lib.rs",
         "crates/cli/src/main.rs",
         "fresh-handoff dispatch rotation is production-wired and covered by fresh_handoff_rotates_durable_dispatch_identity_and_visible_marker",
-        "exact-head run 36983552114 passed architecture/fmt/workspace tests/clippy/release packaging on Linux and both macOS targets at 2b43e6ec056835342b7966f453f567e406e38b16"
+        "exact-head run 36983552114 passed architecture/fmt/workspace tests/clippy/release packaging on Linux and both macOS targets at 2b43e6ec056835342b7966f453f567e406e38b16",
+        "shared production SupervisorClock + durable task_wakes scheduling in crates/runtime/src/lib.rs and sqlite-store",
+        "rate_limit_deferred_task_does_not_block_runnable_task and restart_wait_uses_original_durable_deadline"
       ],
       "missing": [
-        "fair multi-task supervision",
-        "exact-artifact real acceptance"
+        "exact-artifact real acceptance",
+        "native attachment-wait wiring and live concurrent-task acceptance"
       ]
     },
     {
@@ -160,10 +162,11 @@
       "destination": "application RecoveryState",
       "status": "partial",
       "evidence": [
-        "crates/application/src/lib.rs"
+        "crates/application/src/lib.rs",
+        "production rate-limit cooldown uses task-scoped durable Supervisor wake",
+        "rate_limit_deferred_task_does_not_block_runnable_task"
       ],
       "missing": [
-        "scheduler next-wake integration",
         "desktop notice provenance",
         "acceptance"
       ]
@@ -226,12 +229,18 @@
       "status": "partial",
       "evidence": [
         "crates/runtime/src/lib.rs",
-        "crates/adapters/sqlite-store/src/lib.rs"
+        "crates/adapters/sqlite-store/src/lib.rs",
+        "task_wakes SQLite deadlines + shared SupervisorClock production wiring",
+        "rate_limit_deferred_task_does_not_block_runnable_task",
+        "attachment_backoff_leaves_other_tasks_runnable",
+        "authorization_settlement_is_task_scoped_not_global",
+        "deferred_tasks_wake_in_deadline_order",
+        "restart_wait_uses_original_durable_deadline"
       ],
       "missing": [
         "cross-process durable UI lease acceptance on htch-runtime",
-        "fair multi-task next-wake scheduler",
-        "htch-runtime concurrent-task acceptance"
+        "htch-runtime concurrent-task acceptance",
+        "native attachment wait/retry production wiring"
       ]
     },
     {

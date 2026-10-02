@@ -3,7 +3,7 @@ use fabushi_chatgpt_domain::{DispatchId, RunId, TaskId};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::Value;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitionRecord {
@@ -74,6 +74,14 @@ pub struct ReviewSettlementRecord {
     pub conversation_fingerprint: String,
     pub progress_signature: String,
     pub no_final_since_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskWakeRecord {
+    pub task_id: String,
+    pub run_id: String,
+    pub reason: String,
+    pub wake_at_unix_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +219,17 @@ impl SqliteStore {
                 updated_at_unix_ms INTEGER NOT NULL,
                 PRIMARY KEY(task_id, run_id, phase, round, conversation_fingerprint)
             );
+
+            CREATE TABLE IF NOT EXISTS task_wakes (
+                task_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                wake_at_unix_ms INTEGER NOT NULL,
+                updated_at_unix_ms INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_task_wakes_deadline
+                ON task_wakes(wake_at_unix_ms);
 
             CREATE TABLE IF NOT EXISTS ui_session_leases (
                 lease_name TEXT PRIMARY KEY,
@@ -818,6 +837,92 @@ impl SqliteStore {
             .context("read latest incomplete continuous phase")
     }
 
+    pub fn task_wake(&self, task_id: &TaskId) -> Result<Option<TaskWakeRecord>> {
+        self.connection
+            .query_row(
+                "SELECT task_id, run_id, reason, wake_at_unix_ms
+                 FROM task_wakes WHERE task_id=?1",
+                [task_id.as_str()],
+                |row| {
+                    Ok(TaskWakeRecord {
+                        task_id: row.get(0)?,
+                        run_id: row.get(1)?,
+                        reason: row.get(2)?,
+                        wake_at_unix_ms: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .context("read task wake")
+    }
+
+    pub fn arm_task_wake(
+        &mut self,
+        task_id: &TaskId,
+        run_id: &RunId,
+        reason: &str,
+        requested_wake_at_unix_ms: i64,
+        now_unix_ms: i64,
+    ) -> Result<TaskWakeRecord> {
+        let transaction = self.connection.transaction()?;
+        let existing = transaction
+            .query_row(
+                "SELECT run_id, reason, wake_at_unix_ms
+                 FROM task_wakes WHERE task_id=?1",
+                [task_id.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let wake_at_unix_ms = match existing {
+            Some((existing_run, existing_reason, existing_deadline))
+                if existing_run == run_id.as_str()
+                    && existing_reason == reason
+                    && existing_deadline > now_unix_ms =>
+            {
+                existing_deadline
+            }
+            _ => requested_wake_at_unix_ms,
+        };
+
+        transaction.execute(
+            "INSERT INTO task_wakes(task_id, run_id, reason, wake_at_unix_ms, updated_at_unix_ms)
+             VALUES(?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(task_id) DO UPDATE SET
+               run_id=excluded.run_id,
+               reason=excluded.reason,
+               wake_at_unix_ms=excluded.wake_at_unix_ms,
+               updated_at_unix_ms=excluded.updated_at_unix_ms",
+            params![
+                task_id.as_str(),
+                run_id.as_str(),
+                reason,
+                wake_at_unix_ms,
+                now_unix_ms,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(TaskWakeRecord {
+            task_id: task_id.as_str().to_owned(),
+            run_id: run_id.as_str().to_owned(),
+            reason: reason.to_owned(),
+            wake_at_unix_ms,
+        })
+    }
+
+    pub fn clear_task_wake(&self, task_id: &TaskId) -> Result<bool> {
+        Ok(self.connection.execute(
+            "DELETE FROM task_wakes WHERE task_id=?1",
+            [task_id.as_str()],
+        )? > 0)
+    }
+
     pub fn task_state_json(&self, task_id: &TaskId) -> Result<Option<String>> {
         self.connection
             .query_row(
@@ -1010,7 +1115,7 @@ mod tests {
     #[test]
     fn enables_schema_and_wal_contract() {
         let store = SqliteStore::in_memory().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 2);
+        assert_eq!(store.schema_version().unwrap(), 3);
         assert_eq!(store.count_rows("tasks").unwrap(), 0);
         assert_eq!(store.count_rows("effect_outbox").unwrap(), 0);
     }
@@ -1464,6 +1569,34 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn task_wake_preserves_existing_deadline_across_restart_rearm() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        let task = TaskId::new("task-a");
+        let run = RunId::new("run-a");
+        let first = store
+            .arm_task_wake(&task, &run, "rate_limit_cooldown", 301_000, 1_000)
+            .unwrap();
+        assert_eq!(first.wake_at_unix_ms, 301_000);
+
+        let restored = store
+            .arm_task_wake(&task, &run, "rate_limit_cooldown", 331_000, 31_000)
+            .unwrap();
+        assert_eq!(restored.wake_at_unix_ms, 301_000);
+        assert_eq!(store.task_wake(&task).unwrap().unwrap(), restored);
+
+        let different_run = store
+            .arm_task_wake(
+                &task,
+                &RunId::new("run-b"),
+                "rate_limit_cooldown",
+                400_000,
+                40_000,
+            )
+            .unwrap();
+        assert_eq!(different_run.wake_at_unix_ms, 400_000);
     }
 
     #[test]

@@ -26,6 +26,40 @@ pub const MAX_CONVERSATION_CARRY_CHARS: usize = 64_000;
 pub const GENERIC_HYDRATION_WINDOW: Duration = Duration::from_secs(30);
 pub const GENERIC_HYDRATION_MAX_RECOVERIES: u32 = 2;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WakeReason {
+    Poll,
+    DispatchConfirmation,
+    ReasoningPicker,
+    AttachmentWait,
+    AuthorizationSettlement,
+    AuthorizationSafetyCheck,
+    ReviewNoFinal,
+    RecoveryNavigation,
+    RateLimitCooldown,
+}
+
+impl WakeReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Poll => "poll",
+            Self::DispatchConfirmation => "dispatch_confirmation",
+            Self::ReasoningPicker => "reasoning_picker",
+            Self::AttachmentWait => "attachment_wait",
+            Self::AuthorizationSettlement => "authorization_settlement",
+            Self::AuthorizationSafetyCheck => "authorization_safety_check",
+            Self::ReviewNoFinal => "review_no_final",
+            Self::RecoveryNavigation => "recovery_navigation",
+            Self::RateLimitCooldown => "rate_limit_cooldown",
+        }
+    }
+
+    pub fn is_durable(self) -> bool {
+        !matches!(self, Self::Poll)
+    }
+}
+
 #[async_trait]
 pub trait ChatSurfacePort: Send + Sync {
     async fn observe(&self) -> Result<ChatSurfaceSnapshot>;
@@ -66,6 +100,11 @@ pub trait Clock: Send + Sync {
     }
 
     async fn sleep(&self, duration: Duration);
+
+    async fn sleep_for(&self, reason: WakeReason, duration: Duration) {
+        let _ = reason;
+        self.sleep(duration).await;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -329,7 +368,9 @@ impl<'a> RunPrompt<'a> {
                     dispatch_retries += 1;
                     dispatched = now;
                 }
-                self.clock.sleep(options.poll_interval).await;
+                self.clock
+                    .sleep_for(WakeReason::DispatchConfirmation, options.poll_interval)
+                    .await;
                 continue;
             }
 
@@ -369,7 +410,9 @@ impl<'a> RunPrompt<'a> {
                 }
                 approvals += 1;
                 terminal_since = None;
-                self.clock.sleep(options.poll_interval).await;
+                self.clock
+                    .sleep_for(WakeReason::AuthorizationSettlement, options.poll_interval)
+                    .await;
                 continue;
             }
 
@@ -386,7 +429,9 @@ impl<'a> RunPrompt<'a> {
                     }
                 }
                 terminal_since = None;
-                self.clock.sleep(options.poll_interval).await;
+                self.clock
+                    .sleep_for(WakeReason::AuthorizationSettlement, options.poll_interval)
+                    .await;
                 continue;
             }
 
@@ -402,7 +447,9 @@ impl<'a> RunPrompt<'a> {
                 }
                 if !self.destructive_handoff_is_safe().await? {
                     terminal_since = None;
-                    self.clock.sleep(options.poll_interval).await;
+                    self.clock
+                        .sleep_for(WakeReason::AuthorizationSafetyCheck, options.poll_interval)
+                        .await;
                     continue;
                 }
                 let recovery_prompt =
@@ -459,7 +506,9 @@ impl<'a> RunPrompt<'a> {
                         *tracker = ReviewSettlementTracker::default();
                     }
                 }
-                self.clock.sleep(options.rate_limit_pause).await;
+                self.clock
+                    .sleep_for(WakeReason::RateLimitCooldown, options.rate_limit_pause)
+                    .await;
                 continue;
             }
 
@@ -504,7 +553,12 @@ impl<'a> RunPrompt<'a> {
                     ReviewSettlementDecision::RecoverReviewConversation => {
                         if !self.destructive_handoff_is_safe().await? {
                             terminal_since = None;
-                            self.clock.sleep(options.poll_interval).await;
+                            self.clock
+                                .sleep_for(
+                                    WakeReason::AuthorizationSafetyCheck,
+                                    options.poll_interval,
+                                )
+                                .await;
                             continue;
                         }
                         if let (Some(port), Some(key)) =
@@ -576,7 +630,14 @@ impl<'a> RunPrompt<'a> {
                 continue;
             }
 
-            self.clock.sleep(options.poll_interval).await;
+            let wake_reason = if options.review_identity.is_some() {
+                WakeReason::ReviewNoFinal
+            } else {
+                WakeReason::Poll
+            };
+            self.clock
+                .sleep_for(wake_reason, options.poll_interval)
+                .await;
         }
     }
 
@@ -620,7 +681,12 @@ impl<'a> RunPrompt<'a> {
             return Ok(false);
         }
 
-        self.clock.sleep(NO_APPROVAL_RECHECK_WINDOW).await;
+        self.clock
+            .sleep_for(
+                WakeReason::AuthorizationSafetyCheck,
+                NO_APPROVAL_RECHECK_WINDOW,
+            )
+            .await;
 
         let second = self.surface.observe().await?;
         Ok(!second.authorization_surface_present
@@ -1943,6 +2009,7 @@ mod tests {
 
         assert_eq!(report.state, RunState::Complete);
         assert_eq!(clock.now(), ORDINARY_TERMINAL_STABILITY);
+        assert_eq!(surface.send_count(), 1);
         assert_eq!(surface.fresh_count(), 0);
     }
 
