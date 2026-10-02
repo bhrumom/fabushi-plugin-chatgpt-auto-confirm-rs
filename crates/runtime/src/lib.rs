@@ -3516,10 +3516,8 @@ fn recovery_effect_postcondition(
         if recovery_baseline_was_observably_degraded(payload) {
             return recovery_postcondition(snapshot, payload);
         }
-        return Ok(
-            recovery_postcondition(snapshot, payload)?
-                && recovery_surface_generation_changed(snapshot, payload),
-        );
+        return Ok(recovery_postcondition(snapshot, payload)?
+            && recovery_surface_generation_changed(snapshot, payload));
     }
 
     let baseline_conversation = payload
