@@ -8,31 +8,31 @@
   "target": {
     "repository": "bhrumom/fabushi-plugin-chatgpt-auto-confirm-rs",
     "spec": "docs/specs/desktop-chat-userscript-parity-rust-cli.md",
-    "lastVerifiedExactHead": "fa3d09e0775befbf197128b38f6f1822a0b676ac",
-    "lastVerifiedCiRun": 37063076168,
+    "lastVerifiedExactHead": "6a33d4fd949c37d1daf159d867be3218fa28df5d",
+    "lastVerifiedCiRun": 37065730836,
     "lastVerifiedArtifact": {
-      "id": 11251144391,
+      "id": 11252158901,
       "name": "fabushi-chatgpt-auto-confirm-linux-x86_64",
-      "sha256": "b293e06c1e4addd90a5704929b6de02f7a9de24a39cd51e87b700cb286f0e64b"
+      "sha256": "eb91291c36a71ae4eaa8dba35f82169b04885f24d5b5ff0ed1507d9422d9dd26"
     },
     "lastVerifiedArtifacts": [
       {
-        "id": 11251144391,
+        "id": 11252158901,
         "name": "fabushi-chatgpt-auto-confirm-linux-x86_64",
-        "headSha": "fa3d09e0775befbf197128b38f6f1822a0b676ac",
-        "sha256": "b293e06c1e4addd90a5704929b6de02f7a9de24a39cd51e87b700cb286f0e64b"
+        "headSha": "6a33d4fd949c37d1daf159d867be3218fa28df5d",
+        "sha256": "eb91291c36a71ae4eaa8dba35f82169b04885f24d5b5ff0ed1507d9422d9dd26"
       },
       {
-        "id": 11251039603,
+        "id": 11252966029,
         "name": "fabushi-chatgpt-auto-confirm-macos-aarch64-apple-darwin",
-        "headSha": "fa3d09e0775befbf197128b38f6f1822a0b676ac",
-        "sha256": "db974b2ca033c3012f9ed21052414adff87d8353ad15710d70b968cff91c9158"
+        "headSha": "6a33d4fd949c37d1daf159d867be3218fa28df5d",
+        "sha256": "bc015a80d67416a8844e374fa0164e1754071d9b2a35794996113840db6b5255"
       },
       {
-        "id": 11251945665,
+        "id": 11253060968,
         "name": "fabushi-chatgpt-auto-confirm-macos-x86_64-apple-darwin",
-        "headSha": "fa3d09e0775befbf197128b38f6f1822a0b676ac",
-        "sha256": "8d87830c2647c9cb2bf1bcfaea6dd130676ae3466784e169533264d5f4ed424a"
+        "headSha": "6a33d4fd949c37d1daf159d867be3218fa28df5d",
+        "sha256": "b65aa02caf0a0f12969d25371183125fbcaa368ddc90a139e5c1da5461bd75c1"
       }
     ]
   },
