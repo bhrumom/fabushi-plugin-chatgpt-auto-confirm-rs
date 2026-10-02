@@ -1064,16 +1064,14 @@ impl DesktopRuntime {
                 }
                 tokio::time::sleep(RECOVERED_TERMINAL_STABILITY).await;
                 let second = surface.observe().await?;
-                let Some(report) =
-                    recovered_work_report(&first, &second, &candidate.dispatch_id)
+                let Some(report) = recovered_work_report(&first, &second, &candidate.dispatch_id)
                 else {
                     return Ok(None);
                 };
                 Ok(Some((candidate.run_id, report, None)))
             }
             Phase::Review => {
-                let Some(review) =
-                    recovered_review_report(&first, state, &candidate.dispatch_id)
+                let Some(review) = recovered_review_report(&first, state, &candidate.dispatch_id)
                 else {
                     return Ok(None);
                 };
@@ -1408,9 +1406,11 @@ fn incomplete_phase_matches_state(
         Phase::Work => "work",
         Phase::Review => "review",
     };
-    Ok(payload.get("phase").and_then(serde_json::Value::as_str) == Some(expected_phase)
-        && payload.get("round").and_then(serde_json::Value::as_u64)
-            == Some(u64::from(state.round.get())))
+    Ok(
+        payload.get("phase").and_then(serde_json::Value::as_str) == Some(expected_phase)
+            && payload.get("round").and_then(serde_json::Value::as_u64)
+                == Some(u64::from(state.round.get())),
+    )
 }
 
 fn snapshot_matches_dispatch(snapshot: &ChatSurfaceSnapshot, dispatch_id: &DispatchId) -> bool {
@@ -2398,7 +2398,9 @@ mod actor_tests {
     fn recovered_work_terminal_requires_same_dispatch_boundary_and_static_snapshot() {
         let dispatch_id = DispatchId::new("dispatch-recovered");
         let first = ChatSurfaceSnapshot {
-            conversation_ref: Some(fabushi_chatgpt_domain::ConversationRef::new("conversation-1")),
+            conversation_ref: Some(fabushi_chatgpt_domain::ConversationRef::new(
+                "conversation-1",
+            )),
             user_turn_boundary: Some(UserTurnBoundary::new("u1")),
             current_dispatch_id: Some(dispatch_id.clone()),
             user_turn_ownership: OwnershipConfidence::Strong,
@@ -2419,9 +2421,8 @@ mod actor_tests {
         assert!(recovered_work_report(&first, &wrong_dispatch, &dispatch_id).is_none());
 
         let mut changed_boundary = second;
-        changed_boundary.assistant_response_boundary = Some(
-            fabushi_chatgpt_domain::AssistantResponseBoundary::new("a2"),
-        );
+        changed_boundary.assistant_response_boundary =
+            Some(fabushi_chatgpt_domain::AssistantResponseBoundary::new("a2"));
         assert!(recovered_work_report(&first, &changed_boundary, &dispatch_id).is_none());
     }
 
