@@ -800,18 +800,49 @@ def current_reasoning(items):
             return mapping.get(match.group(1).lower())
     return None
 
-def snapshot():
-    app = find_app()
-    items = flattened(app)
-    composer = None
-    for item in items:
-        if item["role"] == "entry" and item["enabled"] and (
+def composer_candidates(items):
+    return [
+        item for item in items
+        if item["role"] == "entry" and item["enabled"] and item["visible"] and (
             "ask chatgpt" in normalized(item)
             or "message chatgpt" in normalized(item)
             or "询问 chatgpt" in normalized(item)
-        ):
-            composer = item
-            break
+        )
+    ]
+
+def unique_composer(items):
+    candidates = composer_candidates(items)
+    return candidates[0] if len(candidates) == 1 else None
+
+def composer_draft(node):
+    try:
+        children = list(node)
+    except Exception:
+        children = []
+    if children:
+        parts = []
+        for child in children:
+            value = text_of(child).replace("\ufffc", "")
+            if value.startswith("\n"):
+                value = value[1:]
+            parts.append(value.rstrip("\n"))
+        return "\n".join(parts)
+    return text_of(node).replace("\ufffc", "").strip()
+
+def wait_for_composer_draft(expected, timeout_seconds=2.0):
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        composer = unique_composer(flattened(find_app()))
+        if composer is not None and composer_draft(composer["node"]) == expected:
+            return composer
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.05)
+
+def snapshot():
+    app = find_app()
+    items = flattened(app)
+    composer = unique_composer(items)
 
     marker, marker_index = marker_info(items)
     after = items[marker_index + 1 :] if marker_index >= 0 else []
@@ -855,9 +886,7 @@ def snapshot():
     )
     selected = current_reasoning(items)
 
-    draft = ""
-    if composer:
-        draft = composer["text"] or ""
+    draft = composer_draft(composer["node"]) if composer else ""
     response_boundary = hash_text(prose) if marker and prose else None
     strict_review_report = strict_review_report_projection(prose, response_boundary)
     conversation_fingerprint = hash_text((marker or "") + "|" + (response_boundary or "")) if marker else None
@@ -1007,6 +1036,12 @@ def attachment_ready(file_name):
     return attachment_ready_for(flattened(find_app()), file_name)
 
 def set_composer_text(entry, prompt):
+    before = composer_draft(entry)
+    if before and before != prompt:
+        raise RuntimeError("ChatGPT composer contains an unrelated draft; refusing to overwrite it")
+    if before == prompt:
+        return True
+
     try:
         editable = entry.queryEditableText()
     except Exception:
@@ -1024,59 +1059,27 @@ def set_composer_text(entry, prompt):
             focused = bool(entry.queryComponent().grabFocus())
         except Exception:
             focused = False
-        for _ in range(4):
-            if state(entry, pyatspi.STATE_FOCUSED):
-                focused = True
-                break
-            time.sleep(0.025)
-        if not state(entry, pyatspi.STATE_FOCUSED):
-            activated = action(entry)
-            if not activated and not focused:
-                raise RuntimeError("ChatGPT composer could not activate its keyboard surface")
-            for _ in range(12):
-                if state(entry, pyatspi.STATE_FOCUSED):
-                    focused = True
-                    break
-                time.sleep(0.025)
-            # Chromium may retain AT-SPI focus on the document while the
-            # contenteditable ProseMirror owns the internal caret. Exact
-            # composer Text readback below is therefore the final safety proof
-            # before Send, rather than STATE_FOCUSED alone.
-        pyatspi.Registry.generateKeyboardEvent(
-            0, "a", pyatspi.KEY_PRESSRELEASE | pyatspi.KEY_CONTROL
-        )
-        time.sleep(0.03)
-        lines = prompt.split("\n")
-        for index, line in enumerate(lines):
-            if line:
-                pyatspi.Registry.generateKeyboardEvent(0, line, pyatspi.KEY_STRING)
-            if index + 1 < len(lines):
-                pyatspi.Registry.generateKeyboardEvent(65505, None, pyatspi.KEY_PRESS)
-                pyatspi.Registry.generateKeyboardEvent(65293, None, pyatspi.KEY_PRESSRELEASE)
-                pyatspi.Registry.generateKeyboardEvent(65505, None, pyatspi.KEY_RELEASE)
-    time.sleep(0.08)
-    try:
-        observed = entry.queryText().getText(0, -1) or ""
-    except Exception as exc:
-        raise RuntimeError("ChatGPT composer text cannot be verified after update") from exc
-    if observed.replace("\ufffc", "") != prompt:
+        activated = action(entry)
+        if not activated and not focused:
+            raise RuntimeError("ChatGPT composer could not activate its keyboard surface")
+        # Chromium may retain AT-SPI focus on document web while ProseMirror
+        # owns the internal caret. We therefore do not treat STATE_FOCUSED as
+        # the safety proof. The exact semantic draft readback below is.
+        if "\n" in prompt:
+            raise RuntimeError("ChatGPT desktop prepared prompt must be single-line for safe AT-SPI input")
+        pyatspi.Registry.generateKeyboardEvent(0, prompt, pyatspi.KEY_STRING)
+
+    if wait_for_composer_draft(prompt) is None:
         raise RuntimeError("ChatGPT composer did not expose the exact prepared prompt")
     return True
 
 def send_prompt(prompt):
     app = find_app()
     items = flattened(app)
-    entry = None
-    for item in items:
-        if item["role"] == "entry" and item["enabled"] and (
-            "ask chatgpt" in normalized(item) or "message chatgpt" in normalized(item)
-            or "询问 chatgpt" in normalized(item)
-        ):
-            entry = item["node"]
-            break
-    if entry is None:
-        raise RuntimeError("ChatGPT composer is not ready")
-    set_composer_text(entry, prompt)
+    composer = unique_composer(items)
+    if composer is None:
+        raise RuntimeError("ChatGPT composer is not uniquely ready")
+    set_composer_text(composer["node"], prompt)
     time.sleep(0.15)
     items = flattened(app)
     button = find_named(items, SEND_WORDS, roles=("push button", "button"), actionable=True)
@@ -1472,16 +1475,12 @@ def conversation_ref_contract_self_test():
 
 
 def composer_write_contract_self_test():
-    values = {"text": "\ufffc", "focused": False, "shift": False, "select_all": False}
-    events = []
+    values = {"draft": "", "typed": []}
     pyatspi.STATE_FOCUSABLE, pyatspi.STATE_EDITABLE, pyatspi.STATE_FOCUSED = 1001, 1002, 1003
-    pyatspi.KEY_PRESSRELEASE, pyatspi.KEY_CONTROL = 1, 2
-    pyatspi.KEY_PRESS, pyatspi.KEY_STRING, pyatspi.KEY_RELEASE = 4, 8, 16
+    pyatspi.KEY_STRING = 8
     class FakeState:
         def contains(self, which):
-            if which in (pyatspi.STATE_FOCUSABLE, pyatspi.STATE_EDITABLE):
-                return True
-            return which == pyatspi.STATE_FOCUSED and values["focused"]
+            return which in (pyatspi.STATE_FOCUSABLE, pyatspi.STATE_EDITABLE)
     class FakeComponent:
         def grabFocus(self):
             return True
@@ -1490,65 +1489,59 @@ def composer_write_contract_self_test():
         def getName(self, index):
             return "activate"
         def doAction(self, index):
-            # Chromium can leave AT-SPI STATE_FOCUSED on document web even
-            # when this contenteditable owns the internal caret.
             return True
     class FakeText:
-        def getText(self, start, end):
-            return values["text"]
+        def __init__(self, getter): self.getter = getter
+        def getText(self, start, end): return self.getter()
+    class FakeParagraph:
+        name = ""
+        def getRoleName(self): return "paragraph"
+        def queryText(self): return FakeText(lambda: values["draft"] if values["draft"] else "\n\ufffc")
     class FakeEntry:
-        def getState(self):
-            return FakeState()
-        def queryEditableText(self):
-            raise NotImplementedError()
-        def queryComponent(self):
-            return FakeComponent()
-        def queryAction(self):
-            return FakeAction()
-        def queryText(self):
-            return FakeText()
+        name = "Ask ChatGPT"
+        def __iter__(self): return iter([FakeParagraph()])
+        def getRoleName(self): return "entry"
+        def getState(self): return FakeState()
+        def queryEditableText(self): raise NotImplementedError()
+        def queryComponent(self): return FakeComponent()
+        def queryAction(self): return FakeAction()
+        def queryText(self): return FakeText(lambda: "\ufffc")
     class FakeRegistry:
         @staticmethod
         def generateKeyboardEvent(keyval, text, synth):
-            events.append((keyval, text, synth))
-            if text == "a" and synth == (pyatspi.KEY_PRESSRELEASE | pyatspi.KEY_CONTROL):
-                values["select_all"] = True
-            elif keyval == 65505 and synth == pyatspi.KEY_PRESS:
-                values["shift"] = True
-            elif keyval == 65505 and synth == pyatspi.KEY_RELEASE:
-                values["shift"] = False
-            elif keyval == 65293 and synth == pyatspi.KEY_PRESSRELEASE:
-                if not values["shift"]:
-                    raise RuntimeError("Enter without Shift would submit early")
-                if values["select_all"]:
-                    values["text"], values["select_all"] = "", False
-                values["text"] += "\n"
-            elif synth == pyatspi.KEY_STRING:
-                if values["select_all"]:
-                    values["text"], values["select_all"] = "", False
-                values["text"] += text
+            if synth != pyatspi.KEY_STRING: raise RuntimeError("unexpected non-string input")
+            values["typed"].append(text); values["draft"] += text
     pyatspi.Registry = FakeRegistry
-    prepared = "alpha\n\nbeta\n[Fabushi:deadbeef]"
-    if not set_composer_text(FakeEntry(), prepared) or values["text"] != prepared:
-        return False
-    if not events or events[0][1] != "a" or sum(1 for event in events if event[0] == 65293) != 3:
-        return False
-    class BadEntry(FakeEntry):
-        def queryEditableText(self):
-            class Editable:
-                def setTextContents(self, prompt):
-                    pass
-            return Editable()
-        def queryText(self):
-            class BadText:
-                def getText(self, start, end):
-                    return "wrong"
-            return BadText()
+    old_find_app = globals().get("find_app")
+    old_flattened = globals().get("flattened")
+    fake = FakeEntry()
+    globals()["find_app"] = lambda: object()
+    globals()["flattened"] = lambda app: [{
+        "node": fake, "role": "entry", "name": "Ask ChatGPT", "text": "\ufffc",
+        "enabled": True, "visible": True, "focused": False,
+    }]
     try:
-        set_composer_text(BadEntry(), "expected")
-    except RuntimeError as exc:
-        return "exact prepared prompt" in str(exc)
-    return False
+        prepared = "alpha beta [Fabushi:deadbeef]"
+        if composer_draft(fake) != "": return False
+        if not set_composer_text(fake, prepared): return False
+        if values["draft"] != prepared or values["typed"] != [prepared]: return False
+        values["draft"] = "unrelated draft"
+        try:
+            set_composer_text(fake, "different [Fabushi:deadbeef]")
+        except RuntimeError as exc:
+            if "unrelated draft" not in str(exc): return False
+        else:
+            return False
+        values["draft"] = ""
+        try:
+            set_composer_text(fake, "alpha\nbeta")
+        except RuntimeError as exc:
+            return "single-line" in str(exc)
+        return False
+    finally:
+        if old_find_app is not None: globals()["find_app"] = old_find_app
+        if old_flattened is not None: globals()["flattened"] = old_flattened
+
 
 def main():
     op = sys.argv[1]

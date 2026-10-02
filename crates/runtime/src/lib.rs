@@ -1138,7 +1138,7 @@ impl ChatSurfacePort for DurableRunSurface {
         let _mutation_permit = self.mutation_permit().await;
         let baseline = self.surface.observe().await?.user_turn_boundary;
         let dispatch_id = self.dispatch_id.lock().await.clone();
-        let prepared_prompt = format!("{prompt}\n\n[Fabushi:{}]", dispatch_id.as_str());
+        let prepared_prompt = format!("{prompt} [Fabushi:{}]", dispatch_id.as_str());
         let prepared_intent = json!({
             "preparedPrompt": prepared_prompt,
             "dispatchId": dispatch_id.as_str(),
@@ -4326,8 +4326,8 @@ mod actor_tests {
         assert_ne!(first_dispatch, second_dispatch);
         let prompts = fake.prompts.lock().unwrap();
         assert_eq!(prompts.len(), 2);
-        assert!(prompts[0].contains(&format!("[Fabushi:{first_dispatch}]")));
-        assert!(prompts[1].contains(&format!("[Fabushi:{second_dispatch}]")));
+        assert_eq!(prompts[0], format!("hello [Fabushi:{first_dispatch}]"));
+        assert_eq!(prompts[1], format!("hello [Fabushi:{second_dispatch}]"));
 
         drop(surface);
         let _ = std::fs::remove_file(&path);
