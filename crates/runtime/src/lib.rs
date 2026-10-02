@@ -2398,6 +2398,7 @@ mod actor_tests {
     fn recovered_work_terminal_requires_same_dispatch_boundary_and_static_snapshot() {
         let dispatch_id = DispatchId::new("dispatch-recovered");
         let first = ChatSurfaceSnapshot {
+            app_healthy: true,
             conversation_ref: Some(fabushi_chatgpt_domain::ConversationRef::new(
                 "conversation-1",
             )),
