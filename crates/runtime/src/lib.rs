@@ -1934,6 +1934,110 @@ impl Clock for TokioClock {
     }
 }
 
+#[derive(Clone)]
+struct ReattachingDesktopSurface {
+    process: Arc<dyn ChatProcessPort>,
+    surface: Arc<dyn ChatSurfacePort>,
+}
+
+impl ReattachingDesktopSurface {
+    fn new(process: Arc<dyn ChatProcessPort>, surface: Arc<dyn ChatSurfacePort>) -> Self {
+        Self { process, surface }
+    }
+
+    async fn require_running_for_mutation(&self) -> Result<()> {
+        if self.process.health().await? != ChatProcessHealth::Running {
+            bail!(
+                "ChatGPT desktop process is not running before destructive UI mutation; refusing implicit restart/replay"
+            );
+        }
+        Ok(())
+    }
+
+    async fn observe_after_confirmed_restart(&self) -> Result<ChatSurfaceSnapshot> {
+        let mut last_error = None;
+        for _ in 0..40 {
+            if self.process.health().await? == ChatProcessHealth::Running {
+                match self.surface.observe().await {
+                    Ok(snapshot) => return Ok(snapshot),
+                    Err(error) => last_error = Some(error),
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        if let Some(error) = last_error {
+            return Err(error).context(
+                "ChatGPT process restarted but semantic accessibility surface did not reattach",
+            );
+        }
+        bail!("ChatGPT process restart did not reach a running semantic surface")
+    }
+}
+
+#[async_trait]
+impl ChatSurfacePort for ReattachingDesktopSurface {
+    async fn observe(&self) -> Result<ChatSurfaceSnapshot> {
+        if self.process.health().await? != ChatProcessHealth::Running {
+            self.process.ensure_running().await?;
+            return self.observe_after_confirmed_restart().await;
+        }
+        match self.surface.observe().await {
+            Ok(snapshot) => Ok(snapshot),
+            Err(error) => {
+                if self.process.health().await? == ChatProcessHealth::Running {
+                    return Err(error);
+                }
+                self.process.ensure_running().await?;
+                self.observe_after_confirmed_restart().await
+            }
+        }
+    }
+
+    async fn set_reasoning_preset(&self, preset: ReasoningPreset) -> Result<bool> {
+        self.require_running_for_mutation().await?;
+        self.surface.set_reasoning_preset(preset).await
+    }
+
+    async fn send_prompt(&self, prompt: &str) -> Result<()> {
+        self.require_running_for_mutation().await?;
+        self.surface.send_prompt(prompt).await
+    }
+
+    async fn attach_file(&self, file_name: &str, bytes: &[u8]) -> Result<bool> {
+        self.require_running_for_mutation().await?;
+        self.surface.attach_file(file_name, bytes).await
+    }
+
+    async fn attachment_ready(&self, file_name: &str) -> Result<bool> {
+        self.surface.attachment_ready(file_name).await
+    }
+
+    async fn approve_current_conversation(&self) -> Result<bool> {
+        self.require_running_for_mutation().await?;
+        self.surface.approve_current_conversation().await
+    }
+
+    async fn dismiss_rate_limit_notice(&self) -> Result<bool> {
+        self.require_running_for_mutation().await?;
+        self.surface.dismiss_rate_limit_notice().await
+    }
+
+    async fn dismiss_harmless_popup(&self) -> Result<bool> {
+        self.require_running_for_mutation().await?;
+        self.surface.dismiss_harmless_popup().await
+    }
+
+    async fn recover_current_surface(&self) -> Result<()> {
+        self.require_running_for_mutation().await?;
+        self.surface.recover_current_surface().await
+    }
+
+    async fn start_fresh_conversation(&self) -> Result<()> {
+        self.require_running_for_mutation().await?;
+        self.surface.start_fresh_conversation().await
+    }
+}
+
 pub struct DesktopRuntime {
     process: Arc<dyn ChatProcessPort>,
     surface: Arc<dyn ChatSurfacePort>,
@@ -1968,9 +2072,13 @@ impl DesktopRuntime {
         P: ChatProcessPort + 'static,
         S: ChatSurfacePort + 'static,
     {
+        let process: Arc<dyn ChatProcessPort> = Arc::new(process);
+        let raw_surface: Arc<dyn ChatSurfacePort> = Arc::new(surface);
+        let surface: Arc<dyn ChatSurfacePort> =
+            Arc::new(ReattachingDesktopSurface::new(process.clone(), raw_surface));
         Self {
-            process: Arc::new(process),
-            surface: Arc::new(surface),
+            process,
+            surface,
             desktop_session: OnceCell::new(),
             supervisor: OnceCell::new(),
             state_db_path: default_state_db_path(),
@@ -4451,6 +4559,66 @@ mod actor_tests {
         );
         assert_eq!(value["orchestration"]["phase"].as_str(), Some("work"));
         assert_eq!(value["runtime"]["lastEffect"].as_str(), Some("send_prompt"));
+    }
+
+    struct RestartableTestProcess {
+        running: AtomicBool,
+        starts: AtomicUsize,
+    }
+
+    impl RestartableTestProcess {
+        fn stopped() -> Self {
+            Self {
+                running: AtomicBool::new(false),
+                starts: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ChatProcessPort for RestartableTestProcess {
+        async fn health(&self) -> Result<ChatProcessHealth> {
+            Ok(if self.running.load(Ordering::SeqCst) {
+                ChatProcessHealth::Running
+            } else {
+                ChatProcessHealth::NotRunning
+            })
+        }
+
+        async fn ensure_running(&self) -> Result<()> {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            self.running.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn reattaching_surface_restarts_only_for_read_side_observation() {
+        let process = Arc::new(RestartableTestProcess::stopped());
+        let raw = Arc::new(FakeSurface::default());
+        let surface = ReattachingDesktopSurface::new(process.clone(), raw);
+
+        surface.observe().await.unwrap();
+
+        assert!(process.running.load(Ordering::SeqCst));
+        assert_eq!(process.starts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn reattaching_surface_never_restarts_or_replays_destructive_send() {
+        let process = Arc::new(RestartableTestProcess::stopped());
+        let raw = Arc::new(FakeSurface::default());
+        let surface = ReattachingDesktopSurface::new(process.clone(), raw.clone());
+
+        let error = surface.send_prompt("must-not-send").await.unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("refusing implicit restart/replay")
+        );
+        assert_eq!(process.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(raw.send_mutations.load(Ordering::SeqCst), 0);
     }
 
     struct LifecycleTestProcess;
