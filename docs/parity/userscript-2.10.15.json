@@ -7,7 +7,14 @@
   },
   "target": {
     "repository": "bhrumom/fabushi-plugin-chatgpt-auto-confirm-rs",
-    "spec": "docs/specs/desktop-chat-userscript-parity-rust-cli.md"
+    "spec": "docs/specs/desktop-chat-userscript-parity-rust-cli.md",
+    "lastVerifiedExactHead": "4e4c865b3822ff9dd827c6dc6f5416308c2962f0",
+    "lastVerifiedCiRun": 36988199042,
+    "lastVerifiedArtifact": {
+      "id": 11218830078,
+      "name": "fabushi-chatgpt-auto-confirm-linux-x86_64",
+      "sha256": "d1a1b590570a2e279cc9f1f4dac9fd8a8268301e93db2196855decb18b87bf09"
+    }
   },
   "rules": {
     "implementedRequires": [

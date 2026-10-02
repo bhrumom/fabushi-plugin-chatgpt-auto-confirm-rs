@@ -939,7 +939,7 @@ That implementation is **not** desktop ChatGPT userscript parity:
 - continuous Work -> Review parity is incomplete;
 - source 2.10.13-2.10.15 authorization/reasoning races are partially ported: durable approval identity/latch and destructive-only 8s safety-gate wiring now exist with deterministic coverage, but exact-artifact real desktop authorization acceptance and the remaining migration ledger are still open;
 - desktop attachment/model/recovery behavior is not proven;
-- exact-HEAD GitHub Actions run 36712180584 produced packaged artifact 11095270394 (`fabushi-chatgpt-auto-confirm-linux-x86_64`, SHA-256 `f0dc64b86ad08d8cf61633dfdb851ded0ebb69b6f487897953cd6295603ad98d`) for head `95144a5e58af024750c90f79693957a5ce001759`; that artifact did not complete the formal real desktop acceptance run on `htch-runtime`. Every later candidate HEAD must regenerate its own artifact before formal acceptance, so Gates E/F remain unpassed.
+- exact-HEAD GitHub Actions run 36988199042 produced packaged artifact 11218830078 (`fabushi-chatgpt-auto-confirm-linux-x86_64`, SHA-256 `d1a1b590570a2e279cc9f1f4dac9fd8a8268301e93db2196855decb18b87bf09`) for head `4e4c865b3822ff9dd827c6dc6f5416308c2962f0`; that artifact did not complete the formal real desktop acceptance run on `htch-runtime`. Every later candidate HEAD must regenerate its own artifact before formal acceptance, so Gates E/F remain unpassed.
 
 Current PR #2 migration progress on 2026-09-30:
 
