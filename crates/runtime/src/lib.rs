@@ -893,10 +893,7 @@ impl Default for DesktopRuntime {
         }
         #[cfg(target_os = "macos")]
         {
-            Self::new(
-                ChatGptDesktopMacProcess,
-                ChatGptDesktopMacSurface,
-            )
+            Self::new(ChatGptDesktopMacProcess, ChatGptDesktopMacSurface)
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
