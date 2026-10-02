@@ -399,6 +399,7 @@ struct PendingReasoningSettlement {
 #[derive(Debug, Clone)]
 struct PendingSendSettlement {
     effect_id: i64,
+    dispatch_id: DispatchId,
     baseline_user_turn: Option<UserTurnBoundary>,
 }
 
@@ -414,7 +415,7 @@ struct PendingApprovalSettlement {
 struct DurableRunSurface {
     surface: DesktopSessionActorHandle,
     journal: Arc<Mutex<DurableRunJournal>>,
-    dispatch_id: DispatchId,
+    dispatch_id: Arc<Mutex<DispatchId>>,
     phase: Phase,
     round: Round,
     pending_reasoning: Arc<Mutex<Option<PendingReasoningSettlement>>>,
@@ -482,7 +483,7 @@ impl DurableRunSurface {
         Ok(Self {
             surface,
             journal: Arc::new(Mutex::new(journal)),
-            dispatch_id,
+            dispatch_id: Arc::new(Mutex::new(dispatch_id)),
             phase,
             round,
             pending_reasoning: Arc::new(Mutex::new(None)),
@@ -547,7 +548,7 @@ impl DurableRunSurface {
         let Some(pending) = pending else {
             return Ok(false);
         };
-        let confirmed = snapshot.current_dispatch_id.as_ref() == Some(&self.dispatch_id)
+        let confirmed = snapshot.current_dispatch_id.as_ref() == Some(&pending.dispatch_id)
             && snapshot.user_turn_ownership == OwnershipConfidence::Strong
             && snapshot.user_turn_boundary.is_some()
             && snapshot.user_turn_boundary != pending.baseline_user_turn;
@@ -559,7 +560,7 @@ impl DurableRunSurface {
             let mut journal = self.journal.lock().await;
             journal.settle_confirmed_dispatch(
                 pending.effect_id,
-                &self.dispatch_id,
+                &pending.dispatch_id,
                 json!({
                     "ok": true,
                     "detail": "dispatch marker and new strong user turn observed",
@@ -675,13 +676,15 @@ impl ChatSurfacePort for DurableRunSurface {
 
     async fn send_prompt(&self, prompt: &str) -> Result<()> {
         let baseline = self.surface.observe().await?.user_turn_boundary;
+        let dispatch_id = self.dispatch_id.lock().await.clone();
+        let prepared_prompt = format!("{prompt}\n\n[Fabushi:{}]", dispatch_id.as_str());
         let prepared_intent = json!({
-            "preparedPrompt": prompt,
-            "dispatchId": self.dispatch_id.as_str(),
+            "preparedPrompt": prepared_prompt,
+            "dispatchId": dispatch_id.as_str(),
         });
         let effect_payload = json!({
-            "preparedPrompt": prompt,
-            "dispatchId": self.dispatch_id.as_str(),
+            "preparedPrompt": prepared_prompt,
+            "dispatchId": dispatch_id.as_str(),
             "baselineUserTurnBoundary": baseline.as_ref().map(|value| value.as_str()),
         });
         let effect_id = {
@@ -690,7 +693,7 @@ impl ChatSurfacePort for DurableRunSurface {
                 "send_prompt",
                 effect_payload.to_string(),
                 Some(PreparedDispatch {
-                    dispatch_id: self.dispatch_id.clone(),
+                    dispatch_id: dispatch_id.clone(),
                     prepared_intent_json: prepared_intent.to_string(),
                 }),
                 None,
@@ -698,15 +701,20 @@ impl ChatSurfacePort for DurableRunSurface {
         };
         *self.pending_send.lock().await = Some(PendingSendSettlement {
             effect_id,
+            dispatch_id,
             baseline_user_turn: baseline,
         });
 
-        let result = self.surface.send_prompt(prompt).await;
+        let result = self.surface.send_prompt(&prepared_prompt).await;
         if result.is_ok() {
             let snapshot = self.surface.observe().await?;
             self.settle_pending_send_if_observed(&snapshot).await?;
         }
         result
+    }
+
+    async fn expected_dispatch_id(&self) -> Result<Option<DispatchId>> {
+        Ok(Some(self.dispatch_id.lock().await.clone()))
     }
 
     async fn approve_current_conversation(&self) -> Result<bool> {
@@ -813,7 +821,9 @@ impl ChatSurfacePort for DurableRunSurface {
             json!({}),
             self.surface.start_fresh_conversation(),
         )
-        .await
+        .await?;
+        *self.dispatch_id.lock().await = DispatchId::new(dispatch_marker()?);
+        Ok(())
     }
 }
 
@@ -1417,9 +1427,8 @@ impl DesktopRuntime {
         self.ensure_reasoning_preset(&worker.surface, requested_reasoning)
             .await?;
 
-        let prepared = format!("{prompt}\n\n[Fabushi:{marker}]");
         options.expected_dispatch_id = Some(dispatch_id);
-        worker.execute(&prepared, options).await
+        worker.execute(prompt, options).await
     }
 }
 
