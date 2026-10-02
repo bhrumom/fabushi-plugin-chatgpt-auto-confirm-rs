@@ -250,11 +250,13 @@
       "status": "pending",
       "evidence": [
         ".github/workflows/ci.yml packages fabushi-chatgpt-auto-confirm-linux-x86_64 on every exact candidate HEAD",
-        "prior exact-head baseline run 36712180584 / artifact 11095270394 at 95144a5e58af024750c90f79693957a5ce001759",
-        "prior artifact sha256:f0dc64b86ad08d8cf61633dfdb851ded0ebb69b6f487897953cd6295603ad98d"
+        "exact-head run 36977114764 is green at fdc03664f5723753a0524009df13cb1db1c72e3a",
+        "exact-head Linux artifact 11214071237 / fabushi-chatgpt-auto-confirm-linux-x86_64 / sha256:a16ef59e8415bb2cef6f33a9e1f03362203dca52a84ca739b276a54fb0b6a334",
+        "htch-runtime downloaded artifact 11214071237 as a 4741273-byte ZIP and independently matched sha256:a16ef59e8415bb2cef6f33a9e1f03362203dca52a84ca739b276a54fb0b6a334",
+        "the packaged binary itself executed --help and doctor on htch-runtime; doctor is currently blocked before app attach because the Hatch Ubuntu 24.04 desktop session cannot safely launch Electron: root is rejected, unprivileged user namespaces are AppArmor-restricted, the sysctl is read-only, and the package has no SUID chrome-sandbox"
       ],
       "missing": [
-        "current exact-head real canary on htch-runtime",
+        "current exact-head real canary after htch-runtime provides a sandbox-capable non-root ChatGPT desktop session",
         "reasoning journey",
         "terminal journey",
         "approval journey"
