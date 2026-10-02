@@ -1053,9 +1053,18 @@ def attach_file(path):
 def attachment_ready(file_name):
     return attachment_ready_for(flattened(find_app()), file_name)
 
+def fabushi_owned_draft(value):
+    return bool(re.search(r"\\s\\[Fabushi:[0-9a-fA-F]{8,32}(?:\\])?\\s*$", (value or "").strip()))
+
 def set_composer_text(entry, prompt):
     before = composer_draft(entry)
-    if before and before != prompt:
+    replacing_fabushi_draft = (
+        bool(before)
+        and before != prompt
+        and fabushi_owned_draft(before)
+        and fabushi_owned_draft(prompt)
+    )
+    if before and before != prompt and not replacing_fabushi_draft:
         raise RuntimeError("ChatGPT composer contains an unrelated draft; refusing to overwrite it")
     if before == prompt:
         return True
@@ -1085,6 +1094,13 @@ def set_composer_text(entry, prompt):
         # the safety proof. The exact semantic draft readback below is.
         if "\n" in prompt:
             raise RuntimeError("ChatGPT desktop prepared prompt must be single-line for safe AT-SPI input")
+        if replacing_fabushi_draft:
+            pyatspi.Registry.generateKeyboardEvent(
+                0, "a", pyatspi.KEY_PRESSRELEASE | pyatspi.KEY_CONTROL
+            )
+            pyatspi.Registry.generateKeyboardEvent(65288, None, pyatspi.KEY_SYM)
+            if wait_for_composer_draft("") is None:
+                raise RuntimeError("ChatGPT composer did not clear the stale Fabushi draft")
         pyatspi.Registry.generateKeyboardEvent(0, prompt, pyatspi.KEY_STRING)
 
     if wait_for_composer_draft(prompt) is None:
@@ -1625,11 +1641,20 @@ def composer_write_contract_self_test():
         def queryComponent(self): return FakeComponent()
         def queryAction(self): return FakeAction()
         def queryText(self): return FakeText(lambda: "\ufffc")
+    pyatspi.KEY_PRESSRELEASE, pyatspi.KEY_CONTROL, pyatspi.KEY_SYM = 16, 32, 64
     class FakeRegistry:
         @staticmethod
         def generateKeyboardEvent(keyval, text, synth):
-            if synth != pyatspi.KEY_STRING: raise RuntimeError("unexpected non-string input")
-            values["typed"].append(text); values["draft"] += text
+            if synth == pyatspi.KEY_STRING:
+                values["typed"].append(text)
+                values["draft"] += text
+                return
+            if synth == (pyatspi.KEY_PRESSRELEASE | pyatspi.KEY_CONTROL) and text == "a":
+                return
+            if synth == pyatspi.KEY_SYM and keyval == 65288:
+                values["draft"] = ""
+                return
+            raise RuntimeError("unexpected keyboard input")
     pyatspi.Registry = FakeRegistry
     old_find_app = globals().get("find_app")
     old_flattened = globals().get("flattened")
@@ -1651,9 +1676,14 @@ def composer_write_contract_self_test():
             if "unrelated draft" not in str(exc): return False
         else:
             return False
+        values["draft"] = "stale task [Fabushi:feedface"
+        values["typed"] = []
+        if not set_composer_text(fake, "replacement [Fabushi:deadbeef]"): return False
+        if values["draft"] != "replacement [Fabushi:deadbeef]": return False
+        if values["typed"] != ["replacement [Fabushi:deadbeef]"]: return False
         values["draft"] = ""
         try:
-            set_composer_text(fake, "alpha\nbeta")
+            set_composer_text(fake, "alpha\\nbeta")
         except RuntimeError as exc:
             return "single-line" in str(exc)
         return False
