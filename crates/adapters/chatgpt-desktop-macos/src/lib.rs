@@ -4,7 +4,9 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use axuielement::{AXUIElement, system_wide};
 use fabushi_chatgpt_application::{ChatProcessHealth, ChatProcessPort, ChatSurfacePort};
-use fabushi_chatgpt_domain::{ChatSurfaceSnapshot, DraftFingerprint, ReasoningPreset};
+use fabushi_chatgpt_domain::{
+    ChatSurfaceSnapshot, ConversationRef, DraftFingerprint, ReasoningPreset,
+};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -116,6 +118,65 @@ impl ChatGptDesktopMacSurface {
             .flatten()
             .unwrap_or_default()
             .to_lowercase()
+    }
+
+    fn opaque_conversation_ref(uri: &str) -> ConversationRef {
+        ConversationRef::new(format!("ax:sha256:{:x}", Sha256::digest(uri.as_bytes())))
+    }
+
+    fn node_uri(node: &AXUIElement) -> Option<String> {
+        node.string_attribute("AXURL")
+            .ok()
+            .flatten()
+            .filter(|value| !value.trim().is_empty())
+    }
+
+    fn current_conversation_ref(nodes: &[AXUIElement]) -> Option<ConversationRef> {
+        let matches = nodes
+            .iter()
+            .filter(|node| {
+                Self::role(node).as_deref() == Some("AXLink")
+                    && node.bool_attribute("AXSelected").ok().flatten() == Some(true)
+                    && Self::node_uri(node).is_some()
+            })
+            .filter_map(Self::node_uri)
+            .collect::<Vec<_>>();
+        let [uri] = matches.as_slice() else {
+            return None;
+        };
+        Some(Self::opaque_conversation_ref(uri))
+    }
+
+    fn sensitive_dialog_present(nodes: &[AXUIElement]) -> bool {
+        const SENSITIVE: &[&str] = &[
+            "authorization",
+            "authorize",
+            "allow",
+            "reject",
+            "consent",
+            "login",
+            "sign in",
+            "security",
+            "verification",
+            "payment",
+            "billing",
+            "account",
+            "授权",
+            "允许",
+            "拒绝",
+            "登录",
+            "安全",
+            "验证",
+            "支付",
+            "账户",
+        ];
+        nodes.iter().any(|node| {
+            matches!(Self::role(node).as_deref(), Some("AXDialog" | "AXSheet"))
+                && SENSITIVE.iter().any(|word| {
+                    let text = format!("{} {}", Self::label(node), Self::value(node));
+                    text.contains(word)
+                })
+        })
     }
 
     fn reasoning_control(nodes: &[AXUIElement]) -> Option<AXUIElement> {
@@ -364,6 +425,7 @@ impl ChatSurfacePort for ChatGptDesktopMacSurface {
                 Sha256::digest(value.as_bytes())
             )));
         }
+        snapshot.conversation_ref = Self::current_conversation_ref(&nodes);
         Ok(snapshot)
     }
 
@@ -544,6 +606,40 @@ impl ChatSurfacePort for ChatGptDesktopMacSurface {
         bail!("macOS surface recovery is not yet mapped to verified accessibility evidence")
     }
 
+    async fn rebind_conversation(&self, conversation_ref: &ConversationRef) -> Result<bool> {
+        let value = conversation_ref.as_str();
+        let Some(expected_hash) = value.strip_prefix("ax:sha256:") else {
+            return Ok(false);
+        };
+        if expected_hash.len() != 64 || !expected_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Ok(false);
+        }
+
+        let nodes = self.tree()?;
+        if Self::sensitive_dialog_present(&nodes) {
+            return Ok(false);
+        }
+        let candidates = nodes
+            .iter()
+            .filter(|node| Self::role(node).as_deref() == Some("AXLink") && Self::enabled(node))
+            .filter(|node| {
+                Self::node_uri(node)
+                    .map(|uri| Self::opaque_conversation_ref(&uri) == *conversation_ref)
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let [candidate] = candidates.as_slice() else {
+            return Ok(false);
+        };
+        candidate
+            .perform_action("AXPress")
+            .context("rebind ChatGPT conversation through macOS Accessibility")?;
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        Ok(Self::current_conversation_ref(&self.tree()?).as_ref() == Some(conversation_ref))
+    }
+
     async fn start_fresh_conversation(&self) -> Result<()> {
         let nodes = self.tree()?;
         let composers = Self::composers(&nodes);
@@ -609,6 +705,23 @@ impl ChatSurfacePort for ChatGptDesktopMacSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opaque_conversation_ref_never_exposes_native_uri() {
+        let uri = "chatgpt://conversation/native-secret-123";
+        let conversation_ref = ChatGptDesktopMacSurface::opaque_conversation_ref(uri);
+        assert!(conversation_ref.as_str().starts_with("ax:sha256:"));
+        assert_eq!(conversation_ref.as_str().len(), "ax:sha256:".len() + 64);
+        assert!(!conversation_ref.as_str().contains("native-secret-123"));
+    }
+
+    #[test]
+    fn macos_rebind_contract_is_fail_closed_for_foreign_ref_formats() {
+        let foreign = ConversationRef::new(
+            "atspi:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        assert!(!foreign.as_str().starts_with("ax:sha256:"));
+    }
 
     #[test]
     fn attachment_staging_rejects_path_traversal_names() {

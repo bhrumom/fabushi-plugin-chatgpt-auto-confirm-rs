@@ -149,12 +149,13 @@
         "ChatSurfacePort/DesktopSessionActor/DurableRunSurface now expose journaled single-writer rebind_conversation, and incomplete single-task resume rebinds to the persisted ConversationRef before validating the exact dispatch marker",
         "startup scan preserves durable ConversationRef while ambiguous/missing refs and sensitive/authorization surfaces fail closed",
         "DurableRunSurface now captures the current ConversationRef during an in-flight phase as soon as the exact durable dispatch marker has strong user-turn ownership; the state-only transition is idempotent and wrong-dispatch/weak-ownership observations cannot overwrite it",
-        "in_flight_owned_observation_durably_binds_conversation_ref_once proves pre-terminal crash-survivable binding without poll-time revision churn"
+        "in_flight_owned_observation_durably_binds_conversation_ref_once proves pre-terminal crash-survivable binding without poll-time revision churn",
+        "macOS AX adapter hashes the unique selected AXLink AXURL into an opaque ConversationRef and exact-matches the same opaque identity for AXPress rebinding; ambiguous/missing links and sensitive dialog/sheet surfaces fail closed"
       ],
       "missing": [
         "exact-artifact real acceptance",
         "production daemon rotation across multiple independently running server-side conversations",
-        "macOS ConversationRef projection/rebind parity",
+        "macOS exact-head compile/test and live ConversationRef projection/rebind acceptance",
         "live concurrent-task acceptance"
       ]
     },
