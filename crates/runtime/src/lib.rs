@@ -2312,11 +2312,7 @@ impl DesktopRuntime {
             .join("attachments")
     }
 
-    fn initialize_one_shot_task(
-        &self,
-        task_id: &TaskId,
-        run_id: &RunId,
-    ) -> Result<()> {
+    fn initialize_one_shot_task(&self, task_id: &TaskId, run_id: &RunId) -> Result<()> {
         let mut store = SqliteStore::open(&self.state_db_path)?;
         if store.task_state_json(task_id)?.is_some() {
             bail!(
@@ -5156,9 +5152,7 @@ mod actor_tests {
         let task_id = TaskId::new("task-one-shot");
         let run_id = RunId::new("run-one-shot");
 
-        runtime
-            .initialize_one_shot_task(&task_id, &run_id)
-            .unwrap();
+        runtime.initialize_one_shot_task(&task_id, &run_id).unwrap();
 
         let state = SqliteStore::open(&state_db)
             .unwrap()
@@ -5178,9 +5172,7 @@ mod actor_tests {
             ContinuousTaskLifecycle::Active
         );
         assert!(
-            runtime
-                .initialize_one_shot_task(&task_id, &run_id)
-                .is_err(),
+            runtime.initialize_one_shot_task(&task_id, &run_id).is_err(),
             "one-shot identity reuse must fail closed"
         );
         std::fs::remove_dir_all(root).unwrap();
