@@ -108,12 +108,13 @@
         "crates/application/src/lib.rs",
         "crates/adapters/sqlite-store/src/lib.rs",
         "crates/runtime/src/lib.rs",
-        "crates/cli/src/main.rs"
+        "crates/cli/src/main.rs",
+        "fresh-handoff dispatch rotation is production-wired and covered by fresh_handoff_rotates_durable_dispatch_identity_and_visible_marker",
+        "exact-head run 36983552114 passed architecture/fmt/workspace tests/clippy/release packaging on Linux and both macOS targets at 2b43e6ec056835342b7966f453f567e406e38b16"
       ],
       "missing": [
         "pause/resume/cancel lifecycle",
         "fair multi-task supervision",
-        "fresh-handoff dispatch identity rotation",
         "exact-artifact real acceptance"
       ]
     },
@@ -138,10 +139,12 @@
       "status": "partial",
       "evidence": [
         "crates/application/src/lib.rs",
-        "crates/runtime/src/lib.rs"
+        "crates/runtime/src/lib.rs",
+        "fresh handoff now rotates the durable dispatch identity and visible Fabushi marker before resend",
+        "fresh_handoff_rotates_durable_dispatch_identity_and_visible_marker",
+        "exact-head run 36983552114 passed at 2b43e6ec056835342b7966f453f567e406e38b16"
       ],
       "missing": [
-        "fresh handoff dispatch identity rotation instead of reusing the same durable run dispatch identity",
         "exact-artifact real acceptance"
       ]
     },
@@ -250,10 +253,10 @@
       "status": "pending",
       "evidence": [
         ".github/workflows/ci.yml packages fabushi-chatgpt-auto-confirm-linux-x86_64 on every exact candidate HEAD",
-        "exact-head run 36977114764 is green at fdc03664f5723753a0524009df13cb1db1c72e3a",
-        "exact-head Linux artifact 11214071237 / fabushi-chatgpt-auto-confirm-linux-x86_64 / sha256:a16ef59e8415bb2cef6f33a9e1f03362203dca52a84ca739b276a54fb0b6a334",
-        "htch-runtime downloaded artifact 11214071237 as a 4741273-byte ZIP and independently matched sha256:a16ef59e8415bb2cef6f33a9e1f03362203dca52a84ca739b276a54fb0b6a334",
-        "the packaged binary itself executed --help and doctor on htch-runtime; doctor is currently blocked before app attach because the Hatch Ubuntu 24.04 desktop session cannot safely launch Electron: root is rejected, unprivileged user namespaces are AppArmor-restricted, the sysctl is read-only, and the package has no SUID chrome-sandbox"
+        "exact-head run 36983552114 is green at 2b43e6ec056835342b7966f453f567e406e38b16 across Linux, macOS aarch64, and macOS x86_64",
+        "exact-head Linux artifact 11216697406 / fabushi-chatgpt-auto-confirm-linux-x86_64 / sha256:fc9a13c22ea245daf3ea947316aa63721ab9b767feda09064431f5efc11e4392",
+        "htch-runtime downloaded artifact 11216697406 as a 4749480-byte ZIP and independently matched sha256:fc9a13c22ea245daf3ea947316aa63721ab9b767feda09064431f5efc11e4392",
+        "the exact-head packaged binary executed --help and doctor on htch-runtime; doctor is blocked before app attach because the Hatch Ubuntu 24.04 desktop session cannot safely launch Electron: root is rejected, unprivileged user namespaces are AppArmor-restricted, the sysctl is read-only, and the package has no SUID chrome-sandbox"
       ],
       "missing": [
         "current exact-head real canary after htch-runtime provides a sandbox-capable non-root ChatGPT desktop session",
