@@ -154,7 +154,7 @@ impl<'a> RunPrompt<'a> {
         preconfirmed_dispatch: bool,
     ) -> Result<RunReport> {
         let before = self.surface.observe().await?;
-        let mut baseline = before.user_turn_boundary.clone();
+        let baseline = before.user_turn_boundary.clone();
         let mut dispatch_preconfirmed = preconfirmed_dispatch;
         if !dispatch_preconfirmed {
             self.surface.send_prompt(prompt).await?;
@@ -204,7 +204,6 @@ impl<'a> RunPrompt<'a> {
                     && self.destructive_handoff_is_safe().await?
                 {
                     self.surface.start_fresh_conversation().await?;
-                    baseline = self.surface.observe().await?.user_turn_boundary;
                     self.surface.send_prompt(prompt).await?;
                     dispatch_preconfirmed = false;
                     recoveries += 1;
@@ -253,7 +252,6 @@ impl<'a> RunPrompt<'a> {
                 let recovery_prompt =
                     recovery_handoff_prompt(prompt, options.recovery_context.as_ref(), &snapshot)?;
                 self.surface.start_fresh_conversation().await?;
-                baseline = self.surface.observe().await?.user_turn_boundary;
                 self.surface.send_prompt(&recovery_prompt).await?;
                 dispatch_preconfirmed = false;
                 recoveries += 1;
@@ -278,7 +276,6 @@ impl<'a> RunPrompt<'a> {
                         &snapshot,
                     )?;
                     self.surface.start_fresh_conversation().await?;
-                    baseline = self.surface.observe().await?.user_turn_boundary;
                     self.surface.send_prompt(&recovery_prompt).await?;
                     dispatch_preconfirmed = false;
                     recoveries += 1;
@@ -323,7 +320,6 @@ impl<'a> RunPrompt<'a> {
                             &snapshot,
                         )?;
                         self.surface.start_fresh_conversation().await?;
-                        baseline = self.surface.observe().await?.user_turn_boundary;
                         self.surface.send_prompt(&recovery_prompt).await?;
                         dispatch_preconfirmed = false;
                         recoveries += 1;
