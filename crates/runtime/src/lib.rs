@@ -2044,6 +2044,101 @@ mod actor_tests {
         }
     }
 
+    #[derive(Default)]
+    struct DispatchRotationSurface {
+        prompts: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl ChatSurfacePort for DispatchRotationSurface {
+        async fn observe(&self) -> Result<ChatSurfaceSnapshot> {
+            Ok(ChatSurfaceSnapshot {
+                user_turn_boundary: Some(UserTurnBoundary::new("baseline")),
+                ..Default::default()
+            })
+        }
+
+        async fn send_prompt(&self, prompt: &str) -> Result<()> {
+            self.prompts.lock().unwrap().push(prompt.to_owned());
+            Ok(())
+        }
+
+        async fn approve_current_conversation(&self) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn dismiss_rate_limit_notice(&self) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn recover_current_surface(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn start_fresh_conversation(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_handoff_rotates_durable_dispatch_identity_and_visible_marker() {
+        let path = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-dispatch-rotation-{}-{}.sqlite3",
+            std::process::id(),
+            dispatch_marker().unwrap()
+        ));
+        let fake = Arc::new(DispatchRotationSurface::default());
+        let actor_surface: Arc<dyn ChatSurfacePort> = fake.clone();
+        let actor = DesktopSessionActorHandle::spawn(actor_surface);
+        let surface = DurableRunSurface::new(
+            actor,
+            &path,
+            TaskId::new("task-dispatch-rotation"),
+            RunId::new("run-dispatch-rotation"),
+            DispatchId::new("dispatch-initial"),
+            Phase::Work,
+            Round::new(1),
+        )
+        .unwrap();
+
+        surface.send_prompt("hello").await.unwrap();
+        let first_effect = SqliteStore::open(&path)
+            .unwrap()
+            .pending_effects(10)
+            .unwrap()
+            .into_iter()
+            .find(|effect| effect.effect_kind == "send_prompt")
+            .unwrap();
+        let first_payload: serde_json::Value =
+            serde_json::from_str(&first_effect.effect_payload_json).unwrap();
+        let first_dispatch = first_payload["dispatchId"].as_str().unwrap().to_owned();
+
+        surface.start_fresh_conversation().await.unwrap();
+        surface.send_prompt("hello").await.unwrap();
+
+        let second_effect = SqliteStore::open(&path)
+            .unwrap()
+            .pending_effects(10)
+            .unwrap()
+            .into_iter()
+            .find(|effect| effect.effect_kind == "send_prompt")
+            .unwrap();
+        let second_payload: serde_json::Value =
+            serde_json::from_str(&second_effect.effect_payload_json).unwrap();
+        let second_dispatch = second_payload["dispatchId"].as_str().unwrap().to_owned();
+
+        assert_ne!(first_dispatch, second_dispatch);
+        let prompts = fake.prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 2);
+        assert!(prompts[0].contains(&format!("[Fabushi:{first_dispatch}]")));
+        assert!(prompts[1].contains(&format!("[Fabushi:{second_dispatch}]")));
+
+        drop(surface);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
     #[tokio::test]
     async fn run_worker_journals_destructive_effect_before_settlement() {
         let path = std::env::temp_dir().join(format!(
