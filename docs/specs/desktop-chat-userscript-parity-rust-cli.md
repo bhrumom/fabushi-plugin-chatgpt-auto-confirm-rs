@@ -735,7 +735,7 @@ The ledger must be updated as implementation proceeds. `partial` means useful Ru
 | localStorage/IndexedDB | redesigned as SQLite + attachment store | partial: SQLite WAL schema covers required durable tables and atomic effect outbox; attachment-store/runtime migration pending |
 | Browser/CDP host capability glue | not applicable; replace with runtime ports | partial: core port is now ChatSurfacePort and architecture gate rejects BrowserPort/PageSnapshot in domain/application; default doctor/status/send CLI wiring already enters DesktopRuntime, while Chromium/CDP remains only behind explicitly named legacy commands. Packaged exact-artifact desktop acceptance is still pending. |
 | Real desktop ChatGPT acceptance | htch-runtime exact-HEAD artifact gate | pending |
-| macOS Rust CLI compile and packaging | macOS GitHub Actions arm64 + x86_64 | partial: platform composition and native AXUIElement adapter are present; the adapter only exposes initial composer/send semantics. Reasoning, authorization, terminal evidence, recovery, and full continuous-task parity remain pending. Actions results on the exact commit are required before claiming macOS compile support verified |
+| macOS Rust CLI compile and packaging | macOS GitHub Actions arm64 + x86_64 | partial: platform composition and native AXUIElement adapter support composer/send, reasoning selection, and safe new-chat start. Authorization, terminal evidence, recovery, and full continuous-task parity remain pending. Actions results on the exact commit are required before claiming macOS compile support verified |
 
 No row may be marked `implemented` from type scaffolding alone. It requires shipping production wiring plus the highest applicable evidence layer.
 

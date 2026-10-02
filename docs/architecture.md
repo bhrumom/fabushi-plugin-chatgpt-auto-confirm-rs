@@ -236,7 +236,7 @@ Owns Linux AT-SPI2/D-Bus discovery and mapping between the actual ChatGPT deskto
 
 ### chatgpt-desktop-macos
 
-Owns macOS ChatGPT.app process discovery/launch and native AXUIElement access. The initial adapter supports accessibility-tree discovery, exact composer identification, and a unique Send action. Reasoning selection, response/authorization evidence, recovery, and new-chat semantics remain unsupported and must fail closed until mapped and accepted. macOS GitHub Actions builds do not establish desktop behavior parity.
+Owns macOS ChatGPT.app process discovery/launch and native AXUIElement access. The initial adapter supports accessibility-tree discovery, exact composer identification, reasoning-option selection, safe new-chat start, and a unique Send action. Response/authorization evidence and recovery remain unsupported and must fail closed until mapped and accepted. macOS GitHub Actions builds do not establish desktop behavior parity.
 
 It may know roles, labels, hierarchy, Electron accessibility quirks and native dialog details. Those facts never cross the port boundary.
 

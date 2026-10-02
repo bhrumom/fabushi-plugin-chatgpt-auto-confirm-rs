@@ -315,6 +315,63 @@ impl ChatSurfacePort for ChatGptDesktopMacSurface {
     }
 
     async fn start_fresh_conversation(&self) -> Result<()> {
-        bail!("macOS new-chat control is not yet mapped to verified accessibility evidence")
+        let nodes = self.tree()?;
+        let composers = Self::composers(&nodes);
+        let [composer] = composers.as_slice() else {
+            bail!(
+                "expected exactly one enabled ChatGPT composer before starting a new chat, found {}",
+                composers.len()
+            );
+        };
+        let draft = composer
+            .string_attribute("AXValue")
+            .context("read current ChatGPT draft before starting a new chat")?
+            .unwrap_or_default();
+        if !draft.trim().is_empty() {
+            bail!("refusing to leave the current ChatGPT conversation with an unsent draft");
+        }
+        if nodes.iter().any(|node| {
+            Self::role(node).as_deref() == Some("AXButton")
+                && Self::enabled(node)
+                && ["stop generating", "stop responding"]
+                    .iter()
+                    .any(|label| Self::label(node).contains(label))
+        }) {
+            bail!("refusing to start a new chat while ChatGPT is generating a response");
+        }
+        let new_chat = nodes
+            .iter()
+            .filter(|node| {
+                Self::role(node).as_deref() == Some("AXButton")
+                    && Self::enabled(node)
+                    && ["new chat", "new conversation"]
+                        .iter()
+                        .any(|label| Self::label(node).contains(label))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let [button] = new_chat.as_slice() else {
+            bail!(
+                "expected exactly one enabled ChatGPT New chat button, found {}",
+                new_chat.len()
+            );
+        };
+        button
+            .perform_action("AXPress")
+            .context("start a new ChatGPT conversation through Accessibility")?;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let after = self.tree()?;
+        let composers = Self::composers(&after);
+        let [composer] = composers.as_slice() else {
+            bail!("ChatGPT did not expose exactly one composer after starting a new chat");
+        };
+        if composer
+            .string_attribute("AXValue")
+            .context("verify the new ChatGPT composer")?
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            bail!("ChatGPT new conversation composer is not empty after the new-chat action");
+        }
+        Ok(())
     }
 }
