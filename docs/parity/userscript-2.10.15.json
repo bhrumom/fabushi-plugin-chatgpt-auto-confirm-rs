@@ -299,10 +299,10 @@
         "authorization_settlement_is_task_scoped_not_global",
         "deferred_tasks_wake_in_deadline_order",
         "restart_wait_uses_original_durable_deadline",
-        "two-phase durable wake arming fixes SQLite-latency ordering while preserving absolute deadlines; supervisor shutdown after final external handle is deterministic"
+        "two-phase durable wake arming fixes SQLite-latency ordering while preserving absolute deadlines; supervisor shutdown after final external handle is deterministic",
+        "htch-runtime cross-process durable UI lease contract spawns a separate test process holding the production SQLite-backed DesktopSessionActor lease, proves the competing parent process is fenced, and proves acquisition succeeds after child release"
       ],
       "missing": [
-        "cross-process durable UI lease acceptance on htch-runtime",
         "htch-runtime concurrent-task acceptance",
         "exact-artifact live attachment wait/retry acceptance"
       ]

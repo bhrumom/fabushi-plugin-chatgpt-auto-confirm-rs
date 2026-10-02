@@ -4104,6 +4104,81 @@ VmRSS:	   512 kB
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
     }
 
+    #[tokio::test]
+    async fn durable_desktop_session_actor_fences_across_processes() {
+        const CHILD_ENV: &str = "FABUSHI_CROSS_PROCESS_UI_LEASE_CHILD";
+        const DB_ENV: &str = "FABUSHI_CROSS_PROCESS_UI_LEASE_DB";
+        const READY_ENV: &str = "FABUSHI_CROSS_PROCESS_UI_LEASE_READY";
+
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let path = PathBuf::from(std::env::var_os(DB_ENV).expect("child db path"));
+            let ready = PathBuf::from(std::env::var_os(READY_ENV).expect("child ready path"));
+            let surface: Arc<dyn ChatSurfacePort> = Arc::new(FakeSurface::default());
+            let actor = DesktopSessionActorHandle::spawn_durable(surface, &path)
+                .expect("child must acquire durable UI lease");
+            std::fs::write(&ready, b"ready").expect("publish child lease readiness");
+            tokio::time::sleep(Duration::from_millis(750)).await;
+            drop(actor);
+            tokio::time::sleep(Duration::from_millis(75)).await;
+            return;
+        }
+
+        let token = dispatch_marker().unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-ui-lease-cross-process-{}-{token}.sqlite3",
+            std::process::id()
+        ));
+        let ready = path.with_extension("ready");
+        let current_exe = std::env::current_exe().expect("resolve current test executable");
+        let mut child = std::process::Command::new(current_exe)
+            .arg("durable_desktop_session_actor_fences_across_processes")
+            .arg("--nocapture")
+            .env(CHILD_ENV, "1")
+            .env(DB_ENV, &path)
+            .env(READY_ENV, &ready)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn cross-process durable lease holder");
+
+        let ready_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !ready.exists() {
+            if let Some(status) = child.try_wait().expect("poll child lease holder") {
+                panic!("child lease holder exited before readiness: {status}");
+            }
+            assert!(
+                tokio::time::Instant::now() < ready_deadline,
+                "child lease holder did not publish readiness"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let competing_surface: Arc<dyn ChatSurfacePort> = Arc::new(FakeSurface::default());
+        let error = DesktopSessionActorHandle::spawn_durable(competing_surface, &path)
+            .err()
+            .expect("separate process must fence the competing actor");
+        assert!(
+            error
+                .to_string()
+                .contains("owned by another Fabushi process")
+        );
+
+        let status = child.wait().expect("wait for cross-process lease holder");
+        assert!(status.success(), "child lease holder failed: {status}");
+
+        let surface_after_release: Arc<dyn ChatSurfacePort> = Arc::new(FakeSurface::default());
+        let actor_after_release =
+            DesktopSessionActorHandle::spawn_durable(surface_after_release, &path)
+                .expect("lease must be acquirable after child process releases it");
+        drop(actor_after_release);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let _ = std::fs::remove_file(&ready);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
     #[derive(Default)]
     struct BlockingReasoningSurface {
         entered: Notify,
