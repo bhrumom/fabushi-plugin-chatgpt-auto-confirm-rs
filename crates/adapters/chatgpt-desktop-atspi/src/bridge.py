@@ -381,11 +381,15 @@ def bounded_common_ancestor(left, right, max_depth=8):
 def response_local_copy_evidence(items, marker_index, response_text_items):
     if marker_index < 0 or not response_text_items: return False
     marker_node = items[marker_index]["node"]
+    latest_text_item = response_text_items[-1]
     copies = [item for item in items[marker_index + 1:] if item["visible"] and item["role"] in ("push button", "button") and any(word in normalized(item) for word in COPY_WORDS)]
-    for copy_item in copies:
-        for text_item in reversed(response_text_items):
-            scope = bounded_common_ancestor(text_item["node"], copy_item["node"])
-            if scope is not None and not is_descendant(marker_node, scope): return True
+    # Fail closed when more than one assistant response is still mounted after
+    # the owned Fabushi user turn. A Copy from an older response must never
+    # complete the latest response just because both live under a broad turn.
+    for copy_item in reversed(copies):
+        scope = bounded_common_ancestor(latest_text_item["node"], copy_item["node"])
+        if scope is not None and not is_descendant(marker_node, scope):
+            return True
     return False
 
 def marker_info(items):

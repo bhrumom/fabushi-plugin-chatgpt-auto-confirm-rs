@@ -158,6 +158,9 @@ mod tests {
         assert!(BRIDGE.contains(
             "copy_after = response_local_copy_evidence(items, marker_index, response_text_items)"
         ));
+        assert!(BRIDGE.contains("latest_text_item = response_text_items[-1]"));
+        assert!(BRIDGE.contains("for copy_item in reversed(copies):"));
+        assert!(!BRIDGE.contains("for text_item in reversed(response_text_items):"));
         assert!(!BRIDGE.contains("copy_after = any("));
     }
 

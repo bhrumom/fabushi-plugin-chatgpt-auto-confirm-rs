@@ -8,12 +8,12 @@
   "target": {
     "repository": "bhrumom/fabushi-plugin-chatgpt-auto-confirm-rs",
     "spec": "docs/specs/desktop-chat-userscript-parity-rust-cli.md",
-    "lastVerifiedExactHead": "4e24b107315827c1c398be809f5726d5c73cb0f1",
-    "lastVerifiedCiRun": 36990315718,
+    "lastVerifiedExactHead": "ef15d4ad5b65221c01ad964e3dd71b34a45f204a",
+    "lastVerifiedCiRun": 36997940315,
     "lastVerifiedArtifact": {
-      "id": 11219432631,
+      "id": 11222233133,
       "name": "fabushi-chatgpt-auto-confirm-linux-x86_64",
-      "sha256": "d5db20b959d5df9391dbaec8fee0a7d5f96a425f9b24708e115a6cd4bc5c9471"
+      "sha256": "428c77411d6fad015670ad0e1eab639745b4cb65ecfbb3e385bf0e8b470cb1ca"
     }
   },
   "rules": {
@@ -84,7 +84,8 @@
       "evidence": [
         "crates/domain/src/lib.rs",
         "crates/application/src/lib.rs",
-        "crates/adapters/chatgpt-desktop-atspi/src/bridge.py"
+        "crates/adapters/chatgpt-desktop-atspi/src/bridge.py",
+        "AT-SPI response_local_copy_evidence now requires Copy to share a bounded non-document scope with the latest visible response text after the owned Fabushi marker; older response text can no longer satisfy Copy evidence"
       ],
       "missing": [
         "live/virtualized assistant response-boundary hardening",
