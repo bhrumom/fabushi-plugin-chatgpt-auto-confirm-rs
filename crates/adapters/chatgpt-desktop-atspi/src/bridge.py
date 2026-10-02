@@ -1191,6 +1191,12 @@ def new_chat_candidates(items):
 def start_fresh():
     app = find_app()
     items = flattened(app)
+    composer = unique_composer(items)
+    if composer is None:
+        raise RuntimeError("ChatGPT composer is not uniquely ready; refusing destructive fresh conversation")
+    draft = composer_draft(composer["node"])
+    if draft and not fabushi_owned_draft(draft):
+        raise RuntimeError("ChatGPT composer contains an unrelated draft; refusing destructive fresh conversation")
     candidates = new_chat_candidates(items)
     if len(candidates) != 1:
         raise RuntimeError(f"New chat control is not uniquely actionable: {len(candidates)} candidates")
@@ -1663,6 +1669,64 @@ def renderer_error_contract_self_test():
         return False
     return True
 
+def fresh_draft_safety_contract_self_test():
+    class FakeNode:
+        pass
+
+    composer_node = FakeNode()
+    new_chat_node = FakeNode()
+    state = {"draft": "user-owned draft", "actions": 0}
+    old_find_app = globals().get("find_app")
+    old_flattened = globals().get("flattened")
+    old_unique = globals().get("unique_composer")
+    old_candidates = globals().get("new_chat_candidates")
+    old_action = globals().get("action")
+    old_composer_draft = globals().get("composer_draft")
+    globals()["find_app"] = lambda: object()
+    globals()["flattened"] = lambda app: []
+    globals()["unique_composer"] = lambda items: {"node": composer_node}
+    globals()["new_chat_candidates"] = lambda items: [{"node": new_chat_node}]
+    globals()["composer_draft"] = lambda node: state["draft"]
+
+    def fake_action(node):
+        state["actions"] += 1
+        return True
+
+    globals()["action"] = fake_action
+    try:
+        try:
+            start_fresh()
+        except RuntimeError as exc:
+            if "unrelated draft" not in str(exc):
+                return False
+        else:
+            return False
+        if state["draft"] != "user-owned draft" or state["actions"] != 0:
+            return False
+
+        state["draft"] = ""
+        if not start_fresh() or state["actions"] != 1:
+            return False
+
+        state["draft"] = "prepared task [Fabushi:deadbeef]"
+        if not start_fresh() or state["actions"] != 2:
+            return False
+        return True
+    finally:
+        for name, value in (
+            ("find_app", old_find_app),
+            ("flattened", old_flattened),
+            ("unique_composer", old_unique),
+            ("new_chat_candidates", old_candidates),
+            ("action", old_action),
+            ("composer_draft", old_composer_draft),
+        ):
+            if value is None:
+                globals().pop(name, None)
+            else:
+                globals()[name] = value
+
+
 def composer_write_contract_self_test():
     values = {"draft": "", "typed": []}
     pyatspi.STATE_FOCUSABLE, pyatspi.STATE_EDITABLE, pyatspi.STATE_FOCUSED = 1001, 1002, 1003
@@ -1765,6 +1829,8 @@ def main():
         result = renderer_error_contract_self_test()
     elif op == "contract-composer-write":
         result = composer_write_contract_self_test()
+    elif op == "contract-fresh-draft-safety":
+        result = fresh_draft_safety_contract_self_test()
     elif op == "contract-conversation-ref":
         result = conversation_ref_contract_self_test()
     elif op == "contract-response-boundary":
