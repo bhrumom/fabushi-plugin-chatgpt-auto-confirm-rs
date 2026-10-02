@@ -51,6 +51,11 @@ jobs:
         with:
           toolchain: "1.98.0"
           components: rustfmt, clippy
+      - name: Configure Swift runtime lookup on Intel
+        if: matrix.runner == 'macos-15-intel'
+        run: |
+          swift_runtime_paths="$(swiftc -print-target-info | jq -r '.paths.runtimeLibraryPaths | join(":")')"
+          echo "DYLD_LIBRARY_PATH=${swift_runtime_paths}${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
       - name: architecture
         run: ./scripts/check-architecture.sh
       - name: fmt
