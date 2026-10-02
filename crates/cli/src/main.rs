@@ -46,6 +46,18 @@ enum Commands {
         #[arg(long, default_value_t = 3)]
         reasoning: u8,
     },
+    Pause {
+        #[arg(long)]
+        task_id: String,
+    },
+    Resume {
+        #[arg(long)]
+        task_id: String,
+    },
+    Cancel {
+        #[arg(long)]
+        task_id: String,
+    },
     LegacyBrowser {
         #[arg(long)]
         browser_binary: Option<PathBuf>,
@@ -151,6 +163,21 @@ async fn main() -> Result<()> {
                 .await
                 .context("ChatGPT desktop continuous automation run failed")?;
             println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Commands::Pause { task_id } => {
+            let runtime = DesktopRuntime::default();
+            let state = runtime.pause_continuous_task(&TaskId::new(task_id))?;
+            println!("{}", serde_json::to_string_pretty(&state)?);
+        }
+        Commands::Resume { task_id } => {
+            let runtime = DesktopRuntime::default();
+            let state = runtime.resume_continuous_task(&TaskId::new(task_id))?;
+            println!("{}", serde_json::to_string_pretty(&state)?);
+        }
+        Commands::Cancel { task_id } => {
+            let runtime = DesktopRuntime::default();
+            let state = runtime.cancel_continuous_task(&TaskId::new(task_id))?;
+            println!("{}", serde_json::to_string_pretty(&state)?);
         }
         Commands::LegacyBrowser {
             browser_binary,

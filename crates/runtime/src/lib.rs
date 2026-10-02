@@ -1,10 +1,10 @@
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use fabushi_chatgpt_application::{
-    ChatProcessHealth, ChatProcessPort, ChatSurfacePort, Clock, ContinuousTaskState,
-    DurableReviewSettlementState, ReasoningDecision, ReasoningGateState, RecoveryRunContext,
-    ReviewRunIdentity, ReviewSettlementKey, ReviewSettlementPort, RunPrompt,
-    parse_strict_review_report,
+    ChatProcessHealth, ChatProcessPort, ChatSurfacePort, Clock, ContinuousTaskLifecycle,
+    ContinuousTaskState, DurableReviewSettlementState, ReasoningDecision, ReasoningGateState,
+    RecoveryRunContext, ReviewRunIdentity, ReviewSettlementKey, ReviewSettlementPort,
+    RunControlPort, RunPrompt, parse_strict_review_report,
 };
 #[cfg(target_os = "linux")]
 use fabushi_chatgpt_desktop_atspi::ChatGptDesktopAtspi;
@@ -897,9 +897,33 @@ impl ReviewSettlementPort for SqliteReviewSettlement {
     }
 }
 
+struct SqliteRunControl {
+    path: PathBuf,
+    task_id: TaskId,
+}
+
+#[async_trait]
+impl RunControlPort for SqliteRunControl {
+    async fn lifecycle(&self) -> Result<ContinuousTaskLifecycle> {
+        let store = SqliteStore::open(&self.path)?;
+        let Some(raw) = store.task_state_json(&self.task_id)? else {
+            return Ok(ContinuousTaskLifecycle::Active);
+        };
+        let root: serde_json::Value =
+            serde_json::from_str(&raw).context("parse durable task state JSON for run control")?;
+        let Some(orchestration) = root.get("orchestration") else {
+            return Ok(ContinuousTaskLifecycle::Active);
+        };
+        let state: ContinuousTaskState = serde_json::from_value(orchestration.clone())
+            .context("parse durable orchestration state for run control")?;
+        Ok(state.lifecycle)
+    }
+}
+
 pub struct RunWorker {
     surface: DurableRunSurface,
     review_settlement: SqliteReviewSettlement,
+    run_control: SqliteRunControl,
 }
 
 impl RunWorker {
@@ -916,7 +940,7 @@ impl RunWorker {
             surface: DurableRunSurface::new(
                 surface,
                 state_db_path,
-                task_id,
+                task_id.clone(),
                 run_id,
                 dispatch_id,
                 phase,
@@ -925,21 +949,35 @@ impl RunWorker {
             review_settlement: SqliteReviewSettlement {
                 path: state_db_path.to_path_buf(),
             },
+            run_control: SqliteRunControl {
+                path: state_db_path.to_path_buf(),
+                task_id,
+            },
         })
     }
 
     async fn execute(&self, prompt: &str, options: RunOptions) -> Result<RunReport> {
         let clock = TokioClock::default();
-        RunPrompt::with_review_settlement(&self.surface, &clock, &self.review_settlement)
-            .execute(prompt, options)
-            .await
+        RunPrompt::with_durable_ports(
+            &self.surface,
+            &clock,
+            &self.review_settlement,
+            &self.run_control,
+        )
+        .execute(prompt, options)
+        .await
     }
 
     async fn resume_existing(&self, prompt: &str, options: RunOptions) -> Result<RunReport> {
         let clock = TokioClock::default();
-        RunPrompt::with_review_settlement(&self.surface, &clock, &self.review_settlement)
-            .resume_confirmed_dispatch(prompt, options)
-            .await
+        RunPrompt::with_durable_ports(
+            &self.surface,
+            &clock,
+            &self.review_settlement,
+            &self.run_control,
+        )
+        .resume_confirmed_dispatch(prompt, options)
+        .await
     }
 }
 
@@ -1242,6 +1280,64 @@ impl DesktopRuntime {
         )
     }
 
+    fn mutate_continuous_task_lifecycle(
+        &self,
+        task_id: &TaskId,
+        lifecycle: ContinuousTaskLifecycle,
+        event_kind: &str,
+    ) -> Result<ContinuousTaskState> {
+        let mut state = self
+            .load_continuous_task_state(task_id)?
+            .ok_or_else(|| anyhow::anyhow!("continuous task not found"))?;
+        if state.completed {
+            bail!("completed continuous task lifecycle cannot be changed");
+        }
+        state = match lifecycle {
+            ContinuousTaskLifecycle::Active => state.resume(),
+            ContinuousTaskLifecycle::Paused => state.pause(),
+            ContinuousTaskLifecycle::Cancelled => state.cancel(),
+        };
+        let control_run = RunId::new(format!("control-{}", dispatch_marker()?));
+        self.persist_continuous_task_state(
+            &state,
+            &control_run,
+            event_kind,
+            json!({"lifecycle": lifecycle}),
+        )?;
+        if matches!(
+            lifecycle,
+            ContinuousTaskLifecycle::Active | ContinuousTaskLifecycle::Cancelled
+        ) {
+            let store = SqliteStore::open(&self.state_db_path)?;
+            store.clear_review_settlements_for_task(task_id)?;
+        }
+        Ok(state)
+    }
+
+    pub fn pause_continuous_task(&self, task_id: &TaskId) -> Result<ContinuousTaskState> {
+        self.mutate_continuous_task_lifecycle(
+            task_id,
+            ContinuousTaskLifecycle::Paused,
+            "continuous_task_paused",
+        )
+    }
+
+    pub fn resume_continuous_task(&self, task_id: &TaskId) -> Result<ContinuousTaskState> {
+        self.mutate_continuous_task_lifecycle(
+            task_id,
+            ContinuousTaskLifecycle::Active,
+            "continuous_task_resumed",
+        )
+    }
+
+    pub fn cancel_continuous_task(&self, task_id: &TaskId) -> Result<ContinuousTaskState> {
+        self.mutate_continuous_task_lifecycle(
+            task_id,
+            ContinuousTaskLifecycle::Cancelled,
+            "continuous_task_cancelled",
+        )
+    }
+
     pub async fn run_continuous(
         &self,
         task_id: TaskId,
@@ -1268,6 +1364,30 @@ impl DesktopRuntime {
             None => ContinuousTaskState::new(task_id.clone(), goal.to_owned(), requested_reasoning),
         };
 
+        if state.lifecycle == ContinuousTaskLifecycle::Paused {
+            return Ok(RunReport {
+                state: RunState::Paused,
+                conversation_ref: None,
+                assistant_text: state.previous_work_result.clone().unwrap_or_default(),
+                approvals_clicked: 0,
+                recoveries: 0,
+                rate_limit_pauses: 0,
+                dispatch_retries: 0,
+                message: "continuous task is paused in durable state".into(),
+            });
+        }
+        if state.lifecycle == ContinuousTaskLifecycle::Cancelled {
+            return Ok(RunReport {
+                state: RunState::Cancelled,
+                conversation_ref: None,
+                assistant_text: state.previous_work_result.clone().unwrap_or_default(),
+                approvals_clicked: 0,
+                recoveries: 0,
+                rate_limit_pauses: 0,
+                dispatch_retries: 0,
+                message: "continuous task is cancelled in durable state".into(),
+            });
+        }
         if state.completed {
             return Ok(RunReport {
                 state: RunState::Complete,
@@ -2586,6 +2706,98 @@ mod actor_tests {
         );
         assert_eq!(value["orchestration"]["phase"].as_str(), Some("work"));
         assert_eq!(value["runtime"]["lastEffect"].as_str(), Some("send_prompt"));
+    }
+
+    struct LifecycleTestProcess;
+
+    #[async_trait]
+    impl ChatProcessPort for LifecycleTestProcess {
+        async fn health(&self) -> Result<ChatProcessHealth> {
+            Ok(ChatProcessHealth::Running)
+        }
+
+        async fn ensure_running(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_pause_resume_cancel_controls_production_run_control() {
+        let path = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-lifecycle-{}-{}.sqlite3",
+            std::process::id(),
+            dispatch_marker().unwrap()
+        ));
+        let runtime = DesktopRuntime::new(LifecycleTestProcess, FakeSurface::default())
+            .with_state_db_path(path.clone());
+        let task_id = TaskId::new("task-lifecycle");
+        let initial =
+            ContinuousTaskState::new(task_id.clone(), "goal".into(), ReasoningPreset::ExtraHigh);
+        runtime
+            .persist_continuous_task_state(
+                &initial,
+                &RunId::new("run-lifecycle"),
+                "continuous_phase_started",
+                json!({"phase":"work","round":1}),
+            )
+            .unwrap();
+
+        let paused = runtime.pause_continuous_task(&task_id).unwrap();
+        assert_eq!(paused.lifecycle, ContinuousTaskLifecycle::Paused);
+        let control = SqliteRunControl {
+            path: path.clone(),
+            task_id: task_id.clone(),
+        };
+        assert_eq!(
+            control.lifecycle().await.unwrap(),
+            ContinuousTaskLifecycle::Paused
+        );
+
+        let store = SqliteStore::open(&path).unwrap();
+        store
+            .store_review_settlement(
+                &ReviewSettlementRecord {
+                    task_id: task_id.as_str().to_owned(),
+                    run_id: "run-review".into(),
+                    phase: "review".into(),
+                    round: 1,
+                    conversation_fingerprint: "conversation-review".into(),
+                    progress_signature: "old-progress".into(),
+                    no_final_since_unix_ms: 1000,
+                },
+                1100,
+            )
+            .unwrap();
+        drop(store);
+
+        let resumed = runtime.resume_continuous_task(&task_id).unwrap();
+        assert_eq!(resumed.lifecycle, ContinuousTaskLifecycle::Active);
+        let store = SqliteStore::open(&path).unwrap();
+        assert!(
+            store
+                .review_settlement(
+                    &task_id,
+                    &RunId::new("run-review"),
+                    "review",
+                    1,
+                    "conversation-review",
+                )
+                .unwrap()
+                .is_none()
+        );
+        drop(store);
+
+        let cancelled = runtime.cancel_continuous_task(&task_id).unwrap();
+        assert_eq!(cancelled.lifecycle, ContinuousTaskLifecycle::Cancelled);
+        let loaded = runtime
+            .load_continuous_task_state(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.lifecycle, ContinuousTaskLifecycle::Cancelled);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
     }
 
     #[tokio::test]

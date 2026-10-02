@@ -113,7 +113,6 @@
         "exact-head run 36983552114 passed architecture/fmt/workspace tests/clippy/release packaging on Linux and both macOS targets at 2b43e6ec056835342b7966f453f567e406e38b16"
       ],
       "missing": [
-        "pause/resume/cancel lifecycle",
         "fair multi-task supervision",
         "exact-artifact real acceptance"
       ]
@@ -225,7 +224,6 @@
       "missing": [
         "cross-process durable UI lease acceptance on htch-runtime",
         "fair multi-task next-wake scheduler",
-        "pause/resume/cancel worker lifecycle",
         "htch-runtime concurrent-task acceptance"
       ]
     },

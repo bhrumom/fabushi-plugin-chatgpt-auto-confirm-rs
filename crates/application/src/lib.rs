@@ -107,6 +107,20 @@ pub trait ReviewSettlementPort: Send + Sync {
     async fn clear_review_settlement(&self, key: &ReviewSettlementKey) -> Result<()>;
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuousTaskLifecycle {
+    #[default]
+    Active,
+    Paused,
+    Cancelled,
+}
+
+#[async_trait]
+pub trait RunControlPort: Send + Sync {
+    async fn lifecycle(&self) -> Result<ContinuousTaskLifecycle>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveryRunContext {
     pub task_id: TaskId,
@@ -168,6 +182,7 @@ pub struct RunPrompt<'a> {
     surface: &'a dyn ChatSurfacePort,
     clock: &'a dyn Clock,
     review_settlement: Option<&'a dyn ReviewSettlementPort>,
+    run_control: Option<&'a dyn RunControlPort>,
 }
 
 impl<'a> RunPrompt<'a> {
@@ -176,6 +191,7 @@ impl<'a> RunPrompt<'a> {
             surface,
             clock,
             review_settlement: None,
+            run_control: None,
         }
     }
 
@@ -188,6 +204,34 @@ impl<'a> RunPrompt<'a> {
             surface,
             clock,
             review_settlement: Some(review_settlement),
+            run_control: None,
+        }
+    }
+
+    pub fn with_durable_ports(
+        surface: &'a dyn ChatSurfacePort,
+        clock: &'a dyn Clock,
+        review_settlement: &'a dyn ReviewSettlementPort,
+        run_control: &'a dyn RunControlPort,
+    ) -> Self {
+        Self {
+            surface,
+            clock,
+            review_settlement: Some(review_settlement),
+            run_control: Some(run_control),
+        }
+    }
+
+    pub fn with_run_control(
+        surface: &'a dyn ChatSurfacePort,
+        clock: &'a dyn Clock,
+        run_control: &'a dyn RunControlPort,
+    ) -> Self {
+        Self {
+            surface,
+            clock,
+            review_settlement: None,
+            run_control: Some(run_control),
         }
     }
 
@@ -214,6 +258,9 @@ impl<'a> RunPrompt<'a> {
         options: RunOptions,
         preconfirmed_dispatch: bool,
     ) -> Result<RunReport> {
+        if let Some(report) = self.lifecycle_report(0, 0, 0, 0).await? {
+            return Ok(report);
+        }
         let before = self.surface.observe().await?;
         let baseline = before.user_turn_boundary.clone();
         let mut dispatch_preconfirmed = preconfirmed_dispatch;
@@ -249,6 +296,12 @@ impl<'a> RunPrompt<'a> {
                     dispatch_retries,
                     message: "run timed out".into(),
                 });
+            }
+            if let Some(report) = self
+                .lifecycle_report(approvals, recoveries, rate_limits, dispatch_retries)
+                .await?
+            {
+                return Ok(report);
             }
 
             let snapshot = self.surface.observe().await?;
@@ -525,6 +578,38 @@ impl<'a> RunPrompt<'a> {
 
             self.clock.sleep(options.poll_interval).await;
         }
+    }
+
+    async fn lifecycle_report(
+        &self,
+        approvals_clicked: u32,
+        recoveries: u32,
+        rate_limit_pauses: u32,
+        dispatch_retries: u32,
+    ) -> Result<Option<RunReport>> {
+        let Some(control) = self.run_control else {
+            return Ok(None);
+        };
+        let (state, message) = match control.lifecycle().await? {
+            ContinuousTaskLifecycle::Active => return Ok(None),
+            ContinuousTaskLifecycle::Paused => {
+                (RunState::Paused, "continuous task paused in durable state")
+            }
+            ContinuousTaskLifecycle::Cancelled => (
+                RunState::Cancelled,
+                "continuous task cancelled in durable state",
+            ),
+        };
+        Ok(Some(RunReport {
+            state,
+            conversation_ref: None,
+            assistant_text: String::new(),
+            approvals_clicked,
+            recoveries,
+            rate_limit_pauses,
+            dispatch_retries,
+            message: message.into(),
+        }))
     }
 
     async fn destructive_handoff_is_safe(&self) -> Result<bool> {
@@ -1362,6 +1447,8 @@ pub struct ContinuousTaskState {
     pub current_next: Option<String>,
     pub reasoning_preset: ReasoningPreset,
     #[serde(default)]
+    pub lifecycle: ContinuousTaskLifecycle,
+    #[serde(default)]
     pub completed: bool,
 }
 
@@ -1376,8 +1463,30 @@ impl ContinuousTaskState {
             previous_work_result: None,
             current_next: None,
             reasoning_preset,
+            lifecycle: ContinuousTaskLifecycle::Active,
             completed: false,
         }
+    }
+
+    pub fn pause(mut self) -> Self {
+        if !self.completed {
+            self.lifecycle = ContinuousTaskLifecycle::Paused;
+        }
+        self
+    }
+
+    pub fn resume(mut self) -> Self {
+        if !self.completed {
+            self.lifecycle = ContinuousTaskLifecycle::Active;
+        }
+        self
+    }
+
+    pub fn cancel(mut self) -> Self {
+        if !self.completed {
+            self.lifecycle = ContinuousTaskLifecycle::Cancelled;
+        }
+        self
     }
 
     pub fn edit_goal(mut self, goal: String) -> Self {
@@ -2507,6 +2616,55 @@ mod tests {
         assert!(tracker.persistent_state(Duration::ZERO, 10_000).is_none());
     }
 
+    struct StaticRunControl(ContinuousTaskLifecycle);
+
+    #[async_trait]
+    impl RunControlPort for StaticRunControl {
+        async fn lifecycle(&self) -> Result<ContinuousTaskLifecycle> {
+            Ok(self.0)
+        }
+    }
+
+    #[tokio::test]
+    async fn paused_task_never_dispatches_ui_send() {
+        let surface = ScriptedSurface::new(vec![ChatSurfaceSnapshot::default()]);
+        let clock = FakeClock::new();
+        let control = StaticRunControl(ContinuousTaskLifecycle::Paused);
+        let report = RunPrompt::with_run_control(&surface, &clock, &control)
+            .execute("must not send", RunOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(report.state, RunState::Paused);
+        assert_eq!(surface.send_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_task_never_dispatches_ui_send() {
+        let surface = ScriptedSurface::new(vec![ChatSurfaceSnapshot::default()]);
+        let clock = FakeClock::new();
+        let control = StaticRunControl(ContinuousTaskLifecycle::Cancelled);
+        let report = RunPrompt::with_run_control(&surface, &clock, &control)
+            .execute("must not send", RunOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(report.state, RunState::Cancelled);
+        assert_eq!(surface.send_count(), 0);
+    }
+
+    #[test]
+    fn continuous_lifecycle_pause_resume_cancel_is_durable_state() {
+        let state = ContinuousTaskState::new(task_id(), "goal".into(), ReasoningPreset::ExtraHigh);
+        let paused = state.clone().pause();
+        assert_eq!(paused.lifecycle, ContinuousTaskLifecycle::Paused);
+        let resumed = paused.resume();
+        assert_eq!(resumed.lifecycle, ContinuousTaskLifecycle::Active);
+        let cancelled = resumed.cancel();
+        assert_eq!(cancelled.lifecycle, ContinuousTaskLifecycle::Cancelled);
+        let decoded: ContinuousTaskState =
+            serde_json::from_str(&serde_json::to_string(&cancelled).unwrap()).unwrap();
+        assert_eq!(decoded.lifecycle, ContinuousTaskLifecycle::Cancelled);
+    }
+
     #[test]
     fn recovery_envelope_is_versioned_bounded_and_carries_visible_work() {
         let snapshot = ChatSurfaceSnapshot {
@@ -2580,6 +2738,7 @@ mod tests {
             previous_work_result: None,
             current_next: None,
             reasoning_preset: ReasoningPreset::ExtraHigh,
+            lifecycle: ContinuousTaskLifecycle::Active,
             completed: false,
         }
         .edit_goal("new".into());

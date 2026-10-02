@@ -600,6 +600,15 @@ impl SqliteStore {
         Ok(())
     }
 
+    pub fn clear_review_settlements_for_task(&self, task_id: &TaskId) -> Result<usize> {
+        self.connection
+            .execute(
+                "DELETE FROM review_settlement_states WHERE task_id=?1",
+                [task_id.as_str()],
+            )
+            .context("clear review settlements for task")
+    }
+
     pub fn approval_fingerprint(
         &self,
         fingerprint: &str,
