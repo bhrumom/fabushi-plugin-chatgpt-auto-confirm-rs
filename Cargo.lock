@@ -449,6 +449,7 @@ dependencies = [
  "fabushi-chatgpt-domain",
  "fabushi-chatgpt-linux-browser",
  "fabushi-chatgpt-sqlite-store",
+ "futures-util",
  "serde_json",
  "sha2",
  "tokio",

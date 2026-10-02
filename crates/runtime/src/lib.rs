@@ -19,6 +19,7 @@ use fabushi_chatgpt_sqlite_store::{
     PreparedDispatch, ReviewSettlementRecord, SqliteStore, StateTransitionRecord,
     TaskDeletionRecord, TransitionRecord, UiSessionLease,
 };
+use futures_util::future::join_all;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -402,13 +403,17 @@ impl DurableRunJournal {
         hasher.update(effect_payload_json.as_bytes());
         let idempotency_key = format!("run-effect:{:x}", hasher.finalize());
         let existing_state = self.store.task_state_json(&self.task_id)?;
-        let materialized_state_json = merge_task_runtime_state(
+        let mut materialized_state_json = merge_task_runtime_state(
             existing_state.as_deref(),
             &self.task_id,
             &self.run_id,
             next_revision,
             effect_kind,
         )?;
+        if effect_kind == "start_fresh_conversation" {
+            materialized_state_json =
+                clear_orchestration_conversation_ref(&materialized_state_json)?;
+        }
         self.store.record_transition(
             &TransitionRecord {
                 task_id: self.task_id.clone(),
@@ -477,6 +482,20 @@ impl DurableRunJournal {
             &settlement.to_string(),
             unix_time_ms()?,
         )
+    }
+
+    fn conversation_ref(&self) -> Result<Option<ConversationRef>> {
+        let Some(raw) = self.store.task_state_json(&self.task_id)? else {
+            return Ok(None);
+        };
+        let root: serde_json::Value = serde_json::from_str(&raw)
+            .context("parse durable task state for conversation binding")?;
+        let Some(orchestration) = root.get("orchestration") else {
+            return Ok(None);
+        };
+        let state: ContinuousTaskState = serde_json::from_value(orchestration.clone())
+            .context("parse continuous task state for conversation binding")?;
+        Ok(state.conversation_ref)
     }
 
     fn bind_owned_conversation_ref(
@@ -565,6 +584,13 @@ struct DurableRunIdentity {
     dispatch_id: DispatchId,
     phase: Phase,
     round: Round,
+}
+
+struct RunPromptIdentity {
+    task_id: TaskId,
+    run_id: RunId,
+    start_fresh: bool,
+    task_scoped_reconciliation: bool,
 }
 
 #[derive(Clone)]
@@ -1012,12 +1038,39 @@ impl DurableRunSurface {
         }
         Ok(())
     }
+
+    async fn observe_bound_surface(&self) -> Result<ChatSurfaceSnapshot> {
+        let expected = self.journal.lock().await.conversation_ref()?;
+        let mut snapshot = self.surface.observe().await?;
+        let Some(expected) = expected else {
+            return Ok(snapshot);
+        };
+        if snapshot.conversation_ref.as_ref() == Some(&expected) {
+            return Ok(snapshot);
+        }
+
+        self.foreground_gate.acquire_exclusive(&self.task_id).await;
+        if !self.rebind_conversation(&expected).await? {
+            bail!(
+                "task {} could not rebind to its durable ConversationRef before observation",
+                self.task_id.as_str()
+            );
+        }
+        snapshot = self.surface.observe().await?;
+        if snapshot.conversation_ref.as_ref() != Some(&expected) {
+            bail!(
+                "task {} rebind returned success without the expected ConversationRef postcondition",
+                self.task_id.as_str()
+            );
+        }
+        Ok(snapshot)
+    }
 }
 
 #[async_trait]
 impl ChatSurfacePort for DurableRunSurface {
     async fn observe(&self) -> Result<ChatSurfaceSnapshot> {
-        let mut snapshot = self.surface.observe().await?;
+        let mut snapshot = self.observe_bound_surface().await?;
         self.settle_pending_reasoning_if_observed(&snapshot).await?;
         self.settle_pending_send_if_observed(&snapshot).await?;
         self.project_and_settle_pending_approval(&mut snapshot)
@@ -1919,6 +1972,12 @@ impl SupervisorClock {
     }
 }
 
+impl Drop for SupervisorClock {
+    fn drop(&mut self) {
+        self.supervisor.release_foreground(&self.task_id);
+    }
+}
+
 #[async_trait]
 impl Clock for SupervisorClock {
     fn now(&self) -> Duration {
@@ -1932,7 +1991,12 @@ impl Clock for SupervisorClock {
     async fn sleep_for(&self, reason: WakeReason, duration: Duration) -> Result<()> {
         self.supervisor
             .sleep_for(&self.task_id, &self.run_id, reason, duration)
-            .await
+            .await?;
+        self.supervisor
+            .foreground_gate
+            .acquire_exclusive(&self.task_id)
+            .await;
+        Ok(())
     }
 }
 
@@ -1951,14 +2015,6 @@ pub struct RunWorker {
     load_failure_state: SqliteLoadFailureState,
     run_control: SqliteRunControl,
     clock: SupervisorClock,
-}
-
-impl Drop for RunWorker {
-    fn drop(&mut self) {
-        self.clock
-            .supervisor
-            .release_foreground(&self.clock.task_id);
-    }
 }
 
 impl RunWorker {
@@ -2026,7 +2082,13 @@ impl RunWorker {
         self.clock
             .supervisor
             .wait_existing(&self.clock.task_id, &self.clock.run_id)
-            .await
+            .await?;
+        self.clock
+            .supervisor
+            .foreground_gate
+            .acquire_exclusive(&self.clock.task_id)
+            .await;
+        Ok(())
     }
 
     async fn execute(&self, prompt: &str, options: RunOptions) -> Result<RunReport> {
@@ -2393,35 +2455,35 @@ impl DesktopRuntime {
         }
     }
 
-    async fn reconcile_unsettled_effects_before_run(&self) -> Result<()> {
+    fn reconcile_unsettled_effects_from_snapshot(
+        &self,
+        snapshot: &ChatSurfaceSnapshot,
+        task_scope: Option<&TaskId>,
+    ) -> Result<()> {
         self.reconcile_pending_task_deletions()?;
-        let surface = self.desktop_session().await?;
-        let snapshot = surface.observe().await?;
         let mut store = SqliteStore::open(&self.state_db_path)?;
         let pending = store.pending_effects(STARTUP_PENDING_EFFECT_LIMIT)?;
         if pending.is_empty() {
             return Ok(());
         }
 
-        let mut settled_any = false;
-        for effect in pending {
-            match reconcile_pending_effect(&mut store, &snapshot, &effect)? {
-                StartupReconcileOutcome::Clear | StartupReconcileOutcome::DeferredToRunWorker => {}
-                StartupReconcileOutcome::SettledObservedSend
-                | StartupReconcileOutcome::SettledObservedReasoning
-                | StartupReconcileOutcome::SettledObservedApproval
-                | StartupReconcileOutcome::SettledObservedFreshConversation
-                | StartupReconcileOutcome::SettledObservedRecovery
-                | StartupReconcileOutcome::SettledAmbiguousExplicitLoadRecovery => {
-                    settled_any = true;
-                }
-            }
+        for effect in pending.iter().filter(|effect| {
+            task_scope
+                .map(|task_id| effect.task_id == task_id.as_str())
+                .unwrap_or(true)
+        }) {
+            let _ = reconcile_pending_effect(&mut store, snapshot, effect)?;
         }
 
         let remaining = store.pending_effects(STARTUP_PENDING_EFFECT_LIMIT)?;
         let blocking = remaining
             .iter()
-            .filter(|effect| effect.effect_kind != "attach_file")
+            .filter(|effect| {
+                effect.effect_kind != "attach_file"
+                    && task_scope
+                        .map(|task_id| effect.task_id == task_id.as_str())
+                        .unwrap_or(true)
+            })
             .collect::<Vec<_>>();
         if !blocking.is_empty() {
             let sample = blocking
@@ -2435,22 +2497,31 @@ impl DesktopRuntime {
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
+            let scope = task_scope
+                .map(|task_id| format!(" for task {}", task_id.as_str()))
+                .unwrap_or_default();
             bail!(
-                "unsettled destructive effects remain after startup reconciliation; refusing a new desktop mutation run to avoid duplicate effects: {sample}"
+                "unsettled destructive effects remain after startup reconciliation{scope}; refusing a new desktop mutation run to avoid duplicate effects: {sample}"
             );
         }
-
-        let _ = settled_any;
         Ok(())
+    }
+
+    fn reconcile_task_effects_from_snapshot(
+        &self,
+        task_id: &TaskId,
+        snapshot: &ChatSurfaceSnapshot,
+    ) -> Result<()> {
+        self.reconcile_unsettled_effects_from_snapshot(snapshot, Some(task_id))
     }
 
     async fn resume_incomplete_continuous_phase(
         &self,
         state: &ContinuousTaskState,
         options: &RunOptions,
+        task_scoped_reconciliation: bool,
     ) -> Result<Option<(RunId, RunReport)>> {
         self.ensure_ready().await?;
-        self.reconcile_unsettled_effects_before_run().await?;
 
         let candidate = {
             let store = SqliteStore::open(&self.state_db_path)?;
@@ -2460,23 +2531,6 @@ impl DesktopRuntime {
             return Ok(None);
         };
         if !incomplete_phase_matches_state(&candidate, state)? {
-            return Ok(None);
-        }
-
-        let session = self.desktop_session().await?.clone();
-        let mut snapshot = session.observe().await?;
-        if let Some(conversation_ref) = state.conversation_ref.as_ref()
-            && snapshot.conversation_ref.as_ref() != Some(conversation_ref)
-        {
-            if !session.rebind_conversation(conversation_ref).await? {
-                return Ok(None);
-            }
-            snapshot = session.observe().await?;
-            if snapshot.conversation_ref.as_ref() != Some(conversation_ref) {
-                return Ok(None);
-            }
-        }
-        if !snapshot_matches_dispatch(&snapshot, &candidate.dispatch_id) {
             return Ok(None);
         }
 
@@ -2521,12 +2575,12 @@ impl DesktopRuntime {
         phase_options.expected_dispatch_id = Some(candidate.dispatch_id.clone());
 
         let worker = RunWorker::new(
-            session,
+            self.desktop_session().await?.clone(),
             &self.state_db_path,
             RunWorkerIdentity {
                 task_id: state.task_id.clone(),
                 run_id: candidate.run_id.clone(),
-                dispatch_id: candidate.dispatch_id,
+                dispatch_id: candidate.dispatch_id.clone(),
                 phase,
                 round,
             },
@@ -2539,6 +2593,18 @@ impl DesktopRuntime {
         if let Some(report) = worker.lifecycle_report().await? {
             return Ok(Some((candidate.run_id, report)));
         }
+
+        let mut snapshot = worker.surface.observe().await?;
+        if task_scoped_reconciliation {
+            self.reconcile_task_effects_from_snapshot(&state.task_id, &snapshot)?;
+        } else {
+            self.reconcile_unsettled_effects_from_snapshot(&snapshot, None)?;
+        }
+        snapshot = worker.surface.observe().await?;
+        if !snapshot_matches_dispatch(&snapshot, &candidate.dispatch_id) {
+            return Ok(None);
+        }
+
         let report = worker.resume_existing(&prompt, phase_options).await?;
         Ok(Some((candidate.run_id, report)))
     }
@@ -2582,28 +2648,63 @@ impl DesktopRuntime {
         options: RunOptions,
     ) -> Result<Vec<RunReport>> {
         let states = self.active_continuous_tasks()?;
-        if states.len() > 1 {
-            let ids = states
+        if states.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let store = SqliteStore::open(&self.state_db_path)?;
+        let active_task_ids = states
+            .iter()
+            .map(|state| state.task_id.as_str().to_owned())
+            .collect::<std::collections::HashSet<_>>();
+        let orphaned = store
+            .pending_effects(STARTUP_PENDING_EFFECT_LIMIT)?
+            .into_iter()
+            .filter(|effect| {
+                effect.effect_kind != "attach_file"
+                    && !active_task_ids.contains(effect.task_id.as_str())
+            })
+            .collect::<Vec<_>>();
+        if !orphaned.is_empty() {
+            let sample = orphaned
                 .iter()
-                .map(|state| state.task_id.as_str())
+                .take(4)
+                .map(|effect| format!("{}:{}:{}", effect.task_id, effect.effect_kind, effect.id))
                 .collect::<Vec<_>>()
                 .join(", ");
             bail!(
-                "multiple active continuous tasks require opaque ConversationRef reopen/rebind before startup daemon may mutate the shared desktop UI: {ids}"
+                "durable daemon found destructive pending effects that are not owned by an active continuous task; refusing cross-conversation startup: {sample}"
             );
         }
-        let Some(state) = states.into_iter().next() else {
-            return Ok(Vec::new());
-        };
-        let report = self
-            .run_continuous(
-                state.task_id.clone(),
-                &state.goal,
-                state.reasoning_preset,
-                options,
-            )
-            .await?;
-        Ok(vec![report])
+        for state in &states {
+            if store
+                .latest_incomplete_continuous_phase(&state.task_id)?
+                .is_some()
+                && state.conversation_ref.is_none()
+            {
+                bail!(
+                    "active task {} has an incomplete server-side phase but no durable ConversationRef; refusing multi-conversation startup",
+                    state.task_id.as_str()
+                );
+            }
+        }
+        drop(store);
+
+        let runs = states.into_iter().map(|state| {
+            let options = options.clone();
+            async move {
+                self.run_continuous_with_attachments_mode(
+                    state.task_id.clone(),
+                    &state.goal,
+                    state.reasoning_preset,
+                    options,
+                    &[],
+                    true,
+                )
+                .await
+            }
+        });
+        join_all(runs).await.into_iter().collect()
     }
 
     fn persist_continuous_task_state(
@@ -2777,6 +2878,26 @@ impl DesktopRuntime {
         options: RunOptions,
         attachment_paths: &[PathBuf],
     ) -> Result<RunReport> {
+        self.run_continuous_with_attachments_mode(
+            task_id,
+            goal,
+            requested_reasoning,
+            options,
+            attachment_paths,
+            false,
+        )
+        .await
+    }
+
+    async fn run_continuous_with_attachments_mode(
+        &self,
+        task_id: TaskId,
+        goal: &str,
+        requested_reasoning: ReasoningPreset,
+        options: RunOptions,
+        attachment_paths: &[PathBuf],
+        task_scoped_reconciliation: bool,
+    ) -> Result<RunReport> {
         self.stage_task_attachments(&task_id, attachment_paths)?;
         let loaded_state = self.load_continuous_task_state(&task_id)?;
         let resumed_existing = loaded_state.is_some();
@@ -2836,7 +2957,7 @@ impl DesktopRuntime {
 
         if resumed_existing
             && let Some((run_id, report)) = self
-                .resume_incomplete_continuous_phase(&state, &options)
+                .resume_incomplete_continuous_phase(&state, &options, task_scoped_reconciliation)
                 .await?
         {
             if report.state != RunState::Complete {
@@ -2942,9 +3063,12 @@ impl DesktopRuntime {
                     &prompt,
                     state.reasoning_preset,
                     phase_options,
-                    task_id.clone(),
-                    run_id.clone(),
-                    true,
+                    RunPromptIdentity {
+                        task_id: task_id.clone(),
+                        run_id: run_id.clone(),
+                        start_fresh: true,
+                        task_scoped_reconciliation,
+                    },
                 )
                 .await?;
             if report.state != RunState::Complete {
@@ -3014,9 +3138,12 @@ impl DesktopRuntime {
             prompt,
             requested_reasoning,
             options,
-            task_id,
-            RunId::new(format!("run-{identity_marker}")),
-            false,
+            RunPromptIdentity {
+                task_id,
+                run_id: RunId::new(format!("run-{identity_marker}")),
+                start_fresh: false,
+                task_scoped_reconciliation: false,
+            },
         )
         .await
     }
@@ -3026,12 +3153,15 @@ impl DesktopRuntime {
         prompt: &str,
         requested_reasoning: ReasoningPreset,
         options: RunOptions,
-        task_id: TaskId,
-        run_id: RunId,
-        start_fresh: bool,
+        identity: RunPromptIdentity,
     ) -> Result<RunReport> {
+        let RunPromptIdentity {
+            task_id,
+            run_id,
+            start_fresh,
+            task_scoped_reconciliation,
+        } = identity;
         self.ensure_ready().await?;
-        self.reconcile_unsettled_effects_before_run().await?;
 
         let phase = options
             .run_phase
@@ -3077,6 +3207,12 @@ impl DesktopRuntime {
         worker.wait_until_runnable().await?;
         if let Some(report) = worker.lifecycle_report().await? {
             return Ok(report);
+        }
+        let snapshot = worker.surface.observe().await?;
+        if task_scoped_reconciliation {
+            self.reconcile_task_effects_from_snapshot(&worker.clock.task_id, &snapshot)?;
+        } else {
+            self.reconcile_unsettled_effects_from_snapshot(&snapshot, None)?;
         }
         if start_fresh {
             worker.surface.start_fresh_conversation().await?;
@@ -3143,6 +3279,24 @@ fn merge_task_runtime_state(
             "revision": revision,
             "lastEffect": effect_kind,
         }),
+    );
+    Ok(serde_json::Value::Object(root).to_string())
+}
+
+fn clear_orchestration_conversation_ref(raw: &str) -> Result<String> {
+    let mut root = merge_task_root(Some(raw))?;
+    let Some(orchestration) = root.get("orchestration").cloned() else {
+        return Ok(raw.to_owned());
+    };
+    let mut state: ContinuousTaskState = serde_json::from_value(orchestration)
+        .context("parse continuous task state while clearing conversation ref")?;
+    if state.conversation_ref.is_none() {
+        return Ok(raw.to_owned());
+    }
+    state.conversation_ref = None;
+    root.insert(
+        "orchestration".into(),
+        serde_json::to_value(state).context("serialize conversation-cleared task state")?,
     );
     Ok(serde_json::Value::Object(root).to_string())
 }
@@ -5135,6 +5289,488 @@ mod actor_tests {
         assert_eq!(store.pending_effects(10).unwrap().len(), 1);
     }
 
+    #[derive(Default)]
+    struct RebindTrackingSurface {
+        current_ref: std::sync::Mutex<Option<ConversationRef>>,
+        dispatch_id: std::sync::Mutex<Option<DispatchId>>,
+        rebinds: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ChatSurfacePort for RebindTrackingSurface {
+        async fn observe(&self) -> Result<ChatSurfaceSnapshot> {
+            Ok(ChatSurfaceSnapshot {
+                app_healthy: true,
+                composer_ready: true,
+                conversation_ref: self.current_ref.lock().unwrap().clone(),
+                current_dispatch_id: self.dispatch_id.lock().unwrap().clone(),
+                user_turn_ownership: OwnershipConfidence::Strong,
+                ..Default::default()
+            })
+        }
+
+        async fn rebind_conversation(&self, conversation_ref: &ConversationRef) -> Result<bool> {
+            *self.current_ref.lock().unwrap() = Some(conversation_ref.clone());
+            self.rebinds.fetch_add(1, Ordering::SeqCst);
+            Ok(true)
+        }
+
+        async fn send_prompt(&self, _prompt: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn approve_current_conversation(&self) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn dismiss_rate_limit_notice(&self) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn recover_current_surface(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn start_fresh_conversation(&self) -> Result<()> {
+            *self.current_ref.lock().unwrap() = None;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_observe_rebinds_to_task_conversation_before_projection() {
+        let path = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-bound-observe-{}-{}.sqlite3",
+            std::process::id(),
+            dispatch_marker().unwrap()
+        ));
+        let task_id = TaskId::new("task-bound-observe");
+        let run_id = RunId::new("run-bound-observe");
+        let dispatch_id = DispatchId::new("dispatch-bound-observe");
+        let expected_ref = ConversationRef::new(
+            "atspi:1111111111111111111111111111111111111111111111111111111111111111",
+        );
+        let other_ref = ConversationRef::new(
+            "atspi:2222222222222222222222222222222222222222222222222222222222222222",
+        );
+        let runtime = DesktopRuntime::new(LifecycleTestProcess, FakeSurface::default())
+            .with_state_db_path(path.clone());
+        let state =
+            ContinuousTaskState::new(task_id.clone(), "goal".into(), ReasoningPreset::ExtraHigh)
+                .bind_conversation_ref(Some(expected_ref.clone()));
+        runtime
+            .persist_continuous_task_state(
+                &state,
+                &run_id,
+                "continuous_phase_started",
+                json!({"phase":"work","round":1}),
+            )
+            .unwrap();
+
+        let raw = Arc::new(RebindTrackingSurface::default());
+        *raw.current_ref.lock().unwrap() = Some(other_ref);
+        *raw.dispatch_id.lock().unwrap() = Some(dispatch_id.clone());
+        let actor_surface: Arc<dyn ChatSurfacePort> = raw.clone();
+        let actor = DesktopSessionActorHandle::spawn(actor_surface);
+        let surface = DurableRunSurface::new(
+            actor,
+            &path,
+            task_id,
+            run_id,
+            dispatch_id,
+            Phase::Work,
+            Round::new(1),
+        )
+        .unwrap();
+
+        let snapshot = surface.observe().await.unwrap();
+        assert_eq!(snapshot.conversation_ref, Some(expected_ref));
+        assert_eq!(raw.rebinds.load(Ordering::SeqCst), 1);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[test]
+    fn fresh_effect_atomically_clears_stale_orchestration_conversation_ref() {
+        let path = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-fresh-clear-ref-{}-{}.sqlite3",
+            std::process::id(),
+            dispatch_marker().unwrap()
+        ));
+        let task_id = TaskId::new("task-fresh-clear-ref");
+        let run_id = RunId::new("run-fresh-clear-ref");
+        let old_ref = ConversationRef::new(
+            "atspi:3333333333333333333333333333333333333333333333333333333333333333",
+        );
+        let runtime = DesktopRuntime::new(LifecycleTestProcess, FakeSurface::default())
+            .with_state_db_path(path.clone());
+        let state =
+            ContinuousTaskState::new(task_id.clone(), "goal".into(), ReasoningPreset::ExtraHigh)
+                .bind_conversation_ref(Some(old_ref));
+        runtime
+            .persist_continuous_task_state(
+                &state,
+                &run_id,
+                "continuous_phase_started",
+                json!({"phase":"work","round":1}),
+            )
+            .unwrap();
+
+        let mut journal = DurableRunJournal::open(&path, task_id.clone(), run_id).unwrap();
+        journal
+            .begin(
+                "start_fresh_conversation",
+                json!({"baselineUserTurnBoundary":"u1"}).to_string(),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let restored = runtime
+            .active_continuous_tasks()
+            .unwrap()
+            .into_iter()
+            .find(|state| state.task_id == task_id)
+            .unwrap();
+        assert_eq!(restored.conversation_ref, None);
+        assert!(
+            SqliteStore::open(&path)
+                .unwrap()
+                .pending_effects(10)
+                .unwrap()
+                .iter()
+                .any(|effect| effect.effect_kind == "start_fresh_conversation")
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[test]
+    fn task_scoped_startup_reconciliation_ignores_other_task_effects() {
+        let path = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-task-scoped-reconcile-{}-{}.sqlite3",
+            std::process::id(),
+            dispatch_marker().unwrap()
+        ));
+        let runtime = DesktopRuntime::new(LifecycleTestProcess, FakeSurface::default())
+            .with_state_db_path(path.clone());
+        let task_a = TaskId::new("task-reconcile-a");
+        let task_b = TaskId::new("task-reconcile-b");
+        let mut journal_a =
+            DurableRunJournal::open(&path, task_a.clone(), RunId::new("run-reconcile-a")).unwrap();
+        journal_a
+            .begin(
+                "set_reasoning",
+                json!({"preset": ReasoningPreset::High.index()}).to_string(),
+                None,
+                None,
+            )
+            .unwrap();
+        let mut journal_b =
+            DurableRunJournal::open(&path, task_b.clone(), RunId::new("run-reconcile-b")).unwrap();
+        journal_b
+            .begin(
+                "set_reasoning",
+                json!({"preset": ReasoningPreset::Pro.index()}).to_string(),
+                None,
+                None,
+            )
+            .unwrap();
+
+        runtime
+            .reconcile_task_effects_from_snapshot(
+                &task_a,
+                &ChatSurfaceSnapshot {
+                    selected_reasoning_preset: Some(ReasoningPreset::High),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let pending = SqliteStore::open(&path)
+            .unwrap()
+            .pending_effects(10)
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].task_id, task_b.as_str());
+        assert_eq!(pending[0].effect_kind, "set_reasoning");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[derive(Clone)]
+    struct MultiReviewSurface {
+        inner: Arc<MultiReviewSurfaceInner>,
+    }
+
+    struct MultiReviewSurfaceInner {
+        current_ref: StdMutex<Option<ConversationRef>>,
+        conversations: HashMap<String, (TaskId, DispatchId)>,
+        rebinds: StdMutex<Vec<String>>,
+    }
+
+    impl MultiReviewSurface {
+        fn new(entries: Vec<(ConversationRef, TaskId, DispatchId)>) -> Self {
+            let conversations = entries
+                .into_iter()
+                .map(|(conversation_ref, task_id, dispatch_id)| {
+                    (conversation_ref.as_str().to_owned(), (task_id, dispatch_id))
+                })
+                .collect();
+            Self {
+                inner: Arc::new(MultiReviewSurfaceInner {
+                    current_ref: StdMutex::new(None),
+                    conversations,
+                    rebinds: StdMutex::new(Vec::new()),
+                }),
+            }
+        }
+
+        fn rebound_refs(&self) -> Vec<String> {
+            self.inner
+                .rebinds
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl ChatSurfacePort for MultiReviewSurface {
+        async fn observe(&self) -> Result<ChatSurfaceSnapshot> {
+            let current = self
+                .inner
+                .current_ref
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            let Some(conversation_ref) = current else {
+                return Ok(ChatSurfaceSnapshot {
+                    app_healthy: true,
+                    composer_ready: true,
+                    hydration: HydrationState::Ready,
+                    reasoning_picker_available: true,
+                    selected_reasoning_preset: Some(ReasoningPreset::ExtraHigh),
+                    ..Default::default()
+                });
+            };
+            let (task_id, dispatch_id) = self
+                .inner
+                .conversations
+                .get(conversation_ref.as_str())
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("fixture conversation is not registered"))?;
+            let response_boundary = fabushi_chatgpt_domain::AssistantResponseBoundary::new(
+                format!("response-{}", task_id.as_str()),
+            );
+            let prose = json!({
+                "taskId": task_id.as_str(),
+                "round": 1,
+                "status": "complete",
+                "summary": format!("{} complete", task_id.as_str()),
+                "next": ""
+            })
+            .to_string();
+            Ok(ChatSurfaceSnapshot {
+                app_healthy: true,
+                composer_ready: true,
+                user_turn_boundary: Some(UserTurnBoundary::new(format!(
+                    "user-{}",
+                    task_id.as_str()
+                ))),
+                current_dispatch_id: Some(dispatch_id),
+                user_turn_ownership: OwnershipConfidence::Strong,
+                assistant_response_boundary: Some(response_boundary.clone()),
+                assistant_response_ownership: OwnershipConfidence::Strong,
+                conversation_ref: Some(conversation_ref),
+                conversation_fingerprint: Some(ConversationFingerprint::new(format!(
+                    "fingerprint-{}",
+                    task_id.as_str()
+                ))),
+                assistant_visible_prose: prose,
+                streaming_or_busy: false,
+                stop_available: false,
+                response_local_copy: true,
+                strict_review_report: Some(fabushi_chatgpt_domain::StrictReviewReportEvidence {
+                    task_id,
+                    round: Round::new(1),
+                    status: fabushi_chatgpt_domain::ReviewStatus::Complete,
+                    summary: "fixture complete".into(),
+                    next: None,
+                    response_boundary,
+                }),
+                hydration: HydrationState::Ready,
+                reasoning_picker_available: true,
+                selected_reasoning_preset: Some(ReasoningPreset::ExtraHigh),
+                attachment_ready: true,
+                ..Default::default()
+            })
+        }
+
+        async fn set_reasoning_preset(&self, _preset: ReasoningPreset) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn send_prompt(&self, _prompt: &str) -> Result<()> {
+            bail!("resumed Review fixture must never send a duplicate prompt")
+        }
+
+        async fn approve_current_conversation(&self) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn dismiss_rate_limit_notice(&self) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn recover_current_surface(&self) -> Result<()> {
+            bail!("resumed Review fixture must not recover a healthy surface")
+        }
+
+        async fn start_fresh_conversation(&self) -> Result<()> {
+            bail!("completed resumed Review must not create a fresh conversation")
+        }
+
+        async fn rebind_conversation(&self, conversation_ref: &ConversationRef) -> Result<bool> {
+            if !self
+                .inner
+                .conversations
+                .contains_key(conversation_ref.as_str())
+            {
+                return Ok(false);
+            }
+            *self
+                .inner
+                .current_ref
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(conversation_ref.clone());
+            self.inner
+                .rebinds
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(conversation_ref.as_str().to_owned());
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_daemon_resumes_two_bound_server_side_reviews_under_one_session_actor() {
+        let path = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-startup-two-reviews-{}-{}.sqlite3",
+            std::process::id(),
+            dispatch_marker().unwrap()
+        ));
+        let entries = [
+            (
+                TaskId::new("task-daemon-a"),
+                ConversationRef::new(
+                    "atspi:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                ),
+                DispatchId::new("dispatch-daemon-a"),
+                RunId::new("run-daemon-a"),
+            ),
+            (
+                TaskId::new("task-daemon-b"),
+                ConversationRef::new(
+                    "atspi:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                ),
+                DispatchId::new("dispatch-daemon-b"),
+                RunId::new("run-daemon-b"),
+            ),
+        ];
+        let surface = MultiReviewSurface::new(
+            entries
+                .iter()
+                .map(|(task_id, conversation_ref, dispatch_id, _)| {
+                    (
+                        conversation_ref.clone(),
+                        task_id.clone(),
+                        dispatch_id.clone(),
+                    )
+                })
+                .collect(),
+        );
+        let observer = surface.clone();
+        let runtime =
+            DesktopRuntime::new(LifecycleTestProcess, surface).with_state_db_path(path.clone());
+
+        for (task_id, conversation_ref, dispatch_id, run_id) in &entries {
+            let state = ContinuousTaskState::new(
+                task_id.clone(),
+                format!("goal-{}", task_id.as_str()),
+                ReasoningPreset::ExtraHigh,
+            )
+            .after_work_result(format!("work-result-{}", task_id.as_str()))
+            .bind_conversation_ref(Some(conversation_ref.clone()));
+            runtime
+                .persist_continuous_task_state(
+                    &state,
+                    run_id,
+                    "continuous_phase_started",
+                    json!({"phase":"review","round":1,"goalRevision":0}),
+                )
+                .unwrap();
+            let mut journal =
+                DurableRunJournal::open(&path, task_id.clone(), run_id.clone()).unwrap();
+            let effect_id = journal
+                .begin(
+                    "send_prompt",
+                    json!({
+                        "dispatchId": dispatch_id.as_str(),
+                        "baselineUserTurnBoundary": null
+                    })
+                    .to_string(),
+                    Some(PreparedDispatch {
+                        dispatch_id: dispatch_id.clone(),
+                        prepared_intent_json: json!({"prompt":"review"}).to_string(),
+                    }),
+                    None,
+                )
+                .unwrap();
+            journal
+                .settle_confirmed_dispatch(
+                    effect_id,
+                    dispatch_id,
+                    json!({"ok":true,"confirmed":true}),
+                )
+                .unwrap();
+        }
+
+        let reports = runtime
+            .resume_active_continuous_tasks(RunOptions {
+                poll_interval: Duration::from_millis(1),
+                ..RunOptions::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(reports.len(), 2);
+        assert!(
+            reports
+                .iter()
+                .all(|report| report.state == RunState::Complete)
+        );
+        assert!(runtime.active_continuous_tasks().unwrap().is_empty());
+        let rebound = observer.rebound_refs();
+        for (_, conversation_ref, _, _) in &entries {
+            assert!(
+                rebound
+                    .iter()
+                    .any(|value| value == conversation_ref.as_str()),
+                "daemon must rebind each server-side conversation through the shared desktop actor"
+            );
+        }
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
     #[test]
     fn in_flight_owned_observation_durably_binds_conversation_ref_once() {
         let path = std::env::temp_dir().join(format!(
@@ -5306,36 +5942,97 @@ mod actor_tests {
     }
 
     #[tokio::test]
-    async fn startup_daemon_fails_closed_before_desktop_mutation_with_multiple_active_tasks() {
+    async fn startup_daemon_fails_closed_for_incomplete_phase_without_conversation_ref() {
         let path = std::env::temp_dir().join(format!(
-            "fabushi-chatgpt-startup-multi-{}-{}.sqlite3",
+            "fabushi-chatgpt-startup-missing-ref-{}-{}.sqlite3",
             std::process::id(),
             dispatch_marker().unwrap()
         ));
         let runtime = DesktopRuntime::new(LifecycleTestProcess, FakeSurface::default())
             .with_state_db_path(path.clone());
-
-        for suffix in ["a", "b"] {
-            let state = ContinuousTaskState::new(
-                TaskId::new(format!("task-{suffix}")),
-                format!("goal-{suffix}"),
-                ReasoningPreset::ExtraHigh,
-            );
-            runtime
-                .persist_continuous_task_state(
-                    &state,
-                    &RunId::new(format!("run-{suffix}")),
-                    "continuous_task_created",
-                    json!({}),
-                )
-                .unwrap();
-        }
+        let task_id = TaskId::new("task-missing-ref");
+        let run_id = RunId::new("run-missing-ref");
+        let state =
+            ContinuousTaskState::new(task_id.clone(), "goal".into(), ReasoningPreset::ExtraHigh);
+        runtime
+            .persist_continuous_task_state(
+                &state,
+                &run_id,
+                "continuous_phase_started",
+                json!({"phase":"work","round":1,"goalRevision":0}),
+            )
+            .unwrap();
+        let mut journal = DurableRunJournal::open(&path, task_id.clone(), run_id).unwrap();
+        journal
+            .begin(
+                "send_prompt",
+                json!({"dispatchId":"dispatch-missing-ref","baselineUserTurnBoundary":null})
+                    .to_string(),
+                Some(PreparedDispatch {
+                    dispatch_id: DispatchId::new("dispatch-missing-ref"),
+                    prepared_intent_json: json!({"prompt":"goal"}).to_string(),
+                }),
+                None,
+            )
+            .unwrap();
 
         let error = runtime
             .resume_active_continuous_tasks(RunOptions::default())
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("ConversationRef reopen/rebind"));
+        assert!(
+            error
+                .to_string()
+                .contains("incomplete server-side phase but no durable ConversationRef")
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[tokio::test]
+    async fn startup_daemon_fails_closed_for_orphan_destructive_effect() {
+        let path = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-startup-orphan-effect-{}-{}.sqlite3",
+            std::process::id(),
+            dispatch_marker().unwrap()
+        ));
+        let runtime = DesktopRuntime::new(LifecycleTestProcess, FakeSurface::default())
+            .with_state_db_path(path.clone());
+        let active = ContinuousTaskState::new(
+            TaskId::new("task-active-daemon"),
+            "goal".into(),
+            ReasoningPreset::ExtraHigh,
+        );
+        runtime
+            .persist_continuous_task_state(
+                &active,
+                &RunId::new("run-active-daemon"),
+                "continuous_task_created",
+                json!({}),
+            )
+            .unwrap();
+        let mut orphan =
+            DurableRunJournal::open(&path, TaskId::new("task-orphan"), RunId::new("run-orphan"))
+                .unwrap();
+        orphan
+            .begin(
+                "set_reasoning",
+                json!({"preset":ReasoningPreset::High.index()}).to_string(),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let error = runtime
+            .resume_active_continuous_tasks(RunOptions::default())
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("not owned by an active continuous task")
+        );
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
