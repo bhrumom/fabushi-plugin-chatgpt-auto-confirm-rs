@@ -89,12 +89,12 @@
         "crates/application/src/lib.rs",
         "crates/runtime/src/lib.rs",
         "crates/adapters/sqlite-store/src/lib.rs",
-        "crates/adapters/chatgpt-desktop-atspi/src/bridge.py"
+        "crates/adapters/chatgpt-desktop-atspi/src/bridge.py",
+        "task-scoped startup reconciliation validates the durable approval taskId/runId/phase/round/conversation fingerprint identity and defers an armed settling approval effect back to the restored RunWorker instead of blocking resume; global/new-run startup still fail-closes on that pending destructive effect"
       ],
       "missing": [
         "formal exact-artifact live disabled/remount authorization acceptance",
-        "formal exact-artifact crash/restart authorization acceptance",
-        "stable top-level task/run resume orchestration beyond the durable run-surface identity"
+        "formal exact-artifact crash/restart authorization acceptance"
       ]
     },
     {

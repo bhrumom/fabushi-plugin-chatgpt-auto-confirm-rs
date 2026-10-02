@@ -2550,12 +2550,17 @@ impl DesktopRuntime {
             return Ok(());
         }
 
+        let mut deferred_to_run_worker = std::collections::HashSet::new();
         for effect in pending.iter().filter(|effect| {
             task_scope
                 .map(|task_id| effect.task_id == task_id.as_str())
                 .unwrap_or(true)
         }) {
-            let _ = reconcile_pending_effect(&mut store, snapshot, effect)?;
+            if reconcile_pending_effect(&mut store, snapshot, effect)?
+                == StartupReconcileOutcome::DeferredToRunWorker
+            {
+                deferred_to_run_worker.insert(effect.id);
+            }
         }
 
         let remaining = store.pending_effects(STARTUP_PENDING_EFFECT_LIMIT)?;
@@ -2563,6 +2568,7 @@ impl DesktopRuntime {
             .iter()
             .filter(|effect| {
                 effect.effect_kind != "attach_file"
+                    && !(task_scope.is_some() && deferred_to_run_worker.contains(&effect.id))
                     && task_scope
                         .map(|task_id| effect.task_id == task_id.as_str())
                         .unwrap_or(true)
@@ -3607,6 +3613,36 @@ fn reconcile_pending_effect(
             anyhow::anyhow!("pending approval effect has no durable approval fingerprint")
         })?;
 
+        let payload_task_id = payload
+            .get("taskId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("pending approval effect is missing taskId"))?;
+        let payload_run_id = payload
+            .get("runId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("pending approval effect is missing runId"))?;
+        let payload_phase = payload
+            .get("phase")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("pending approval effect is missing phase"))?;
+        let payload_round = payload
+            .get("round")
+            .and_then(serde_json::Value::as_i64)
+            .ok_or_else(|| anyhow::anyhow!("pending approval effect is missing round"))?;
+        if record.task_id != effect.task_id
+            || record.run_id != effect.run_id
+            || record.task_id != payload_task_id
+            || record.run_id != payload_run_id
+            || record.phase != payload_phase
+            || record.round != payload_round
+            || record.conversation_fingerprint != conversation_fingerprint
+        {
+            bail!("durable approval identity does not match pending effect payload");
+        }
+
         let same_conversation = snapshot
             .conversation_fingerprint
             .as_ref()
@@ -3633,6 +3669,10 @@ fn reconcile_pending_effect(
             )?;
             store.settle_approval_fingerprint(fingerprint)?;
             return Ok(StartupReconcileOutcome::SettledObservedApproval);
+        }
+
+        if record.state == "settling" && record.settlement_until_unix_ms.is_some() {
+            return Ok(StartupReconcileOutcome::DeferredToRunWorker);
         }
 
         return Ok(StartupReconcileOutcome::Clear);
@@ -4687,6 +4727,72 @@ VmRSS:	   512 kB
     }
 
     #[test]
+    fn task_scoped_startup_defers_restored_authorization_settlement_to_run_worker() {
+        let root = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-approval-resume-scope-{}-{}",
+            std::process::id(),
+            dispatch_marker().unwrap()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let state_db = root.join("state.sqlite3");
+        let task_id = TaskId::new("task-approval-resume-scope");
+        let run_id = RunId::new("run-approval-resume-scope");
+        let now = unix_time_ms().unwrap();
+        {
+            let mut store = SqliteStore::open(&state_db).unwrap();
+            create_pending_approval(
+                &mut store,
+                &task_id,
+                &run_id,
+                "fp-resume-scope",
+                "conversation-resume-scope",
+                now + 12_000,
+            );
+        }
+
+        let runtime =
+            DesktopRuntime::new(RestartableTestProcess::stopped(), FakeSurface::default())
+                .with_state_db_path(state_db.clone());
+        let snapshot = ChatSurfaceSnapshot {
+            conversation_fingerprint: Some(ConversationFingerprint::new(
+                "conversation-resume-scope",
+            )),
+            authorization_settlement: AuthorizationSettlementState::Settling,
+            ..Default::default()
+        };
+
+        runtime
+            .reconcile_task_effects_from_snapshot(&task_id, &snapshot)
+            .unwrap();
+
+        let store = SqliteStore::open(&state_db).unwrap();
+        let pending = store.pending_effects(10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].effect_kind, "approve_current_conversation");
+        let record = store
+            .approval_fingerprint("fp-resume-scope")
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.task_id, task_id.as_str());
+        assert_eq!(record.run_id, run_id.as_str());
+        assert_eq!(record.phase, "work");
+        assert_eq!(record.round, 2);
+        assert_eq!(record.conversation_fingerprint, "conversation-resume-scope");
+        assert_eq!(record.state, "settling");
+
+        let error = runtime
+            .reconcile_unsettled_effects_from_snapshot(&snapshot, None)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unsettled destructive effects remain after startup reconciliation"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn live_explicit_load_recovery_can_settle_an_accounted_retry_even_if_error_persists() {
         let baseline = ChatSurfaceSnapshot {
             app_healthy: true,
@@ -4972,7 +5078,7 @@ VmRSS:	   512 kB
 
         assert_eq!(
             reconcile_pending_effect(&mut store, &snapshot, &effect).unwrap(),
-            StartupReconcileOutcome::Clear
+            StartupReconcileOutcome::DeferredToRunWorker
         );
         assert_eq!(store.pending_effects(10).unwrap().len(), 1);
         let record = store.approval_fingerprint("fp-active").unwrap().unwrap();
