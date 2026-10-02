@@ -319,6 +319,31 @@ mod tests {
     }
 
     #[test]
+    fn surface_generation_is_opaque_and_reload_verifiable() {
+        use std::process::Command as StdCommand;
+        let wrapper = format!(
+            "import sys,types; sys.modules['pyatspi']=types.SimpleNamespace(); sys.argv=['bridge','contract-surface-generation']; exec({:?})",
+            BRIDGE
+        );
+        let output = StdCommand::new("python3")
+            .arg("-c")
+            .arg(wrapper)
+            .output()
+            .expect("python3 must execute deterministic surface-generation contract");
+        assert!(
+            output.status.success(),
+            "contract failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "true");
+        assert!(BRIDGE.contains("\"surface_generation\": surface_generation(items)"));
+        assert!(BRIDGE.contains("before_generation = surface_generation(before_items)"));
+        assert!(BRIDGE.contains("after_generation != before_generation"));
+        assert!(BRIDGE.contains("refusing unverifiable reload"));
+    }
+
+    #[test]
     fn bridge_is_atspi_and_fail_closed_for_persistent_authorization() {
         assert!(BRIDGE.contains("import pyatspi"));
         assert!(BRIDGE.contains("PERSISTENT_WORDS"));
