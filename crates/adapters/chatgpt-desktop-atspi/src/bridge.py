@@ -383,17 +383,62 @@ def bounded_common_ancestor(left, right, max_depth=8):
         current = parent_of(current)
     return None
 
-def response_local_copy_evidence(items, marker_index, response_text_items):
-    if marker_index < 0 or not response_text_items: return False
+def owned_response_scope(node, marker_node, max_depth=16):
+    current = node
+    for _ in range(max_depth):
+        parent = parent_of(current)
+        if parent is None:
+            return None
+        # The response root is the child immediately below the first ancestor
+        # that also contains the owned Fabushi user marker. This keeps a
+        # virtualized older response or sibling response from donating prose or
+        # Copy evidence to the latest response.
+        if is_descendant(marker_node, parent, max_depth=24):
+            if same_node(current, marker_node) or is_descendant(marker_node, current):
+                return None
+            return current
+        if role(parent) in BROAD_RESPONSE_ROLES:
+            return None if is_descendant(marker_node, current) else current
+        current = parent
+    return None
+
+def latest_owned_response(items, marker_index):
+    if marker_index < 0:
+        return None, [], []
     marker_node = items[marker_index]["node"]
-    latest_text_item = response_text_items[-1]
-    copies = [item for item in items[marker_index + 1:] if item["visible"] and item["role"] in ("push button", "button") and any(word in normalized(item) for word in COPY_WORDS)]
-    # Fail closed when more than one assistant response is still mounted after
-    # the owned Fabushi user turn. A Copy from an older response must never
-    # complete the latest response just because both live under a broad turn.
-    for copy_item in reversed(copies):
-        scope = bounded_common_ancestor(latest_text_item["node"], copy_item["node"])
-        if scope is not None and not is_descendant(marker_node, scope):
+    groups = []
+    for item in items[marker_index + 1:]:
+        if item["role"] not in ("static", "paragraph", "text") or not item["visible"]:
+            continue
+        if assistant_activity_scope(item["node"]) is not None:
+            continue
+        value = (item["text"] or item["name"]).strip()
+        if not value or len(value) > 12000 or "fabushi:" in value.lower():
+            continue
+        scope = owned_response_scope(item["node"], marker_node)
+        if scope is None:
+            continue
+        group = next((entry for entry in groups if same_node(scope, entry["scope"])), None)
+        if group is None:
+            group = {"scope": scope, "items": [], "values": [], "last_index": -1}
+            groups.append(group)
+        group["items"].append(item)
+        group["values"].append(value)
+        group["last_index"] = items.index(item)
+    if not groups:
+        return None, [], []
+    latest = max(groups, key=lambda entry: entry["last_index"])
+    return latest["scope"], latest["items"], latest["values"]
+
+def response_local_copy_evidence(items, marker_index, response_scope):
+    if marker_index < 0 or response_scope is None:
+        return False
+    for item in reversed(items[marker_index + 1:]):
+        if not item["visible"] or item["role"] not in ("push button", "button"):
+            continue
+        if not any(word in normalized(item) for word in COPY_WORDS):
+            continue
+        if is_descendant(item["node"], response_scope) or same_node(item["node"], response_scope):
             return True
     return False
 
@@ -446,18 +491,9 @@ def snapshot():
     marker, marker_index = marker_info(items)
     after = items[marker_index + 1 :] if marker_index >= 0 else []
     work_trace = assistant_activity_trace(after) if marker_index >= 0 else []
-    after_text = []
-    response_text_items = []
-    for item in after:
-        if item["role"] in ("static", "paragraph", "text") and item["visible"]:
-            if assistant_activity_scope(item["node"]) is not None:
-                continue
-            value = (item["text"] or item["name"]).strip()
-            if value and len(value) <= 12000 and "fabushi:" not in value.lower():
-                after_text.append(value)
-                response_text_items.append(item)
-    prose = "\n".join(after_text[-80:])[-16000:]
-    copy_after = response_local_copy_evidence(items, marker_index, response_text_items)
+    response_scope, response_text_items, response_values = latest_owned_response(items, marker_index)
+    prose = "\n".join(response_values[-80:])[-16000:]
+    copy_after = response_local_copy_evidence(items, marker_index, response_scope)
     stop = any(
         item["enabled"] and item["role"] in ("push button", "button")
         and any(w in normalized(item) for w in STOP_WORDS)
@@ -790,9 +826,47 @@ def set_reasoning(target):
     close_reasoning_menu(app)
     return verified
 
+def response_boundary_contract_self_test():
+    class FakeNode:
+        def __init__(self, node_role, name, parent=None):
+            self._role = node_role
+            self.name = name
+            self.parent = parent
+        def getRoleName(self):
+            return self._role
+
+    document = FakeNode("document web", "ChatGPT")
+    conversation = FakeNode("section", "conversation", document)
+    user = FakeNode("section", "user", conversation)
+    marker = FakeNode("static", "[Fabushi:12345678]", user)
+    old_response = FakeNode("section", "old response", conversation)
+    old_text = FakeNode("paragraph", "old answer", old_response)
+    old_copy = FakeNode("push button", "Copy", old_response)
+    latest_response = FakeNode("section", "latest response", conversation)
+    latest_text = FakeNode("paragraph", "latest answer", latest_response)
+    latest_copy = FakeNode("push button", "Copy", latest_response)
+    items = [
+        {"node": marker, "role": "static", "name": marker.name, "text": marker.name, "visible": True, "enabled": True},
+        {"node": old_text, "role": "paragraph", "name": old_text.name, "text": old_text.name, "visible": True, "enabled": True},
+        {"node": old_copy, "role": "push button", "name": "Copy", "text": "", "visible": True, "enabled": True},
+        {"node": latest_text, "role": "paragraph", "name": latest_text.name, "text": latest_text.name, "visible": True, "enabled": True},
+        {"node": latest_copy, "role": "push button", "name": "Copy", "text": "", "visible": True, "enabled": True},
+    ]
+    scope, _, values = latest_owned_response(items, 0)
+    if not same_node(scope, latest_response) or values != ["latest answer"]:
+        return False
+    if not response_local_copy_evidence(items, 0, scope):
+        return False
+    items[-1]["visible"] = False
+    if response_local_copy_evidence(items, 0, scope):
+        return False
+    return True
+
 def main():
     op = sys.argv[1]
-    if op == "snapshot":
+    if op == "contract-response-boundary":
+        result = response_boundary_contract_self_test()
+    elif op == "snapshot":
         result = snapshot()
     elif op == "send":
         result = send_prompt(sys.argv[2])

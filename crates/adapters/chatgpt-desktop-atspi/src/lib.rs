@@ -187,17 +187,35 @@ mod tests {
     }
 
     #[test]
-    fn bridge_binds_terminal_copy_to_bounded_response_scope() {
-        assert!(BRIDGE.contains("def response_local_copy_evidence("));
-        assert!(BRIDGE.contains("def bounded_common_ancestor("));
-        assert!(BRIDGE.contains("not is_descendant(marker_node, scope)"));
+    fn bridge_binds_terminal_copy_to_latest_owned_response_scope() {
+        assert!(BRIDGE.contains("def owned_response_scope("));
+        assert!(BRIDGE.contains("def latest_owned_response("));
         assert!(BRIDGE.contains(
-            "copy_after = response_local_copy_evidence(items, marker_index, response_text_items)"
+            "copy_after = response_local_copy_evidence(items, marker_index, response_scope)"
         ));
-        assert!(BRIDGE.contains("latest_text_item = response_text_items[-1]"));
-        assert!(BRIDGE.contains("for copy_item in reversed(copies):"));
-        assert!(!BRIDGE.contains("for text_item in reversed(response_text_items):"));
-        assert!(!BRIDGE.contains("copy_after = any("));
+        assert!(!BRIDGE.contains("prose = \"\\n\".join(after_text"));
+    }
+
+    #[test]
+    fn response_boundary_contract_executes_against_virtualized_siblings() {
+        use std::process::Command as StdCommand;
+
+        let wrapper = format!(
+            "import sys,types; sys.modules['pyatspi']=types.SimpleNamespace(); sys.argv=['bridge','contract-response-boundary']; exec({:?})",
+            BRIDGE
+        );
+        let output = StdCommand::new("python3")
+            .arg("-c")
+            .arg(wrapper)
+            .output()
+            .expect("python3 must execute deterministic response-boundary contract");
+        assert!(
+            output.status.success(),
+            "contract failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "true");
     }
 
     #[test]

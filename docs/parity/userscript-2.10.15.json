@@ -85,10 +85,11 @@
         "crates/domain/src/lib.rs",
         "crates/application/src/lib.rs",
         "crates/adapters/chatgpt-desktop-atspi/src/bridge.py",
-        "AT-SPI response_local_copy_evidence now requires Copy to share a bounded non-document scope with the latest visible response text after the owned Fabushi marker; older response text can no longer satisfy Copy evidence"
+        "AT-SPI response projection now groups visible prose by the owned Fabushi user-turn response container and selects only the latest response scope; response-local Copy must be a descendant of that same scope",
+        "response_boundary_contract_executes_against_virtualized_siblings executes the bridge against deterministic sibling response fixtures and proves an older mounted Copy cannot complete the latest response"
       ],
       "missing": [
-        "live/virtualized assistant response-boundary hardening",
+        "live virtualized/remount assistant response-boundary acceptance",
         "real desktop acceptance"
       ]
     },
