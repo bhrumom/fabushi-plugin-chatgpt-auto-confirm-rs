@@ -28,6 +28,7 @@ opaque_id!(UserTurnBoundary);
 opaque_id!(AssistantResponseBoundary);
 opaque_id!(DraftFingerprint);
 opaque_id!(ProgressFingerprint);
+opaque_id!(SurfaceGeneration);
 opaque_id!(AttachmentId);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -139,6 +140,7 @@ pub struct ChatSurfaceSnapshot {
     pub assistant_response_ownership: OwnershipConfidence,
     pub conversation_ref: Option<ConversationRef>,
     pub conversation_fingerprint: Option<ConversationFingerprint>,
+    pub surface_generation: Option<SurfaceGeneration>,
     pub assistant_visible_prose: String,
     pub assistant_visible_work_trace: Vec<String>,
     pub streaming_or_busy: bool,
