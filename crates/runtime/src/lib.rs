@@ -1082,7 +1082,6 @@ struct SupervisorArmResult {
 
 enum SupervisorMessage {
     Sleep(SupervisorSleepRequest),
-    Armed(SupervisorArmResult),
 }
 
 struct PendingWake {
@@ -1097,10 +1096,12 @@ struct PendingWake {
 impl SupervisorHandle {
     fn spawn(state_db_path: PathBuf) -> Self {
         let (sender, receiver) = mpsc::channel(256);
+        let (arm_sender, arm_receiver) = mpsc::unbounded_channel();
         let persistence_gate = Arc::new(Mutex::new(()));
         tokio::spawn(run_supervisor(
             receiver,
-            sender.clone(),
+            arm_receiver,
+            arm_sender,
             state_db_path.clone(),
             persistence_gate.clone(),
         ));
@@ -1190,7 +1191,8 @@ impl SupervisorHandle {
 
 async fn run_supervisor(
     mut receiver: mpsc::Receiver<SupervisorMessage>,
-    sender: mpsc::Sender<SupervisorMessage>,
+    mut arm_receiver: mpsc::UnboundedReceiver<SupervisorArmResult>,
+    arm_sender: mpsc::UnboundedSender<SupervisorArmResult>,
     state_db_path: PathBuf,
     persistence_gate: Arc<Mutex<()>>,
 ) {
@@ -1227,22 +1229,20 @@ async fn run_supervisor(
 
         tokio::select! {
             message = receiver.recv() => {
-                let Some(message) = message else {
+                let Some(SupervisorMessage::Sleep(request)) = message else {
                     break;
                 };
-                match message {
-                    SupervisorMessage::Sleep(request) => {
-                        register_supervisor_sleep(
-                            &mut pending,
-                            request,
-                            &sender,
-                            &state_db_path,
-                            &persistence_gate,
-                        );
-                    }
-                    SupervisorMessage::Armed(result) => {
-                        apply_supervisor_arm_result(&mut pending, result);
-                    }
+                register_supervisor_sleep(
+                    &mut pending,
+                    request,
+                    &arm_sender,
+                    &state_db_path,
+                    &persistence_gate,
+                );
+            }
+            result = arm_receiver.recv() => {
+                if let Some(result) = result {
+                    apply_supervisor_arm_result(&mut pending, result);
                 }
             }
             _ = tokio::time::sleep(sleep_duration), if next_deadline.is_some() && !blocked_on_arming => {}
@@ -1284,7 +1284,7 @@ fn select_due_task(
 fn register_supervisor_sleep(
     pending: &mut HashMap<String, PendingWake>,
     request: SupervisorSleepRequest,
-    sender: &mpsc::Sender<SupervisorMessage>,
+    arm_sender: &mpsc::UnboundedSender<SupervisorArmResult>,
     state_db_path: &Path,
     persistence_gate: &Arc<Mutex<()>>,
 ) {
@@ -1312,7 +1312,7 @@ fn register_supervisor_sleep(
         )));
     }
     if durable && !already_persisted {
-        let sender = sender.clone();
+        let arm_sender = arm_sender.clone();
         let path = state_db_path.to_path_buf();
         let persistence_gate = persistence_gate.clone();
         tokio::spawn(async move {
@@ -1335,13 +1335,11 @@ fn register_supervisor_sleep(
             })
             .await
             .unwrap_or_else(|error| Err(format!("durable wake persistence task failed: {error}")));
-            let _ = sender
-                .send(SupervisorMessage::Armed(SupervisorArmResult {
-                    token,
-                    task_id,
-                    result,
-                }))
-                .await;
+            let _ = arm_sender.send(SupervisorArmResult {
+                token,
+                task_id,
+                result,
+            });
         });
     }
 }
@@ -3429,6 +3427,26 @@ mod actor_tests {
     }
 
     #[tokio::test]
+    async fn supervisor_exits_after_last_external_handle_drops() {
+        let path = scheduler_test_path("shutdown");
+        let (sender, receiver) = mpsc::channel(1);
+        let (arm_sender, arm_receiver) = mpsc::unbounded_channel();
+        let join = tokio::spawn(run_supervisor(
+            receiver,
+            arm_receiver,
+            arm_sender,
+            path.clone(),
+            Arc::new(Mutex::new(())),
+        ));
+        drop(sender);
+        tokio::time::timeout(Duration::from_secs(1), join)
+            .await
+            .expect("supervisor must exit after the final external command sender drops")
+            .unwrap();
+        cleanup_scheduler_path(&path);
+    }
+
+    #[tokio::test]
     async fn durable_wait_fails_closed_when_supervisor_is_unavailable() {
         let path = scheduler_test_path("closed-supervisor");
         let (sender, receiver) = mpsc::channel(1);
@@ -3794,9 +3812,7 @@ mod actor_tests {
             .await
             .expect("restart reconciliation must register the durable wake")
             .expect("supervisor request channel must remain open");
-        let SupervisorMessage::Sleep(request) = message else {
-            panic!("restart reconciliation must register a sleep request");
-        };
+        let SupervisorMessage::Sleep(request) = message;
         assert_eq!(request.task_id, task);
         assert_eq!(request.run_id, run);
         assert_eq!(
