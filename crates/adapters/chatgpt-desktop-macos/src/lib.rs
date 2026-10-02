@@ -267,13 +267,20 @@ impl ChatGptDesktopMacSurface {
             return false;
         }
         let text = text.to_lowercase();
-        text.contains(&wanted)
-            && (matches!(
-                role,
-                "AXButton" | "AXStaticText" | "AXGroup" | "AXRow" | "AXCell"
-            ) || ["attachment", "uploaded", "remove", "附件", "上传", "移除"]
-                .iter()
-                .any(|word| text.contains(word)))
+        if !text.contains(&wanted) {
+            return false;
+        }
+        if matches!(role, "AXButton" | "AXStaticText")
+            && (text.trim() == wanted
+                || ["remove attachment", "remove file", "删除附件", "移除附件"]
+                    .iter()
+                    .any(|word| text.contains(word)))
+        {
+            return true;
+        }
+        ["attachment", "uploaded", "附件", "上传"]
+            .iter()
+            .any(|word| text.contains(word))
     }
 
     fn attachment_ready_in(nodes: &[AXUIElement], file_name: &str) -> bool {
@@ -748,6 +755,16 @@ mod tests {
         assert!(ChatGptDesktopMacSurface::attachment_ready_text(
             "AXStaticText",
             "notes.txt uploaded",
+            "notes.txt"
+        ));
+        assert!(ChatGptDesktopMacSurface::attachment_ready_text(
+            "AXStaticText",
+            "notes.txt",
+            "notes.txt"
+        ));
+        assert!(!ChatGptDesktopMacSurface::attachment_ready_text(
+            "AXStaticText",
+            "I will inspect notes.txt now",
             "notes.txt"
         ));
         assert!(!ChatGptDesktopMacSurface::attachment_ready_text(
