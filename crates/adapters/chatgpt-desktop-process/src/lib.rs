@@ -82,10 +82,37 @@ impl ChatProcessPort for ChatGptDesktopProcess {
             );
         }
 
-        Command::new(&self.launcher)
+        let mut command = Command::new(&self.launcher);
+        for argument in launcher_arguments(&self.launcher, effective_uid()) {
+            command.arg(argument);
+        }
+        command
             .spawn()
             .with_context(|| format!("launch ChatGPT desktop via {:?}", self.launcher))?;
         Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn effective_uid() -> Option<u32> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|line| line.starts_with("Uid:"))?;
+    line.split_ascii_whitespace().nth(2)?.parse().ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn effective_uid() -> Option<u32> {
+    None
+}
+
+fn launcher_arguments(launcher: &Path, effective_uid: Option<u32>) -> Vec<&'static str> {
+    if cfg!(target_os = "linux")
+        && effective_uid == Some(0)
+        && launcher == Path::new(DEFAULT_CHATGPT_LAUNCHER)
+    {
+        vec!["--no-sandbox"]
+    } else {
+        Vec::new()
     }
 }
 
@@ -124,6 +151,19 @@ fn command_line_matches(command_line: &[u8], launcher: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launcher_arguments_limit_no_sandbox_to_linux_root_default_launcher() {
+        let default = Path::new(DEFAULT_CHATGPT_LAUNCHER);
+        if cfg!(target_os = "linux") {
+            assert_eq!(launcher_arguments(default, Some(0)), vec!["--no-sandbox"]);
+        } else {
+            assert!(launcher_arguments(default, Some(0)).is_empty());
+        }
+        assert!(launcher_arguments(default, Some(1000)).is_empty());
+        assert!(launcher_arguments(default, None).is_empty());
+        assert!(launcher_arguments(Path::new("/custom/chatgpt"), Some(0)).is_empty());
+    }
 
     #[test]
     fn executable_match_accepts_launcher_or_chatgpt_binary_name() {
