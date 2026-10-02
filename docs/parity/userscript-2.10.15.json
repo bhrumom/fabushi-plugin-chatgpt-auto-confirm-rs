@@ -8,31 +8,31 @@
   "target": {
     "repository": "bhrumom/fabushi-plugin-chatgpt-auto-confirm-rs",
     "spec": "docs/specs/desktop-chat-userscript-parity-rust-cli.md",
-    "lastVerifiedExactHead": "6b9e1b8512957885df8eb83d6275a26363dd77df",
-    "lastVerifiedCiRun": 37054592733,
+    "lastVerifiedExactHead": "eede5504d48583e6bd72dd51f054c50c6dbabf26",
+    "lastVerifiedCiRun": 37059254691,
     "lastVerifiedArtifact": {
-      "id": 11248151562,
+      "id": 11249014383,
       "name": "fabushi-chatgpt-auto-confirm-linux-x86_64",
-      "sha256": "7ad3b464076e4fd0db2ec53db158fb8de5c5a39cb95e72e7ddc424117bb4139a"
+      "sha256": "a5eccb82b592f91b209f3ca8b38ecd03afa34077d6302e03a560553c9659193f"
     },
     "lastVerifiedArtifacts": [
       {
-        "id": 11248151562,
+        "id": 11249014383,
         "name": "fabushi-chatgpt-auto-confirm-linux-x86_64",
-        "headSha": "6b9e1b8512957885df8eb83d6275a26363dd77df",
-        "sha256": "7ad3b464076e4fd0db2ec53db158fb8de5c5a39cb95e72e7ddc424117bb4139a"
+        "headSha": "eede5504d48583e6bd72dd51f054c50c6dbabf26",
+        "sha256": "a5eccb82b592f91b209f3ca8b38ecd03afa34077d6302e03a560553c9659193f"
       },
       {
-        "id": 11248855715,
+        "id": 11250497832,
         "name": "fabushi-chatgpt-auto-confirm-macos-aarch64-apple-darwin",
-        "headSha": "6b9e1b8512957885df8eb83d6275a26363dd77df",
-        "sha256": "648c295a5c5b5c3d8b0ea8e5f7ada0b0e8474760c11bebaaf30084027d488676"
+        "headSha": "eede5504d48583e6bd72dd51f054c50c6dbabf26",
+        "sha256": "dd6c74a87200eb03077fbba54a5a0a68a22f4e8b41af3bb875e6d217d8513e78"
       },
       {
-        "id": 11247932849,
+        "id": 11250947768,
         "name": "fabushi-chatgpt-auto-confirm-macos-x86_64-apple-darwin",
-        "headSha": "6b9e1b8512957885df8eb83d6275a26363dd77df",
-        "sha256": "f4cdd8df3b92916cac7fef14b6b5e6ed12568755c9777a5fdb33480095ca232a"
+        "headSha": "eede5504d48583e6bd72dd51f054c50c6dbabf26",
+        "sha256": "3508f4d137cf8820ca657cbe9046e62ed5c551f975df3e8e40044a1dfaea41fe"
       }
     ]
   },
@@ -161,7 +161,7 @@
       ],
       "missing": [
         "exact-artifact real multi-round Work -> Review -> Work acceptance",
-        "macOS exact-head compile/test and live ConversationRef projection/rebind acceptance",
+        "live macOS ConversationRef projection/rebind acceptance",
         "live concurrent-task acceptance"
       ]
     },
@@ -261,10 +261,10 @@
         "macOS AXUIElement attachment path stages content-addressed bytes, requires unique ChatGPT attachment and native Open-panel actions, uses system-wide focused Accessibility for the out-of-process NSOpenPanel, writes/re-reads the exact path, and binds readiness to the exact filename",
         "composer-write production safety distinguishes unrelated user drafts from stale Fabushi-owned prepared drafts using the real bounded dispatch-marker regex; ordinary drafts remain fail-closed, while stale Fabushi drafts are removed only by exact suffix deletion with semantic draft readback after every Backspace",
         "non-ASCII prepared prompt input uses Unicode X11 keysyms instead of whole-prompt KEY_STRING and waits for the composer draft to equal each expected prefix before continuing; any dropped, duplicated, or reordered codepoint fails closed before Send",
-        "composer_write_contract_self_test executes ordinary-draft rejection, truncated stale-Fabushi replacement, CJK Unicode input, and exact prepared-prompt readback without inventing the non-existent pyatspi.KEY_CONTROL constant"
+        "composer_write_contract_self_test executes ordinary-draft rejection, truncated stale-Fabushi replacement, CJK Unicode input, and exact prepared-prompt readback without inventing the non-existent pyatspi.KEY_CONTROL constant",
+        "exact-head run 37059254691 at eede5504d48583e6bd72dd51f054c50c6dbabf26 passed macOS aarch64/x86_64 architecture, fmt, workspace tests, clippy, release build, and artifact upload, covering the shipping macOS adapter build/tests"
       ],
       "missing": [
-        "exact-head macOS compile/test evidence for native attachment path",
         "real authorization, attachment and terminal acceptance",
         "current-exact packaged Linux composer/Send acceptance after the unrelated user draft no longer occupies the composer, or after a separately proven non-destructive independent surface mechanism exists"
       ]
@@ -326,11 +326,12 @@
         "startup_reconciliation_defers_attachment_to_task_scoped_worker",
         "restart_reconciles_ready_attachment_without_duplicate_native_attach",
         "45-second readiness window plus 5/10/20/40/60-second task-scoped Supervisor AttachmentWait backoff is production-wired",
-        "attachment effect payload persists the absolute readiness deadline so restart does not extend the 45-second attempt window or blindly repeat an already-observed native attach"
+        "attachment effect payload persists the absolute readiness deadline so restart does not extend the 45-second attempt window or blindly repeat an already-observed native attach",
+        "macOS ChatSurfacePort production path stages content-addressed bytes, drives the native file chooser through Accessibility, and reports readiness only from exact filename/preview semantics; exact-head macOS CI compiles/tests this path on both architectures"
       ],
       "missing": [
         "exact-head packaged-artifact live Linux attachment acceptance on a real ChatGPT desktop accessibility surface",
-        "macOS native attachment action/readiness parity"
+        "live macOS native attachment action/readiness acceptance"
       ]
     },
     {
@@ -360,7 +361,9 @@
         "exact-head run 37054592733 is green at 6b9e1b8512957885df8eb83d6275a26363dd77df across Linux, macOS aarch64, and macOS x86_64; every job passed architecture, fmt, workspace tests, clippy, release build, and artifact upload",
         "artifacts from run 37054592733: Linux 11248151562 sha256:7ad3b464076e4fd0db2ec53db158fb8de5c5a39cb95e72e7ddc424117bb4139a; macOS arm64 11248855715 sha256:648c295a5c5b5c3d8b0ea8e5f7ada0b0e8474760c11bebaaf30084027d488676; macOS x86_64 11247932849 sha256:f4cdd8df3b92916cac7fef14b6b5e6ed12568755c9777a5fdb33480095ca232a",
         "artifact 11248151562 is the formal Linux release candidate for the verified 6b9e1b8 baseline, but it was not downloaded in the current round because htch-runtime has no installed/running ChatGPT desktop application and /usr/bin/chatgpt is absent",
-        "current read-only htch-runtime application enumeration confirms the desktop environment remains unavailable, so Gates E/F stay environment-blocked without any device-controller mutation; no packaged-binary Gate E evidence is claimed for 6b9e1b8"
+        "current read-only htch-runtime application enumeration confirms the desktop environment remains unavailable, so Gates E/F stay environment-blocked without any device-controller mutation; no packaged-binary Gate E evidence is claimed for 6b9e1b8",
+        "exact-head run 37059254691 is green at eede5504d48583e6bd72dd51f054c50c6dbabf26 across Linux, macOS aarch64, and macOS x86_64; every job passed architecture, fmt, workspace tests, clippy, release build, and artifact upload",
+        "artifacts from run 37059254691: Linux 11249014383 sha256:a5eccb82b592f91b209f3ca8b38ecd03afa34077d6302e03a560553c9659193f; macOS arm64 11250497832 sha256:dd6c74a87200eb03077fbba54a5a0a68a22f4e8b41af3bb875e6d217d8513e78; macOS x86_64 11250947768 sha256:3508f4d137cf8820ca657cbe9046e62ed5c551f975df3e8e40044a1dfaea41fe"
       ],
       "missing": [
         "restore/install a real ChatGPT desktop application on htch-runtime without using the device controller to substitute CLI actions; current read-only enumeration has no ChatGPT application and /usr/bin/chatgpt is absent",
