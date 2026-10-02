@@ -117,12 +117,13 @@
         "crates/runtime/src/lib.rs",
         "crates/cli/src/main.rs",
         "fresh-handoff dispatch rotation is production-wired and covered by fresh_handoff_rotates_durable_dispatch_identity_and_visible_marker",
-        "exact-head run 36983552114 passed architecture/fmt/workspace tests/clippy/release packaging on Linux and both macOS targets at 2b43e6ec056835342b7966f453f567e406e38b16",
+        "pre-scheduler exact-head run 36990315718 passed architecture/fmt/workspace tests/clippy/release packaging on Linux and both macOS targets at 4e24b107315827c1c398be809f5726d5c73cb0f1",
         "shared production SupervisorClock + durable task_wakes scheduling in crates/runtime/src/lib.rs and sqlite-store",
-        "rate_limit_deferred_task_does_not_block_runnable_task and restart_wait_uses_original_durable_deadline"
+        "rate_limit_deferred_task_does_not_block_runnable_task, due_task_selection_round_robins_only_due_tasks, scheduler_rotation_keeps_ui_single_writer_without_duplicate_send, durable_wait_fails_closed_when_supervisor_is_unavailable, and restart_wait_uses_original_durable_deadline"
       ],
       "missing": [
         "exact-artifact real acceptance",
+        "desktop opaque ConversationRef navigation/rebinding and a production multi-RunWorker daemon",
         "native attachment-wait wiring and live concurrent-task acceptance"
       ]
     },
@@ -150,7 +151,7 @@
         "crates/runtime/src/lib.rs",
         "fresh handoff now rotates the durable dispatch identity and visible Fabushi marker before resend",
         "fresh_handoff_rotates_durable_dispatch_identity_and_visible_marker",
-        "exact-head run 36983552114 passed at 2b43e6ec056835342b7966f453f567e406e38b16"
+        "pre-scheduler exact-head run 36990315718 passed at 4e24b107315827c1c398be809f5726d5c73cb0f1"
       ],
       "missing": [
         "exact-artifact real acceptance"
@@ -267,9 +268,8 @@
       "status": "pending",
       "evidence": [
         ".github/workflows/ci.yml packages fabushi-chatgpt-auto-confirm-linux-x86_64 on every exact candidate HEAD",
-        "exact-head run 36983552114 is green at 2b43e6ec056835342b7966f453f567e406e38b16 across Linux, macOS aarch64, and macOS x86_64",
-        "exact-head Linux artifact 11216697406 / fabushi-chatgpt-auto-confirm-linux-x86_64 / sha256:fc9a13c22ea245daf3ea947316aa63721ab9b767feda09064431f5efc11e4392",
-        "htch-runtime downloaded artifact 11216697406 as a 4749480-byte ZIP and independently matched sha256:fc9a13c22ea245daf3ea947316aa63721ab9b767feda09064431f5efc11e4392",
+        "pre-scheduler exact-head run 36990315718 is green at 4e24b107315827c1c398be809f5726d5c73cb0f1 across Linux, macOS aarch64, and macOS x86_64",
+        "pre-scheduler Linux artifact 11219432631 / fabushi-chatgpt-auto-confirm-linux-x86_64 / sha256:d5db20b959d5df9391dbaec8fee0a7d5f96a425f9b24708e115a6cd4bc5c9471",
         "the exact-head packaged binary executed --help and doctor on htch-runtime; doctor is blocked before app attach because the Hatch Ubuntu 24.04 desktop session cannot safely launch Electron: root is rejected, unprivileged user namespaces are AppArmor-restricted, the sysctl is read-only, and the package has no SUID chrome-sandbox"
       ],
       "missing": [

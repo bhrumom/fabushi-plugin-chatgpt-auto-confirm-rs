@@ -99,11 +99,11 @@ pub trait Clock: Send + Sync {
             .unwrap_or(0)
     }
 
-    async fn sleep(&self, duration: Duration);
+    async fn sleep(&self, duration: Duration) -> Result<()>;
 
-    async fn sleep_for(&self, reason: WakeReason, duration: Duration) {
+    async fn sleep_for(&self, reason: WakeReason, duration: Duration) -> Result<()> {
         let _ = reason;
-        self.sleep(duration).await;
+        self.sleep(duration).await
     }
 }
 
@@ -370,7 +370,7 @@ impl<'a> RunPrompt<'a> {
                 }
                 self.clock
                     .sleep_for(WakeReason::DispatchConfirmation, options.poll_interval)
-                    .await;
+                    .await?;
                 continue;
             }
 
@@ -412,7 +412,7 @@ impl<'a> RunPrompt<'a> {
                 terminal_since = None;
                 self.clock
                     .sleep_for(WakeReason::AuthorizationSettlement, options.poll_interval)
-                    .await;
+                    .await?;
                 continue;
             }
 
@@ -431,7 +431,7 @@ impl<'a> RunPrompt<'a> {
                 terminal_since = None;
                 self.clock
                     .sleep_for(WakeReason::AuthorizationSettlement, options.poll_interval)
-                    .await;
+                    .await?;
                 continue;
             }
 
@@ -449,7 +449,7 @@ impl<'a> RunPrompt<'a> {
                     terminal_since = None;
                     self.clock
                         .sleep_for(WakeReason::AuthorizationSafetyCheck, options.poll_interval)
-                        .await;
+                        .await?;
                     continue;
                 }
                 let recovery_prompt =
@@ -508,7 +508,7 @@ impl<'a> RunPrompt<'a> {
                 }
                 self.clock
                     .sleep_for(WakeReason::RateLimitCooldown, options.rate_limit_pause)
-                    .await;
+                    .await?;
                 continue;
             }
 
@@ -558,7 +558,7 @@ impl<'a> RunPrompt<'a> {
                                     WakeReason::AuthorizationSafetyCheck,
                                     options.poll_interval,
                                 )
-                                .await;
+                                .await?;
                             continue;
                         }
                         if let (Some(port), Some(key)) =
@@ -637,7 +637,7 @@ impl<'a> RunPrompt<'a> {
             };
             self.clock
                 .sleep_for(wake_reason, options.poll_interval)
-                .await;
+                .await?;
         }
     }
 
@@ -686,7 +686,7 @@ impl<'a> RunPrompt<'a> {
                 WakeReason::AuthorizationSafetyCheck,
                 NO_APPROVAL_RECHECK_WINDOW,
             )
-            .await;
+            .await?;
 
         let second = self.surface.observe().await?;
         Ok(!second.authorization_surface_present
@@ -1659,9 +1659,10 @@ mod tests {
             *self.now.lock().unwrap()
         }
 
-        async fn sleep(&self, duration: Duration) {
+        async fn sleep(&self, duration: Duration) -> Result<()> {
             let mut now = self.now.lock().unwrap();
             *now += duration;
+            Ok(())
         }
     }
 

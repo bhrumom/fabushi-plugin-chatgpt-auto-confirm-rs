@@ -963,7 +963,7 @@ impl SupervisorHandle {
         run_id: &RunId,
         reason: WakeReason,
         duration: Duration,
-    ) {
+    ) -> Result<()> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let request = SupervisorSleepRequest {
             task_id: task_id.clone(),
@@ -973,19 +973,14 @@ impl SupervisorHandle {
             durable: reason.is_durable(),
             reply: reply_tx,
         };
-        if self
-            .sender
+        self.sender
             .send(SupervisorMessage::Sleep(request))
             .await
-            .is_err()
-        {
-            tokio::time::sleep(duration).await;
-            return;
-        }
-        match reply_rx.await {
-            Ok(Ok(())) => {}
-            _ => tokio::time::sleep(duration).await,
-        }
+            .map_err(|_| anyhow::anyhow!("fair supervisor stopped before wake registration"))?;
+        reply_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("fair supervisor dropped wake waiter"))??;
+        Ok(())
     }
 
     async fn wait_existing(&self, task_id: &TaskId, run_id: &RunId) -> Result<()> {
@@ -1174,14 +1169,14 @@ impl Clock for SupervisorClock {
         self.origin.elapsed()
     }
 
-    async fn sleep(&self, duration: Duration) {
-        self.sleep_for(WakeReason::Poll, duration).await;
+    async fn sleep(&self, duration: Duration) -> Result<()> {
+        self.sleep_for(WakeReason::Poll, duration).await
     }
 
-    async fn sleep_for(&self, reason: WakeReason, duration: Duration) {
+    async fn sleep_for(&self, reason: WakeReason, duration: Duration) -> Result<()> {
         self.supervisor
             .sleep_for(&self.task_id, &self.run_id, reason, duration)
-            .await;
+            .await
     }
 }
 
@@ -1300,8 +1295,9 @@ impl Clock for TokioClock {
         self.origin.elapsed()
     }
 
-    async fn sleep(&self, duration: Duration) {
+    async fn sleep(&self, duration: Duration) -> Result<()> {
         tokio::time::sleep(duration).await;
+        Ok(())
     }
 }
 
@@ -1420,18 +1416,18 @@ impl DesktopRuntime {
                     }
                     clock
                         .sleep_for(WakeReason::ReasoningPicker, Duration::from_millis(500))
-                        .await;
+                        .await?;
                 }
                 ReasoningDecision::Wait => {
                     clock
                         .sleep_for(WakeReason::ReasoningPicker, Duration::from_millis(500))
-                        .await;
+                        .await?;
                 }
                 ReasoningDecision::RecoverCurrentSurface => {
                     surface.recover_current_surface().await?;
                     clock
                         .sleep_for(WakeReason::ReasoningPicker, Duration::from_millis(500))
-                        .await;
+                        .await?;
                 }
             }
         }
@@ -1633,11 +1629,12 @@ impl DesktopRuntime {
             event_kind,
             json!({"lifecycle": lifecycle}),
         )?;
+        let store = SqliteStore::open(&self.state_db_path)?;
+        store.clear_task_wake(task_id)?;
         if matches!(
             lifecycle,
             ContinuousTaskLifecycle::Active | ContinuousTaskLifecycle::Cancelled
         ) {
-            let store = SqliteStore::open(&self.state_db_path)?;
             store.clear_review_settlements_for_task(task_id)?;
         }
         Ok(state)
@@ -2229,6 +2226,7 @@ mod actor_tests {
     struct FakeSurface {
         active_mutations: AtomicUsize,
         max_active_mutations: AtomicUsize,
+        send_mutations: AtomicUsize,
     }
 
     impl FakeSurface {
@@ -2253,6 +2251,7 @@ mod actor_tests {
         }
 
         async fn send_prompt(&self, _prompt: &str) -> Result<()> {
+            self.send_mutations.fetch_add(1, Ordering::SeqCst);
             self.mutation().await;
             Ok(())
         }
@@ -3084,6 +3083,17 @@ mod actor_tests {
                 json!({"phase":"work","round":1}),
             )
             .unwrap();
+        let now = unix_time_ms().unwrap();
+        SqliteStore::open(&path)
+            .unwrap()
+            .arm_task_wake(
+                &task_id,
+                &RunId::new("run-lifecycle"),
+                WakeReason::RateLimitCooldown.as_str(),
+                now + 300_000,
+                now,
+            )
+            .unwrap();
 
         let paused = runtime.pause_continuous_task(&task_id).unwrap();
         assert_eq!(paused.lifecycle, ContinuousTaskLifecycle::Paused);
@@ -3094,6 +3104,13 @@ mod actor_tests {
         assert_eq!(
             control.lifecycle().await.unwrap(),
             ContinuousTaskLifecycle::Paused
+        );
+        assert!(
+            SqliteStore::open(&path)
+                .unwrap()
+                .task_wake(&task_id)
+                .unwrap()
+                .is_none()
         );
 
         let store = SqliteStore::open(&path).unwrap();
@@ -3130,8 +3147,26 @@ mod actor_tests {
         );
         drop(store);
 
+        let now = unix_time_ms().unwrap();
+        SqliteStore::open(&path)
+            .unwrap()
+            .arm_task_wake(
+                &task_id,
+                &RunId::new("run-lifecycle"),
+                WakeReason::AttachmentWait.as_str(),
+                now + 60_000,
+                now,
+            )
+            .unwrap();
         let cancelled = runtime.cancel_continuous_task(&task_id).unwrap();
         assert_eq!(cancelled.lifecycle, ContinuousTaskLifecycle::Cancelled);
+        assert!(
+            SqliteStore::open(&path)
+                .unwrap()
+                .task_wake(&task_id)
+                .unwrap()
+                .is_none()
+        );
         let loaded = runtime
             .load_continuous_task_state(&task_id)
             .unwrap()
@@ -3158,6 +3193,39 @@ mod actor_tests {
     }
 
     #[tokio::test]
+    async fn durable_wait_fails_closed_when_supervisor_is_unavailable() {
+        let path = scheduler_test_path("closed-supervisor");
+        let (sender, receiver) = mpsc::channel(1);
+        drop(receiver);
+        let supervisor = SupervisorHandle {
+            sender,
+            state_db_path: path.clone(),
+        };
+        let error = supervisor
+            .sleep_for(
+                &TaskId::new("task-a"),
+                &RunId::new("run-a"),
+                WakeReason::RateLimitCooldown,
+                Duration::from_secs(300),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("stopped before wake registration")
+        );
+        assert!(
+            SqliteStore::open(&path)
+                .unwrap()
+                .task_wake(&TaskId::new("task-a"))
+                .unwrap()
+                .is_none()
+        );
+        cleanup_scheduler_path(&path);
+    }
+
+    #[tokio::test]
     async fn rate_limit_deferred_task_does_not_block_runnable_task() {
         let path = scheduler_test_path("rate-limit");
         let supervisor = SupervisorHandle::spawn(path.clone());
@@ -3174,13 +3242,15 @@ mod actor_tests {
 
         let a_wait = tokio::spawn(async move {
             a.sleep_for(WakeReason::RateLimitCooldown, Duration::from_millis(140))
-                .await;
+                .await
+                .unwrap();
             "a"
         });
         tokio::time::sleep(Duration::from_millis(5)).await;
         let b_wait = tokio::spawn(async move {
             b.sleep_for(WakeReason::Poll, Duration::from_millis(5))
-                .await;
+                .await
+                .unwrap();
             "b"
         });
 
@@ -3220,16 +3290,19 @@ mod actor_tests {
 
         let a_wait = tokio::spawn(async move {
             a.sleep_for(WakeReason::AttachmentWait, Duration::from_millis(120))
-                .await;
+                .await
+                .unwrap();
         });
         let b_wait = tokio::spawn(async move {
             b.sleep_for(WakeReason::Poll, Duration::from_millis(5))
-                .await;
+                .await
+                .unwrap();
             "b"
         });
         let c_wait = tokio::spawn(async move {
             c.sleep_for(WakeReason::Poll, Duration::from_millis(8))
-                .await;
+                .await
+                .unwrap();
             "c"
         });
 
@@ -3256,11 +3329,13 @@ mod actor_tests {
                 WakeReason::AuthorizationSettlement,
                 Duration::from_millis(100),
             )
-            .await;
+            .await
+            .unwrap();
         });
         let b_wait = tokio::spawn(async move {
             b.sleep_for(WakeReason::Poll, Duration::from_millis(4))
-                .await;
+                .await
+                .unwrap();
             "b"
         });
         assert_eq!(b_wait.await.unwrap(), "b");
@@ -3291,17 +3366,20 @@ mod actor_tests {
 
         let a_wait = tokio::spawn(async move {
             a.sleep_for(WakeReason::ReviewNoFinal, Duration::from_millis(70))
-                .await;
+                .await
+                .unwrap();
             order_a.lock().await.push("a");
         });
         let b_wait = tokio::spawn(async move {
             b.sleep_for(WakeReason::RecoveryNavigation, Duration::from_millis(20))
-                .await;
+                .await
+                .unwrap();
             order_b.lock().await.push("b");
         });
         let c_wait = tokio::spawn(async move {
             c.sleep_for(WakeReason::AttachmentWait, Duration::from_millis(45))
-                .await;
+                .await
+                .unwrap();
             order_c.lock().await.push("c");
         });
 
@@ -3343,6 +3421,77 @@ mod actor_tests {
                 .unwrap()
                 .is_none()
         );
+        cleanup_scheduler_path(&path);
+    }
+
+    #[test]
+    fn due_task_selection_round_robins_only_due_tasks() {
+        fn pending(task: &str, wake_at_unix_ms: i64) -> (String, PendingWake) {
+            let (reply, _receiver) = oneshot::channel();
+            (
+                task.to_owned(),
+                PendingWake {
+                    task_id: TaskId::new(task),
+                    wake_at_unix_ms,
+                    durable: true,
+                    reply,
+                },
+            )
+        }
+        let pending = HashMap::from([
+            pending("task-a", 100),
+            pending("task-b", 100),
+            pending("task-c", 200),
+        ]);
+        assert_eq!(
+            select_due_task(&pending, 150, None).as_deref(),
+            Some("task-a")
+        );
+        assert_eq!(
+            select_due_task(&pending, 150, Some("task-a")).as_deref(),
+            Some("task-b")
+        );
+        assert_eq!(
+            select_due_task(&pending, 150, Some("task-b")).as_deref(),
+            Some("task-a")
+        );
+        assert_eq!(
+            select_due_task(&pending, 250, Some("task-b")).as_deref(),
+            Some("task-c")
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduler_rotation_keeps_ui_single_writer_without_duplicate_send() {
+        let path = scheduler_test_path("single-writer");
+        let supervisor = SupervisorHandle::spawn(path.clone());
+        let fake = Arc::new(FakeSurface::default());
+        let actor_surface: Arc<dyn ChatSurfacePort> = fake.clone();
+        let actor = DesktopSessionActorHandle::spawn(actor_surface);
+        let a = SupervisorClock::new(
+            supervisor.clone(),
+            TaskId::new("task-a"),
+            RunId::new("run-a"),
+        );
+        let b = SupervisorClock::new(supervisor, TaskId::new("task-b"), RunId::new("run-b"));
+        let actor_a = actor.clone();
+        let actor_b = actor.clone();
+        let left = tokio::spawn(async move {
+            a.sleep_for(WakeReason::RecoveryNavigation, Duration::from_millis(20))
+                .await
+                .unwrap();
+            actor_a.send_prompt("[Fabushi:task-a]").await.unwrap();
+        });
+        let right = tokio::spawn(async move {
+            b.sleep_for(WakeReason::RecoveryNavigation, Duration::from_millis(20))
+                .await
+                .unwrap();
+            actor_b.send_prompt("[Fabushi:task-b]").await.unwrap();
+        });
+        left.await.unwrap();
+        right.await.unwrap();
+        assert_eq!(fake.send_mutations.load(Ordering::SeqCst), 2);
+        assert_eq!(fake.max_active_mutations.load(Ordering::SeqCst), 1);
         cleanup_scheduler_path(&path);
     }
 
