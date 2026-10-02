@@ -15,7 +15,8 @@ use fabushi_chatgpt_desktop_macos::{ChatGptDesktopMacProcess, ChatGptDesktopMacS
 use fabushi_chatgpt_desktop_process::ChatGptDesktopProcess;
 use fabushi_chatgpt_sqlite_store::{
     AttachmentRecord, IncompleteContinuousPhase, PreparedApproval, PreparedDispatch,
-    ReviewSettlementRecord, SqliteStore, StateTransitionRecord, TransitionRecord, UiSessionLease,
+    ReviewSettlementRecord, SqliteStore, StateTransitionRecord, TaskDeletionRecord,
+    TransitionRecord, UiSessionLease,
 };
 use std::collections::HashMap;
 use std::io::Read;
@@ -1240,7 +1241,7 @@ impl RunControlPort for SqliteRunControl {
     async fn lifecycle(&self) -> Result<ContinuousTaskLifecycle> {
         let store = SqliteStore::open(&self.path)?;
         let Some(raw) = store.task_state_json(&self.task_id)? else {
-            return Ok(ContinuousTaskLifecycle::Active);
+            return Ok(ContinuousTaskLifecycle::Cancelled);
         };
         let root: serde_json::Value =
             serde_json::from_str(&raw).context("parse durable task state JSON for run control")?;
@@ -2021,6 +2022,7 @@ impl DesktopRuntime {
     }
 
     async fn reconcile_unsettled_effects_before_run(&self) -> Result<()> {
+        self.reconcile_pending_task_deletions()?;
         let surface = self.desktop_session().await?;
         let snapshot = surface.observe().await?;
         let mut store = SqliteStore::open(&self.state_db_path)?;
@@ -2197,6 +2199,25 @@ impl DesktopRuntime {
         )
     }
 
+    fn finish_task_deletion(&self, deletion: &TaskDeletionRecord) -> Result<()> {
+        let refs: Vec<String> = serde_json::from_str(&deletion.attachment_refs_json)
+            .context("parse durable task deletion attachment refs")?;
+        let attachments = AttachmentStore::open(self.attachment_store_root())?;
+        for storage_ref in refs {
+            attachments.remove_storage_ref(Path::new(&storage_ref))?;
+        }
+        SqliteStore::open(&self.state_db_path)?
+            .complete_task_delete(&TaskId::new(deletion.task_id.clone()), unix_time_ms()?)
+    }
+
+    fn reconcile_pending_task_deletions(&self) -> Result<()> {
+        let deletions = SqliteStore::open(&self.state_db_path)?.pending_task_deletions()?;
+        for deletion in deletions {
+            self.finish_task_deletion(&deletion)?;
+        }
+        Ok(())
+    }
+
     fn mutate_continuous_task_lifecycle(
         &self,
         task_id: &TaskId,
@@ -2287,6 +2308,21 @@ impl DesktopRuntime {
             }),
         )?;
         Ok(state)
+    }
+
+    pub fn delete_continuous_task(&self, task_id: &TaskId) -> Result<()> {
+        self.reconcile_pending_task_deletions()?;
+        let state = self
+            .load_continuous_task_state(task_id)?
+            .ok_or_else(|| anyhow::anyhow!("continuous task not found"))?;
+        if !state.completed && state.lifecycle == ContinuousTaskLifecycle::Active {
+            bail!("active continuous task must be paused or cancelled before delete");
+        }
+        let deletion = {
+            let mut store = SqliteStore::open(&self.state_db_path)?;
+            store.prepare_task_delete(task_id, unix_time_ms()?)?
+        };
+        self.finish_task_deletion(&deletion)
     }
 
     pub async fn run_continuous(
@@ -4232,6 +4268,150 @@ mod actor_tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[test]
+    fn delete_requires_stopped_lifecycle_and_removes_attachment_bytes() {
+        let root = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-delete-task-{}-{}",
+            std::process::id(),
+            dispatch_marker().unwrap()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let state_db = root.join("state.sqlite3");
+        let input = root.join("notes.txt");
+        std::fs::write(&input, b"delete me").unwrap();
+        let runtime = DesktopRuntime::new(LifecycleTestProcess, FakeSurface::default())
+            .with_state_db_path(state_db.clone());
+        let task_id = TaskId::new("task-delete");
+        let state =
+            ContinuousTaskState::new(task_id.clone(), "goal".into(), ReasoningPreset::ExtraHigh);
+        runtime
+            .persist_continuous_task_state(
+                &state,
+                &RunId::new("run-delete"),
+                "continuous_task_created",
+                json!({}),
+            )
+            .unwrap();
+        runtime
+            .stage_task_attachments(&task_id, std::slice::from_ref(&input))
+            .unwrap();
+        let stored = SqliteStore::open(&state_db)
+            .unwrap()
+            .task_attachments(&task_id)
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        let storage_ref = PathBuf::from(&stored[0].storage_ref);
+        assert!(storage_ref.exists());
+
+        assert!(runtime.delete_continuous_task(&task_id).is_err());
+        runtime.pause_continuous_task(&task_id).unwrap();
+        runtime.delete_continuous_task(&task_id).unwrap();
+
+        let store = SqliteStore::open(&state_db).unwrap();
+        assert!(store.task_state_json(&task_id).unwrap().is_none());
+        assert!(store.task_attachments(&task_id).unwrap().is_empty());
+        assert!(store.pending_task_deletions().unwrap().is_empty());
+        assert!(!storage_ref.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn restart_finishes_crash_left_task_attachment_cleanup() {
+        let root = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-delete-restart-{}-{}",
+            std::process::id(),
+            dispatch_marker().unwrap()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let state_db = root.join("state.sqlite3");
+        let input = root.join("notes.txt");
+        std::fs::write(&input, b"cleanup after crash").unwrap();
+        let runtime = DesktopRuntime::new(LifecycleTestProcess, FakeSurface::default())
+            .with_state_db_path(state_db.clone());
+        let task_id = TaskId::new("task-delete-restart");
+        let state =
+            ContinuousTaskState::new(task_id.clone(), "goal".into(), ReasoningPreset::ExtraHigh)
+                .pause();
+        runtime
+            .persist_continuous_task_state(
+                &state,
+                &RunId::new("run-delete-restart"),
+                "continuous_task_paused",
+                json!({}),
+            )
+            .unwrap();
+        runtime
+            .stage_task_attachments(&task_id, std::slice::from_ref(&input))
+            .unwrap();
+        let stored = SqliteStore::open(&state_db)
+            .unwrap()
+            .task_attachments(&task_id)
+            .unwrap();
+        let storage_ref = PathBuf::from(&stored[0].storage_ref);
+
+        let deletion = SqliteStore::open(&state_db)
+            .unwrap()
+            .prepare_task_delete(&task_id, unix_time_ms().unwrap())
+            .unwrap();
+        assert_eq!(deletion.state, "pending");
+        assert!(storage_ref.exists(), "simulated crash leaves bytes behind");
+        assert!(
+            SqliteStore::open(&state_db)
+                .unwrap()
+                .task_state_json(&task_id)
+                .unwrap()
+                .is_none()
+        );
+
+        let restarted = DesktopRuntime::new(LifecycleTestProcess, FakeSurface::default())
+            .with_state_db_path(state_db.clone());
+        restarted.reconcile_pending_task_deletions().unwrap();
+        assert!(!storage_ref.exists());
+        assert!(
+            SqliteStore::open(&state_db)
+                .unwrap()
+                .pending_task_deletions()
+                .unwrap()
+                .is_empty()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn deleted_task_is_cancelled_for_live_run_control() {
+        let root = std::env::temp_dir().join(format!(
+            "fabushi-chatgpt-delete-control-{}-{}",
+            std::process::id(),
+            dispatch_marker().unwrap()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let state_db = root.join("state.sqlite3");
+        let runtime = DesktopRuntime::new(LifecycleTestProcess, FakeSurface::default())
+            .with_state_db_path(state_db.clone());
+        let task_id = TaskId::new("task-delete-control");
+        let state =
+            ContinuousTaskState::new(task_id.clone(), "goal".into(), ReasoningPreset::ExtraHigh)
+                .pause();
+        runtime
+            .persist_continuous_task_state(
+                &state,
+                &RunId::new("run-delete-control"),
+                "continuous_task_paused",
+                json!({}),
+            )
+            .unwrap();
+        runtime.delete_continuous_task(&task_id).unwrap();
+        let control = SqliteRunControl {
+            path: state_db.clone(),
+            task_id,
+        };
+        assert_eq!(
+            control.lifecycle().await.unwrap(),
+            ContinuousTaskLifecycle::Cancelled
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

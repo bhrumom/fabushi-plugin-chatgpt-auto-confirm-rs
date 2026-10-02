@@ -185,11 +185,13 @@
         "crates/adapters/sqlite-store/Cargo.toml",
         "crates/runtime/src/lib.rs",
         "start_fresh_conversation persists baseline user-turn/conversation identity, re-observes a clean fresh-surface postcondition before settlement, and startup reconciliation can settle crash-left fresh effects without replay",
-        "startup_reconciliation_settles_fresh_conversation_only_from_clean_postcondition and startup_reconciliation_keeps_fresh_conversation_pending_when_old_owned_turn_remains"
+        "startup_reconciliation_settles_fresh_conversation_only_from_clean_postcondition and startup_reconciliation_keeps_fresh_conversation_pending_when_old_owned_turn_remains",
+        "SQLite schema v4 task_deletions tombstone makes task deletion crash-resumable across database cleanup and attachment-byte cleanup",
+        "task_delete_is_transactional_and_refuses_pending_effects plus restart_finishes_crash_left_task_attachment_cleanup prove fail-closed deletion and restart cleanup"
       ],
       "missing": [
         "semantic startup reconciliation for recover/reload destructive effects",
-        "full task CRUD/control",
+        "exact-artifact task lifecycle acceptance",
         "resumable supervision after fail-closed ambiguous pending effects",
         "real crash/restart acceptance"
       ]

@@ -87,6 +87,34 @@ impl AttachmentStore {
         }
         fs::read(&attachment.storage_ref).context("read verified attachment")
     }
+
+    pub fn remove_storage_ref(&self, storage_ref: impl AsRef<Path>) -> Result<()> {
+        let storage_ref = storage_ref.as_ref();
+        if !storage_ref.exists() {
+            return Ok(());
+        }
+        let canonical_root = self
+            .root
+            .canonicalize()
+            .context("canonicalize attachment root")?;
+        let canonical_path = storage_ref
+            .canonicalize()
+            .with_context(|| format!("canonicalize attachment path {storage_ref:?}"))?;
+        if !canonical_path.starts_with(&canonical_root) {
+            bail!("attachment deletion escaped attachment root");
+        }
+        fs::remove_file(&canonical_path)
+            .with_context(|| format!("remove task attachment {canonical_path:?}"))?;
+        if let Some(parent) = canonical_path.parent()
+            && parent != canonical_root
+            && parent.starts_with(&canonical_root)
+            && fs::read_dir(parent)?.next().is_none()
+        {
+            fs::remove_dir(parent)
+                .with_context(|| format!("remove empty attachment directory {parent:?}"))?;
+        }
+        Ok(())
+    }
 }
 
 fn sanitize_file_name(file_name: &str) -> Result<String> {
@@ -145,6 +173,29 @@ mod tests {
         assert!(!store.verify(&attachment).unwrap());
         assert!(store.bytes(&attachment).is_err());
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn removes_stored_attachment_idempotently_and_rejects_escape() {
+        let root = test_root();
+        let store = AttachmentStore::open(&root).unwrap();
+        let attachment = store
+            .persist_bytes(AttachmentId::new("a-delete"), "notes.txt", b"hello")
+            .unwrap();
+        store.remove_storage_ref(&attachment.storage_ref).unwrap();
+        assert!(!attachment.storage_ref.exists());
+        store.remove_storage_ref(&attachment.storage_ref).unwrap();
+
+        let outside = root.parent().unwrap().join(format!(
+            "outside-{}-{}.txt",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&outside, b"do not delete").unwrap();
+        assert!(store.remove_storage_ref(&outside).is_err());
+        assert!(outside.exists());
+        fs::remove_file(outside).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 

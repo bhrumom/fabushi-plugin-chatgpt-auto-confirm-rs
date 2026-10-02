@@ -3,7 +3,7 @@ use fabushi_chatgpt_domain::{AttachmentId, DispatchId, RunId, TaskId};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::Value;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitionRecord {
@@ -111,6 +111,13 @@ pub struct UiSessionLease {
     pub owner_id: String,
     pub generation: i64,
     pub expires_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskDeletionRecord {
+    pub task_id: String,
+    pub attachment_refs_json: String,
+    pub state: String,
 }
 
 pub struct SqliteStore {
@@ -265,6 +272,14 @@ impl SqliteStore {
                 payload_json TEXT NOT NULL,
                 sha256 TEXT,
                 created_at_unix_ms INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS task_deletions (
+                task_id TEXT PRIMARY KEY,
+                attachment_refs_json TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('pending','completed')),
+                created_at_unix_ms INTEGER NOT NULL,
+                completed_at_unix_ms INTEGER
             );
             ",
         )?;
@@ -891,6 +906,100 @@ impl SqliteStore {
             .context("read task attachments")
     }
 
+    pub fn prepare_task_delete(
+        &mut self,
+        task_id: &TaskId,
+        now_unix_ms: i64,
+    ) -> Result<TaskDeletionRecord> {
+        let transaction = self.connection.transaction()?;
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE task_id=?1)",
+            [task_id.as_str()],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            bail!("continuous task not found");
+        }
+        let pending_count: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM effect_outbox WHERE task_id=?1 AND status='pending'",
+            [task_id.as_str()],
+            |row| row.get(0),
+        )?;
+        if pending_count != 0 {
+            bail!("continuous task has pending destructive effects and cannot be deleted");
+        }
+
+        let attachment_refs = {
+            let mut statement = transaction.prepare(
+                "SELECT storage_ref FROM attachments WHERE task_id=?1 ORDER BY attachment_id ASC",
+            )?;
+            statement
+                .query_map([task_id.as_str()], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let attachment_refs_json = serde_json::to_string(&attachment_refs)
+            .context("serialize task deletion attachment refs")?;
+        transaction.execute(
+            "INSERT INTO task_deletions(task_id, attachment_refs_json, state, created_at_unix_ms, completed_at_unix_ms)
+             VALUES(?1, ?2, 'pending', ?3, NULL)
+             ON CONFLICT(task_id) DO UPDATE SET
+               attachment_refs_json=excluded.attachment_refs_json,
+               state='pending',
+               created_at_unix_ms=excluded.created_at_unix_ms,
+               completed_at_unix_ms=NULL",
+            params![task_id.as_str(), attachment_refs_json, now_unix_ms],
+        )?;
+
+        for sql in [
+            "DELETE FROM task_wakes WHERE task_id=?1",
+            "DELETE FROM review_settlement_states WHERE task_id=?1",
+            "DELETE FROM approval_fingerprints WHERE task_id=?1",
+            "DELETE FROM effect_outbox WHERE task_id=?1",
+            "DELETE FROM dispatch_attempts WHERE task_id=?1",
+            "DELETE FROM run_events WHERE task_id=?1",
+            "DELETE FROM attachments WHERE task_id=?1",
+            "DELETE FROM acceptance_evidence WHERE task_id=?1",
+            "DELETE FROM runs WHERE task_id=?1",
+            "DELETE FROM tasks WHERE task_id=?1",
+        ] {
+            transaction.execute(sql, [task_id.as_str()])?;
+        }
+        transaction.commit()?;
+        Ok(TaskDeletionRecord {
+            task_id: task_id.as_str().to_owned(),
+            attachment_refs_json,
+            state: "pending".into(),
+        })
+    }
+
+    pub fn pending_task_deletions(&self) -> Result<Vec<TaskDeletionRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT task_id, attachment_refs_json, state
+             FROM task_deletions WHERE state='pending' ORDER BY created_at_unix_ms ASC, task_id ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(TaskDeletionRecord {
+                task_id: row.get(0)?,
+                attachment_refs_json: row.get(1)?,
+                state: row.get(2)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("read pending task deletions")
+    }
+
+    pub fn complete_task_delete(&self, task_id: &TaskId, now_unix_ms: i64) -> Result<()> {
+        let changed = self.connection.execute(
+            "UPDATE task_deletions SET state='completed', completed_at_unix_ms=?2
+             WHERE task_id=?1 AND state='pending'",
+            params![task_id.as_str(), now_unix_ms],
+        )?;
+        if changed != 1 {
+            bail!("pending task deletion not found");
+        }
+        Ok(())
+    }
+
     pub fn task_wake(&self, task_id: &TaskId) -> Result<Option<TaskWakeRecord>> {
         self.connection
             .query_row(
@@ -1169,7 +1278,7 @@ mod tests {
     #[test]
     fn enables_schema_and_wal_contract() {
         let store = SqliteStore::in_memory().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 3);
+        assert_eq!(store.schema_version().unwrap(), 4);
         assert_eq!(store.count_rows("tasks").unwrap(), 0);
         assert_eq!(store.count_rows("effect_outbox").unwrap(), 0);
     }
@@ -1191,6 +1300,49 @@ mod tests {
         let effects = store.pending_effects(10).unwrap();
         assert_eq!(effects.len(), 1);
         assert_eq!(effects[0].idempotency_key, "effect-1");
+    }
+
+    #[test]
+    fn task_delete_is_transactional_and_refuses_pending_effects() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        store
+            .record_transition(&transition(0, "delete-effect"), 100)
+            .unwrap();
+        store
+            .upsert_attachment(&AttachmentRecord {
+                attachment_id: AttachmentId::new("delete-attachment"),
+                task_id: TaskId::new("task-1"),
+                file_name: "notes.txt".into(),
+                sha256: "abc".into(),
+                storage_ref: "/tmp/delete-attachment/notes.txt".into(),
+                metadata_json: r#"{"byteLen":3}"#.into(),
+            })
+            .unwrap();
+
+        assert!(
+            store
+                .prepare_task_delete(&TaskId::new("task-1"), 200)
+                .is_err()
+        );
+        let effect = store.pending_effects(10).unwrap().remove(0);
+        store
+            .settle_effect(effect.id, r#"{"ok":true}"#, 201)
+            .unwrap();
+        let deletion = store
+            .prepare_task_delete(&TaskId::new("task-1"), 202)
+            .unwrap();
+        assert_eq!(deletion.state, "pending");
+        assert!(deletion.attachment_refs_json.contains("notes.txt"));
+        assert_eq!(store.count_rows("tasks").unwrap(), 0);
+        assert_eq!(store.count_rows("runs").unwrap(), 0);
+        assert_eq!(store.count_rows("run_events").unwrap(), 0);
+        assert_eq!(store.count_rows("effect_outbox").unwrap(), 0);
+        assert_eq!(store.count_rows("attachments").unwrap(), 0);
+        assert_eq!(store.pending_task_deletions().unwrap().len(), 1);
+        store
+            .complete_task_delete(&TaskId::new("task-1"), 203)
+            .unwrap();
+        assert!(store.pending_task_deletions().unwrap().is_empty());
     }
 
     #[test]
