@@ -881,8 +881,8 @@ mod tests {
                     next_revision: 1,
                     event_kind: "continuous_phase_started".into(),
                     event_payload_json: r#"{"phase":"work","round":1}"#.into(),
-                    materialized_state_json:
-                        r#"{"orchestration":{"phase":"work","round":1}}"#.into(),
+                    materialized_state_json: r#"{"orchestration":{"phase":"work","round":1}}"#
+                        .into(),
                 },
                 100,
             )

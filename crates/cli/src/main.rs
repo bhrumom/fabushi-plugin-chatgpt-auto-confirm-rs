@@ -143,12 +143,7 @@ async fn main() -> Result<()> {
             let requested_reasoning = ReasoningPreset::from_index(reasoning)
                 .ok_or_else(|| anyhow::anyhow!("reasoning must be one of 0,1,2,3,4"))?;
             let report = runtime
-                .run_continuous(
-                    TaskId::new(task_id),
-                    &goal,
-                    requested_reasoning,
-                    options,
-                )
+                .run_continuous(TaskId::new(task_id), &goal, requested_reasoning, options)
                 .await
                 .context("ChatGPT desktop continuous automation run failed")?;
             println!("{}", serde_json::to_string_pretty(&report)?);

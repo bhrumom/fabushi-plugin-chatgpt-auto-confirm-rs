@@ -2013,22 +2013,21 @@ mod tests {
         assert_eq!(next.round, Round::new(2));
         assert_eq!(next.current_next.as_deref(), Some("next action"));
         assert!(!next.completed);
-        assert!(next.work_instruction().contains("上一轮已完成的 Work 最终回复"));
+        assert!(
+            next.work_instruction()
+                .contains("上一轮已完成的 Work 最终回复")
+        );
 
-        let done = ContinuousTaskState::new(
-            task_id(),
-            "goal".into(),
-            ReasoningPreset::ExtraHigh,
-        )
-        .after_work_result("result".into())
-        .apply_review(ReviewReport {
-            task_id: task_id(),
-            round: Round::new(1),
-            status: ReviewStatus::Complete,
-            summary: "done".into(),
-            next: None,
-        })
-        .unwrap();
+        let done = ContinuousTaskState::new(task_id(), "goal".into(), ReasoningPreset::ExtraHigh)
+            .after_work_result("result".into())
+            .apply_review(ReviewReport {
+                task_id: task_id(),
+                round: Round::new(1),
+                status: ReviewStatus::Complete,
+                summary: "done".into(),
+                next: None,
+            })
+            .unwrap();
         assert!(done.completed);
     }
 

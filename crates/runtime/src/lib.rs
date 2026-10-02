@@ -1012,10 +1012,7 @@ impl DesktopRuntime {
         Ok(())
     }
 
-    fn load_continuous_task_state(
-        &self,
-        task_id: &TaskId,
-    ) -> Result<Option<ContinuousTaskState>> {
+    fn load_continuous_task_state(&self, task_id: &TaskId) -> Result<Option<ContinuousTaskState>> {
         let store = SqliteStore::open(&self.state_db_path)?;
         let Some(raw) = store.task_state_json(task_id)? else {
             return Ok(None);
@@ -1077,11 +1074,7 @@ impl DesktopRuntime {
                 }
                 existing
             }
-            None => ContinuousTaskState::new(
-                task_id.clone(),
-                goal.to_owned(),
-                requested_reasoning,
-            ),
+            None => ContinuousTaskState::new(task_id.clone(), goal.to_owned(), requested_reasoning),
         };
 
         if state.completed {
