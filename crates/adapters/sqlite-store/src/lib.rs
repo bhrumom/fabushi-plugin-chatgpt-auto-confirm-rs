@@ -3,7 +3,7 @@ use fabushi_chatgpt_domain::{DispatchId, RunId, TaskId};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::Value;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitionRecord {
@@ -63,6 +63,17 @@ pub struct ApprovalFingerprintRecord {
     pub conversation_fingerprint: String,
     pub settlement_until_unix_ms: Option<i64>,
     pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewSettlementRecord {
+    pub task_id: String,
+    pub run_id: String,
+    pub phase: String,
+    pub round: i64,
+    pub conversation_fingerprint: String,
+    pub progress_signature: String,
+    pub no_final_since_unix_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,6 +198,18 @@ impl SqliteStore {
                 conversation_fingerprint TEXT NOT NULL,
                 settlement_until_unix_ms INTEGER,
                 state TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS review_settlement_states (
+                task_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                phase TEXT NOT NULL,
+                round INTEGER NOT NULL,
+                conversation_fingerprint TEXT NOT NULL,
+                progress_signature TEXT NOT NULL,
+                no_final_since_unix_ms INTEGER NOT NULL,
+                updated_at_unix_ms INTEGER NOT NULL,
+                PRIMARY KEY(task_id, run_id, phase, round, conversation_fingerprint)
             );
 
             CREATE TABLE IF NOT EXISTS ui_session_leases (
@@ -485,6 +508,96 @@ impl SqliteStore {
 
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("read pending effects")
+    }
+
+    pub fn review_settlement(
+        &self,
+        task_id: &TaskId,
+        run_id: &RunId,
+        phase: &str,
+        round: i64,
+        conversation_fingerprint: &str,
+    ) -> Result<Option<ReviewSettlementRecord>> {
+        self.connection
+            .query_row(
+                "SELECT task_id, run_id, phase, round, conversation_fingerprint,
+                        progress_signature, no_final_since_unix_ms
+                 FROM review_settlement_states
+                 WHERE task_id=?1 AND run_id=?2 AND phase=?3 AND round=?4
+                   AND conversation_fingerprint=?5",
+                params![
+                    task_id.as_str(),
+                    run_id.as_str(),
+                    phase,
+                    round,
+                    conversation_fingerprint
+                ],
+                |row| {
+                    Ok(ReviewSettlementRecord {
+                        task_id: row.get(0)?,
+                        run_id: row.get(1)?,
+                        phase: row.get(2)?,
+                        round: row.get(3)?,
+                        conversation_fingerprint: row.get(4)?,
+                        progress_signature: row.get(5)?,
+                        no_final_since_unix_ms: row.get(6)?,
+                    })
+                },
+            )
+            .optional()
+            .context("read review settlement")
+    }
+
+    pub fn store_review_settlement(
+        &self,
+        record: &ReviewSettlementRecord,
+        now_unix_ms: i64,
+    ) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO review_settlement_states(
+                 task_id, run_id, phase, round, conversation_fingerprint,
+                 progress_signature, no_final_since_unix_ms, updated_at_unix_ms
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(task_id, run_id, phase, round, conversation_fingerprint)
+             DO UPDATE SET
+                 progress_signature=excluded.progress_signature,
+                 no_final_since_unix_ms=excluded.no_final_since_unix_ms,
+                 updated_at_unix_ms=excluded.updated_at_unix_ms",
+            params![
+                record.task_id,
+                record.run_id,
+                record.phase,
+                record.round,
+                record.conversation_fingerprint,
+                record.progress_signature,
+                record.no_final_since_unix_ms,
+                now_unix_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_review_settlement(
+        &self,
+        task_id: &TaskId,
+        run_id: &RunId,
+        phase: &str,
+        round: i64,
+        conversation_fingerprint: &str,
+    ) -> Result<()> {
+        self.connection.execute(
+            "DELETE FROM review_settlement_states
+             WHERE task_id=?1 AND run_id=?2 AND phase=?3 AND round=?4
+               AND conversation_fingerprint=?5",
+            params![
+                task_id.as_str(),
+                run_id.as_str(),
+                phase,
+                round,
+                conversation_fingerprint
+            ],
+        )?;
+        Ok(())
     }
 
     pub fn approval_fingerprint(
@@ -888,7 +1001,7 @@ mod tests {
     #[test]
     fn enables_schema_and_wal_contract() {
         let store = SqliteStore::in_memory().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 1);
+        assert_eq!(store.schema_version().unwrap(), 2);
         assert_eq!(store.count_rows("tasks").unwrap(), 0);
         assert_eq!(store.count_rows("effect_outbox").unwrap(), 0);
     }
@@ -1248,6 +1361,100 @@ mod tests {
         assert_eq!(approval.state, "pending");
         assert_eq!(approval.settlement_until_unix_ms, None);
         assert_eq!(store.pending_effects(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn review_settlement_is_scoped_to_full_run_identity() {
+        let store = SqliteStore::in_memory().unwrap();
+        let record = ReviewSettlementRecord {
+            task_id: "task-review".into(),
+            run_id: "run-review".into(),
+            phase: "review".into(),
+            round: 3,
+            conversation_fingerprint: "conversation-a".into(),
+            progress_signature: "progress-a".into(),
+            no_final_since_unix_ms: 1_000,
+        };
+        store.store_review_settlement(&record, 1_100).unwrap();
+
+        let exact = store
+            .review_settlement(
+                &TaskId::new("task-review"),
+                &RunId::new("run-review"),
+                "review",
+                3,
+                "conversation-a",
+            )
+            .unwrap();
+        assert!(exact.is_some());
+
+        let wrong = [
+            (
+                "task-other",
+                "run-review",
+                "review",
+                3_i64,
+                "conversation-a",
+            ),
+            (
+                "task-review",
+                "run-other",
+                "review",
+                3_i64,
+                "conversation-a",
+            ),
+            ("task-review", "run-review", "work", 3_i64, "conversation-a"),
+            (
+                "task-review",
+                "run-review",
+                "review",
+                4_i64,
+                "conversation-a",
+            ),
+            (
+                "task-review",
+                "run-review",
+                "review",
+                3_i64,
+                "conversation-b",
+            ),
+        ];
+        for (task, run, phase, round, conversation) in wrong {
+            assert!(
+                store
+                    .review_settlement(
+                        &TaskId::new(task),
+                        &RunId::new(run),
+                        phase,
+                        round,
+                        conversation,
+                    )
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        store
+            .clear_review_settlement(
+                &TaskId::new("task-review"),
+                &RunId::new("run-review"),
+                "review",
+                3,
+                "conversation-a",
+            )
+            .unwrap();
+        assert!(
+            store
+                .review_settlement(
+                    &TaskId::new("task-review"),
+                    &RunId::new("run-review"),
+                    "review",
+                    3,
+                    "conversation-a",
+                )
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

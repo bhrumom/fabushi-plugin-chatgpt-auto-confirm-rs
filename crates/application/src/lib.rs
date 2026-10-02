@@ -2,12 +2,12 @@ use anyhow::{Result, bail};
 use async_trait::async_trait;
 use fabushi_chatgpt_domain::{
     ApprovalSettlementKey, AssistantResponseBoundary, AuthorizationSettlementState,
-    ChatSurfaceSnapshot, DispatchId, GoalRevision, HydrationState, OwnershipConfidence, Phase,
-    ReasoningPreset, RecoveryEnvelope, RecoveryEnvelopeV1, ReviewStatus, Round, RunId, RunReport,
-    RunState, StrictReviewReportEvidence, TaskId,
+    ChatSurfaceSnapshot, ConversationFingerprint, DispatchId, GoalRevision, HydrationState,
+    OwnershipConfidence, Phase, ReasoningPreset, RecoveryEnvelope, RecoveryEnvelopeV1,
+    ReviewStatus, Round, RunId, RunReport, RunState, StrictReviewReportEvidence, TaskId,
 };
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const AUTHORIZATION_SETTLEMENT_WINDOW: Duration = Duration::from_secs(12);
 pub const NO_APPROVAL_RECHECK_WINDOW: Duration = Duration::from_secs(8);
@@ -57,13 +57,54 @@ pub trait ChatProcessPort: Send + Sync {
 #[async_trait]
 pub trait Clock: Send + Sync {
     fn now(&self) -> Duration;
+
+    fn unix_time_ms(&self) -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_millis().min(i64::MAX as u128) as i64)
+            .unwrap_or(0)
+    }
+
     async fn sleep(&self, duration: Duration);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewRunIdentity {
     pub task_id: TaskId,
+    pub run_id: RunId,
+    pub phase: Phase,
     pub round: Round,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewSettlementKey {
+    pub task_id: TaskId,
+    pub run_id: RunId,
+    pub phase: Phase,
+    pub round: Round,
+    pub conversation_fingerprint: ConversationFingerprint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableReviewSettlementState {
+    pub progress_signature: String,
+    pub no_final_since_unix_ms: i64,
+}
+
+#[async_trait]
+pub trait ReviewSettlementPort: Send + Sync {
+    async fn load_review_settlement(
+        &self,
+        key: &ReviewSettlementKey,
+    ) -> Result<Option<DurableReviewSettlementState>>;
+
+    async fn store_review_settlement(
+        &self,
+        key: &ReviewSettlementKey,
+        state: &DurableReviewSettlementState,
+    ) -> Result<()>;
+
+    async fn clear_review_settlement(&self, key: &ReviewSettlementKey) -> Result<()>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,11 +167,28 @@ impl Default for RunOptions {
 pub struct RunPrompt<'a> {
     surface: &'a dyn ChatSurfacePort,
     clock: &'a dyn Clock,
+    review_settlement: Option<&'a dyn ReviewSettlementPort>,
 }
 
 impl<'a> RunPrompt<'a> {
     pub fn new(surface: &'a dyn ChatSurfacePort, clock: &'a dyn Clock) -> Self {
-        Self { surface, clock }
+        Self {
+            surface,
+            clock,
+            review_settlement: None,
+        }
+    }
+
+    pub fn with_review_settlement(
+        surface: &'a dyn ChatSurfacePort,
+        clock: &'a dyn Clock,
+        review_settlement: &'a dyn ReviewSettlementPort,
+    ) -> Self {
+        Self {
+            surface,
+            clock,
+            review_settlement: Some(review_settlement),
+        }
     }
 
     pub async fn execute(&self, prompt: &str, options: RunOptions) -> Result<RunReport> {
@@ -176,6 +234,7 @@ impl<'a> RunPrompt<'a> {
             .review_identity
             .as_ref()
             .map(|_| ReviewSettlementTracker::default());
+        let mut loaded_review_key: Option<ReviewSettlementKey> = None;
 
         loop {
             let now = self.clock.now();
@@ -221,6 +280,19 @@ impl<'a> RunPrompt<'a> {
                 continue;
             }
 
+            let observed_review_key = options.review_identity.as_ref().and_then(|identity| {
+                snapshot
+                    .conversation_fingerprint
+                    .clone()
+                    .map(|conversation_fingerprint| ReviewSettlementKey {
+                        task_id: identity.task_id.clone(),
+                        run_id: identity.run_id.clone(),
+                        phase: identity.phase,
+                        round: identity.round,
+                        conversation_fingerprint,
+                    })
+            });
+
             let current_fingerprint = snapshot.activity_fingerprint();
             if current_fingerprint != fingerprint {
                 fingerprint = current_fingerprint;
@@ -233,6 +305,15 @@ impl<'a> RunPrompt<'a> {
                 && snapshot.authorization_actionable
                 && self.surface.approve_current_conversation().await?
             {
+                if let (Some(port), Some(key)) =
+                    (self.review_settlement, observed_review_key.as_ref())
+                {
+                    port.clear_review_settlement(key).await?;
+                    loaded_review_key = None;
+                    if let Some(tracker) = review_tracker.as_mut() {
+                        *tracker = ReviewSettlementTracker::default();
+                    }
+                }
                 approvals += 1;
                 terminal_since = None;
                 self.clock.sleep(options.poll_interval).await;
@@ -242,6 +323,15 @@ impl<'a> RunPrompt<'a> {
             if snapshot.authorization_surface_present
                 || snapshot.authorization_settlement == AuthorizationSettlementState::Settling
             {
+                if let (Some(port), Some(key)) =
+                    (self.review_settlement, observed_review_key.as_ref())
+                {
+                    port.clear_review_settlement(key).await?;
+                    loaded_review_key = None;
+                    if let Some(tracker) = review_tracker.as_mut() {
+                        *tracker = ReviewSettlementTracker::default();
+                    }
+                }
                 terminal_since = None;
                 self.clock.sleep(options.poll_interval).await;
                 continue;
@@ -251,6 +341,12 @@ impl<'a> RunPrompt<'a> {
                 || snapshot.stream_polling_timeout
                 || snapshot.conversation_length_limit
             {
+                if let (Some(port), Some(key)) =
+                    (self.review_settlement, observed_review_key.as_ref())
+                {
+                    port.clear_review_settlement(key).await?;
+                    loaded_review_key = None;
+                }
                 if !self.destructive_handoff_is_safe().await? {
                     terminal_since = None;
                     self.clock.sleep(options.poll_interval).await;
@@ -273,10 +369,25 @@ impl<'a> RunPrompt<'a> {
             }
 
             if snapshot.rate_limit && self.surface.dismiss_rate_limit_notice().await? {
+                if let (Some(port), Some(key)) =
+                    (self.review_settlement, observed_review_key.as_ref())
+                {
+                    port.clear_review_settlement(key).await?;
+                    loaded_review_key = None;
+                    if let Some(tracker) = review_tracker.as_mut() {
+                        *tracker = ReviewSettlementTracker::default();
+                    }
+                }
                 rate_limits += 1;
                 if rate_limits > options.max_rate_limit_pauses
                     && self.destructive_handoff_is_safe().await?
                 {
+                    if let (Some(port), Some(key)) =
+                        (self.review_settlement, loaded_review_key.as_ref())
+                    {
+                        port.clear_review_settlement(key).await?;
+                        loaded_review_key = None;
+                    }
                     let recovery_prompt = recovery_handoff_prompt(
                         prompt,
                         options.recovery_context.as_ref(),
@@ -302,8 +413,30 @@ impl<'a> RunPrompt<'a> {
             if let (Some(identity), Some(tracker)) =
                 (options.review_identity.as_ref(), review_tracker.as_mut())
             {
+                let review_key = observed_review_key.clone();
+                if loaded_review_key.as_ref() != review_key.as_ref() {
+                    if let (Some(port), Some(previous_key)) =
+                        (self.review_settlement, loaded_review_key.as_ref())
+                    {
+                        port.clear_review_settlement(previous_key).await?;
+                    }
+                    *tracker = ReviewSettlementTracker::default();
+                    loaded_review_key = review_key.clone();
+                    if let (Some(port), Some(key)) = (self.review_settlement, review_key.as_ref())
+                        && let Some(state) = port.load_review_settlement(key).await?
+                    {
+                        tracker.restore_persistent(&state, now, self.clock.unix_time_ms());
+                    }
+                }
+
+                let before = tracker.clone();
                 match tracker.observe(&snapshot, &identity.task_id, identity.round, now) {
                     ReviewSettlementDecision::Final(_) => {
+                        if let (Some(port), Some(key)) =
+                            (self.review_settlement, loaded_review_key.as_ref())
+                        {
+                            port.clear_review_settlement(key).await?;
+                        }
                         return Ok(RunReport {
                             state: RunState::Complete,
                             conversation_ref: snapshot.conversation_ref,
@@ -320,6 +453,12 @@ impl<'a> RunPrompt<'a> {
                             terminal_since = None;
                             self.clock.sleep(options.poll_interval).await;
                             continue;
+                        }
+                        if let (Some(port), Some(key)) =
+                            (self.review_settlement, loaded_review_key.as_ref())
+                        {
+                            port.clear_review_settlement(key).await?;
+                            loaded_review_key = None;
                         }
                         let recovery_prompt = recovery_handoff_prompt(
                             prompt,
@@ -338,6 +477,16 @@ impl<'a> RunPrompt<'a> {
                         continue;
                     }
                     ReviewSettlementDecision::Wait => {}
+                }
+                if before != *tracker
+                    && let (Some(port), Some(key)) =
+                        (self.review_settlement, loaded_review_key.as_ref())
+                {
+                    if let Some(state) = tracker.persistent_state(now, self.clock.unix_time_ms()) {
+                        port.store_review_settlement(key, &state).await?;
+                    } else {
+                        port.clear_review_settlement(key).await?;
+                    }
                 }
                 terminal_since = None;
             } else if snapshot.ordinary_terminal_evidence() {
@@ -690,9 +839,41 @@ pub enum ReviewSettlementDecision {
 pub struct ReviewSettlementTracker {
     last_progress_fingerprint: Option<String>,
     no_final_since: Option<Duration>,
+    carried_no_final_elapsed: Duration,
 }
 
 impl ReviewSettlementTracker {
+    pub fn restore_persistent(
+        &mut self,
+        state: &DurableReviewSettlementState,
+        now: Duration,
+        now_unix_ms: i64,
+    ) {
+        let elapsed_ms = now_unix_ms
+            .saturating_sub(state.no_final_since_unix_ms)
+            .max(0) as u64;
+        self.last_progress_fingerprint = Some(state.progress_signature.clone());
+        self.no_final_since = Some(now);
+        self.carried_no_final_elapsed = Duration::from_millis(elapsed_ms);
+    }
+
+    pub fn persistent_state(
+        &self,
+        now: Duration,
+        now_unix_ms: i64,
+    ) -> Option<DurableReviewSettlementState> {
+        let signature = self.last_progress_fingerprint.as_ref()?.clone();
+        let since = self.no_final_since?;
+        let elapsed_ms = self
+            .carried_no_final_elapsed
+            .saturating_add(now.saturating_sub(since))
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        Some(DurableReviewSettlementState {
+            progress_signature: signature,
+            no_final_since_unix_ms: now_unix_ms.saturating_sub(elapsed_ms),
+        })
+    }
     pub fn observe(
         &mut self,
         snapshot: &ChatSurfaceSnapshot,
@@ -701,15 +882,10 @@ impl ReviewSettlementTracker {
         now: Duration,
     ) -> ReviewSettlementDecision {
         if let Some(report) = validated_snapshot_review_report(snapshot, task_id, round) {
+            self.last_progress_fingerprint = None;
             self.no_final_since = None;
+            self.carried_no_final_elapsed = Duration::ZERO;
             return ReviewSettlementDecision::Final(report);
-        }
-
-        let fingerprint = snapshot.activity_fingerprint();
-        if self.last_progress_fingerprint.as_deref() != Some(fingerprint.as_str()) {
-            self.last_progress_fingerprint = Some(fingerprint);
-            self.no_final_since = Some(now);
-            return ReviewSettlementDecision::Wait;
         }
 
         let unsafe_or_active = snapshot.streaming_or_busy
@@ -720,12 +896,26 @@ impl ReviewSettlementTracker {
             || snapshot.retryable_error
             || snapshot.blocker_or_modal;
         if unsafe_or_active {
+            self.last_progress_fingerprint = None;
+            self.no_final_since = None;
+            self.carried_no_final_elapsed = Duration::ZERO;
+            return ReviewSettlementDecision::Wait;
+        }
+
+        let fingerprint = snapshot.activity_fingerprint();
+        if self.last_progress_fingerprint.as_deref() != Some(fingerprint.as_str()) {
+            self.last_progress_fingerprint = Some(fingerprint);
             self.no_final_since = Some(now);
+            self.carried_no_final_elapsed = Duration::ZERO;
             return ReviewSettlementDecision::Wait;
         }
 
         let since = *self.no_final_since.get_or_insert(now);
-        if now.saturating_sub(since) >= REVIEW_FINAL_SETTLEMENT_WINDOW {
+        if self
+            .carried_no_final_elapsed
+            .saturating_add(now.saturating_sub(since))
+            >= REVIEW_FINAL_SETTLEMENT_WINDOW
+        {
             ReviewSettlementDecision::RecoverReviewConversation
         } else {
             ReviewSettlementDecision::Wait
@@ -1853,6 +2043,8 @@ mod tests {
             timeout: Duration::from_secs(30),
             review_identity: Some(ReviewRunIdentity {
                 task_id: task_id(),
+                run_id: RunId::new("review-run-test"),
+                phase: Phase::Review,
                 round: Round::new(2),
             }),
             ..RunOptions::default()
@@ -1900,6 +2092,8 @@ mod tests {
             stale_reload_after: Duration::from_secs(1_000),
             review_identity: Some(ReviewRunIdentity {
                 task_id: task_id(),
+                run_id: RunId::new("review-run-test"),
+                phase: Phase::Review,
                 round: Round::new(2),
             }),
             ..RunOptions::default()
@@ -2200,6 +2394,117 @@ mod tests {
             ),
             ReviewSettlementDecision::RecoverReviewConversation
         );
+    }
+
+    #[test]
+    fn review_settlement_persists_elapsed_time_across_restart() {
+        let snapshot = ChatSurfaceSnapshot {
+            assistant_response_boundary: Some(AssistantResponseBoundary::new("review-response")),
+            assistant_response_ownership: OwnershipConfidence::Strong,
+            ..Default::default()
+        };
+        let mut first = ReviewSettlementTracker::default();
+        assert_eq!(
+            first.observe(&snapshot, &task_id(), Round::new(1), Duration::ZERO),
+            ReviewSettlementDecision::Wait
+        );
+        let persisted = first
+            .persistent_state(Duration::from_secs(110), 1_110_000)
+            .unwrap();
+        assert_eq!(persisted.no_final_since_unix_ms, 1_000_000);
+
+        let mut restarted = ReviewSettlementTracker::default();
+        restarted.restore_persistent(&persisted, Duration::ZERO, 1_110_000);
+        assert_eq!(
+            restarted.observe(&snapshot, &task_id(), Round::new(1), Duration::from_secs(9)),
+            ReviewSettlementDecision::Wait
+        );
+        assert_eq!(
+            restarted.observe(
+                &snapshot,
+                &task_id(),
+                Round::new(1),
+                Duration::from_secs(10)
+            ),
+            ReviewSettlementDecision::RecoverReviewConversation
+        );
+    }
+
+    #[test]
+    fn review_progress_after_restart_resets_full_settlement_window() {
+        let mut snapshot = ChatSurfaceSnapshot {
+            assistant_response_boundary: Some(AssistantResponseBoundary::new("review-response")),
+            assistant_response_ownership: OwnershipConfidence::Strong,
+            assistant_visible_prose: "old progress".into(),
+            ..Default::default()
+        };
+        let mut first = ReviewSettlementTracker::default();
+        first.observe(&snapshot, &task_id(), Round::new(1), Duration::ZERO);
+        let persisted = first
+            .persistent_state(Duration::from_secs(110), 1_110_000)
+            .unwrap();
+
+        let mut restarted = ReviewSettlementTracker::default();
+        restarted.restore_persistent(&persisted, Duration::ZERO, 1_110_000);
+        snapshot.assistant_visible_prose = "new progress".into();
+        assert_eq!(
+            restarted.observe(&snapshot, &task_id(), Round::new(1), Duration::ZERO),
+            ReviewSettlementDecision::Wait
+        );
+        let reset = restarted
+            .persistent_state(Duration::ZERO, 1_110_000)
+            .unwrap();
+        assert_eq!(reset.no_final_since_unix_ms, 1_110_000);
+        assert_eq!(
+            restarted.observe(
+                &snapshot,
+                &task_id(),
+                Round::new(1),
+                Duration::from_secs(119)
+            ),
+            ReviewSettlementDecision::Wait
+        );
+        assert_eq!(
+            restarted.observe(
+                &snapshot,
+                &task_id(),
+                Round::new(1),
+                Duration::from_secs(120)
+            ),
+            ReviewSettlementDecision::RecoverReviewConversation
+        );
+    }
+
+    #[test]
+    fn strict_review_final_clears_persistable_settlement_state() {
+        let idle = ChatSurfaceSnapshot {
+            assistant_response_boundary: Some(AssistantResponseBoundary::new("review-response")),
+            assistant_response_ownership: OwnershipConfidence::Strong,
+            ..Default::default()
+        };
+        let mut tracker = ReviewSettlementTracker::default();
+        tracker.observe(&idle, &task_id(), Round::new(4), Duration::ZERO);
+        assert!(tracker.persistent_state(Duration::ZERO, 10_000).is_some());
+
+        let boundary = AssistantResponseBoundary::new("review-response");
+        let final_snapshot = ChatSurfaceSnapshot {
+            assistant_response_boundary: Some(boundary.clone()),
+            assistant_response_ownership: OwnershipConfidence::Strong,
+            strict_review_report: Some(StrictReviewReportEvidence {
+                task_id: task_id(),
+                round: Round::new(4),
+                status: ReviewStatus::Complete,
+                summary: "done".into(),
+                next: None,
+                response_boundary: boundary,
+            }),
+            ..Default::default()
+        };
+        assert!(matches!(
+            tracker.observe(&final_snapshot, &task_id(), Round::new(4), Duration::ZERO),
+            ReviewSettlementDecision::Final(_)
+        ));
+        assert!(tracker.persistent_state(Duration::ZERO, 10_000).is_none());
     }
 
     #[test]

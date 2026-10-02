@@ -2,7 +2,8 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use fabushi_chatgpt_application::{
     ChatProcessHealth, ChatProcessPort, ChatSurfacePort, Clock, ContinuousTaskState,
-    ReasoningDecision, ReasoningGateState, RecoveryRunContext, ReviewRunIdentity, RunPrompt,
+    DurableReviewSettlementState, ReasoningDecision, ReasoningGateState, RecoveryRunContext,
+    ReviewRunIdentity, ReviewSettlementKey, ReviewSettlementPort, RunPrompt,
     parse_strict_review_report,
 };
 #[cfg(target_os = "linux")]
@@ -12,8 +13,8 @@ use fabushi_chatgpt_desktop_macos::{ChatGptDesktopMacProcess, ChatGptDesktopMacS
 #[cfg(target_os = "linux")]
 use fabushi_chatgpt_desktop_process::ChatGptDesktopProcess;
 use fabushi_chatgpt_sqlite_store::{
-    IncompleteContinuousPhase, PreparedApproval, PreparedDispatch, SqliteStore,
-    StateTransitionRecord, TransitionRecord, UiSessionLease,
+    IncompleteContinuousPhase, PreparedApproval, PreparedDispatch, ReviewSettlementRecord,
+    SqliteStore, StateTransitionRecord, TransitionRecord, UiSessionLease,
 };
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -827,8 +828,78 @@ impl ChatSurfacePort for DurableRunSurface {
     }
 }
 
+struct SqliteReviewSettlement {
+    path: PathBuf,
+}
+
+#[async_trait]
+impl ReviewSettlementPort for SqliteReviewSettlement {
+    async fn load_review_settlement(
+        &self,
+        key: &ReviewSettlementKey,
+    ) -> Result<Option<DurableReviewSettlementState>> {
+        let store = SqliteStore::open(&self.path)?;
+        let phase = match key.phase {
+            Phase::Work => "work",
+            Phase::Review => "review",
+        };
+        Ok(store
+            .review_settlement(
+                &key.task_id,
+                &key.run_id,
+                phase,
+                i64::from(key.round.get()),
+                key.conversation_fingerprint.as_str(),
+            )?
+            .map(|record| DurableReviewSettlementState {
+                progress_signature: record.progress_signature,
+                no_final_since_unix_ms: record.no_final_since_unix_ms,
+            }))
+    }
+
+    async fn store_review_settlement(
+        &self,
+        key: &ReviewSettlementKey,
+        state: &DurableReviewSettlementState,
+    ) -> Result<()> {
+        let store = SqliteStore::open(&self.path)?;
+        let phase = match key.phase {
+            Phase::Work => "work",
+            Phase::Review => "review",
+        };
+        store.store_review_settlement(
+            &ReviewSettlementRecord {
+                task_id: key.task_id.as_str().to_owned(),
+                run_id: key.run_id.as_str().to_owned(),
+                phase: phase.to_owned(),
+                round: i64::from(key.round.get()),
+                conversation_fingerprint: key.conversation_fingerprint.as_str().to_owned(),
+                progress_signature: state.progress_signature.clone(),
+                no_final_since_unix_ms: state.no_final_since_unix_ms,
+            },
+            unix_time_ms()?,
+        )
+    }
+
+    async fn clear_review_settlement(&self, key: &ReviewSettlementKey) -> Result<()> {
+        let store = SqliteStore::open(&self.path)?;
+        let phase = match key.phase {
+            Phase::Work => "work",
+            Phase::Review => "review",
+        };
+        store.clear_review_settlement(
+            &key.task_id,
+            &key.run_id,
+            phase,
+            i64::from(key.round.get()),
+            key.conversation_fingerprint.as_str(),
+        )
+    }
+}
+
 pub struct RunWorker {
     surface: DurableRunSurface,
+    review_settlement: SqliteReviewSettlement,
 }
 
 impl RunWorker {
@@ -851,19 +922,22 @@ impl RunWorker {
                 phase,
                 round,
             )?,
+            review_settlement: SqliteReviewSettlement {
+                path: state_db_path.to_path_buf(),
+            },
         })
     }
 
     async fn execute(&self, prompt: &str, options: RunOptions) -> Result<RunReport> {
         let clock = TokioClock::default();
-        RunPrompt::new(&self.surface, &clock)
+        RunPrompt::with_review_settlement(&self.surface, &clock, &self.review_settlement)
             .execute(prompt, options)
             .await
     }
 
     async fn resume_existing(&self, prompt: &str, options: RunOptions) -> Result<RunReport> {
         let clock = TokioClock::default();
-        RunPrompt::new(&self.surface, &clock)
+        RunPrompt::with_review_settlement(&self.surface, &clock, &self.review_settlement)
             .resume_confirmed_dispatch(prompt, options)
             .await
     }
@@ -1085,6 +1159,8 @@ impl DesktopRuntime {
         phase_options.run_round = Some(round);
         phase_options.review_identity = (phase == Phase::Review).then(|| ReviewRunIdentity {
             task_id: state.task_id.clone(),
+            run_id: candidate.run_id.clone(),
+            phase,
             round,
         });
         phase_options.recovery_context = Some(RecoveryRunContext {
@@ -1279,6 +1355,8 @@ impl DesktopRuntime {
             phase_options.run_round = Some(round);
             phase_options.review_identity = (phase == Phase::Review).then(|| ReviewRunIdentity {
                 task_id: task_id.clone(),
+                run_id: run_id.clone(),
+                phase,
                 round,
             });
             phase_options.recovery_context = Some(RecoveryRunContext {
