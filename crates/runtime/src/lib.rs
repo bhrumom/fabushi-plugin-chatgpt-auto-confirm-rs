@@ -6175,6 +6175,7 @@ VmRSS:	   512 kB
         assert_eq!(review_context.authoritative_instruction, review_plan.prompt);
 
         let next_state = review_state
+            .clone()
             .apply_review(fabushi_chatgpt_application::ReviewReport {
                 task_id: task_id.clone(),
                 round: Round::new(1),
