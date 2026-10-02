@@ -3925,9 +3925,7 @@ mod actor_tests {
             composer_ready: true,
             current_dispatch_id: Some(DispatchId::new("dispatch-recover")),
             user_turn_boundary: Some(UserTurnBoundary::new("turn-recover")),
-            conversation_fingerprint: Some(ConversationFingerprint::new(
-                "conversation-recover",
-            )),
+            conversation_fingerprint: Some(ConversationFingerprint::new("conversation-recover")),
             hydration: HydrationState::Ready,
             ..Default::default()
         };
