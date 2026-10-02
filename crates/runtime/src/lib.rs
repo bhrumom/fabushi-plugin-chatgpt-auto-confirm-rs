@@ -7,10 +7,10 @@ use fabushi_chatgpt_application::{
 };
 #[cfg(target_os = "linux")]
 use fabushi_chatgpt_desktop_atspi::ChatGptDesktopAtspi;
-#[cfg(target_os = "linux")]
-use fabushi_chatgpt_desktop_process::ChatGptDesktopProcess;
 #[cfg(target_os = "macos")]
 use fabushi_chatgpt_desktop_macos::{ChatGptDesktopMacProcess, ChatGptDesktopMacSurface};
+#[cfg(target_os = "linux")]
+use fabushi_chatgpt_desktop_process::ChatGptDesktopProcess;
 use fabushi_chatgpt_sqlite_store::{
     PreparedApproval, PreparedDispatch, SqliteStore, StateTransitionRecord, TransitionRecord,
     UiSessionLease,

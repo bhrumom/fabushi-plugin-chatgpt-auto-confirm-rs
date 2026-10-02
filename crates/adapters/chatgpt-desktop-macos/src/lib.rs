@@ -9,6 +9,23 @@ use sha2::{Digest, Sha256};
 use std::process::Command;
 
 const ACCESSIBILITY_HELP: &str = "ChatGPT accessibility access is unavailable; grant the Rust CLI app access in System Settings > Privacy & Security > Accessibility";
+const CHATGPT_EXECUTABLE: &str = "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT";
+
+fn chatgpt_pid() -> Result<Option<i32>> {
+    let output = Command::new("/bin/ps")
+        .args(["-Ao", "pid=,args="])
+        .output()
+        .context("discover ChatGPT.app process with ps")?;
+    if !output.status.success() {
+        bail!("ps process discovery failed with {}", output.status);
+    }
+    let listing = String::from_utf8_lossy(&output.stdout);
+    Ok(listing.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let pid = fields.next()?.parse::<i32>().ok()?;
+        (fields.next()? == CHATGPT_EXECUTABLE).then_some(pid)
+    }))
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct ChatGptDesktopMacProcess;
@@ -16,11 +33,7 @@ pub struct ChatGptDesktopMacProcess;
 #[async_trait]
 impl ChatProcessPort for ChatGptDesktopMacProcess {
     async fn health(&self) -> Result<ChatProcessHealth> {
-        let output = Command::new("/usr/bin/pgrep")
-            .args(["-x", "ChatGPT"])
-            .output()
-            .context("discover ChatGPT.app process with pgrep")?;
-        Ok(if output.status.success() {
+        Ok(if chatgpt_pid()?.is_some() {
             ChatProcessHealth::Running
         } else {
             ChatProcessHealth::NotRunning
@@ -47,15 +60,7 @@ pub struct ChatGptDesktopMacSurface;
 
 impl ChatGptDesktopMacSurface {
     fn application(&self) -> Result<AXUIElement> {
-        let output = Command::new("/usr/bin/pgrep")
-            .args(["-x", "ChatGPT"])
-            .output()
-            .context("locate ChatGPT.app process")?;
-        let pid = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .next()
-            .and_then(|line| line.trim().parse::<i32>().ok())
-            .ok_or_else(|| anyhow::anyhow!("ChatGPT.app is not running"))?;
+        let pid = chatgpt_pid()?.ok_or_else(|| anyhow::anyhow!("ChatGPT.app is not running"))?;
         AXUIElement::from_pid(pid).ok_or_else(|| anyhow::anyhow!(ACCESSIBILITY_HELP))
     }
 
@@ -115,8 +120,10 @@ impl ChatGptDesktopMacSurface {
         let mut controls = nodes
             .iter()
             .filter(|node| {
-                matches!(Self::role(node).as_deref(), Some("AXButton" | "AXPopUpButton"))
-                    && Self::enabled(node)
+                matches!(
+                    Self::role(node).as_deref(),
+                    Some("AXButton" | "AXPopUpButton")
+                ) && Self::enabled(node)
                     && ["reasoning", "thinking", "power"]
                         .iter()
                         .any(|hint| Self::label(node).contains(hint))
@@ -165,8 +172,10 @@ impl ChatGptDesktopMacSurface {
         nodes
             .iter()
             .filter(|node| {
-                matches!(Self::role(node).as_deref(), Some("AXTextArea" | "AXTextField"))
-                    && Self::enabled(node)
+                matches!(
+                    Self::role(node).as_deref(),
+                    Some("AXTextArea" | "AXTextField")
+                ) && Self::enabled(node)
                     && ["message", "prompt", "ask"]
                         .iter()
                         .any(|hint| Self::label(node).contains(hint))
