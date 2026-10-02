@@ -2822,6 +2822,40 @@ fn recovery_postcondition(
         && !snapshot.connection_interrupted)
 }
 
+fn recovery_baseline_was_observably_degraded(payload: &serde_json::Value) -> bool {
+    let app_healthy = payload
+        .get("baselineAppHealthy")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let composer_ready = payload
+        .get("baselineComposerReady")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let retryable_error = payload
+        .get("baselineRetryableError")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let unable_to_load = payload
+        .get("baselineUnableToLoadConversation")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let connection_interrupted = payload
+        .get("baselineConnectionInterrupted")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let hydration_degraded = payload
+        .get("baselineHydration")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| value != "ready");
+
+    !app_healthy
+        || !composer_ready
+        || retryable_error
+        || unable_to_load
+        || connection_interrupted
+        || hydration_degraded
+}
+
 fn fresh_conversation_postcondition(
     snapshot: &ChatSurfaceSnapshot,
     baseline_user_turn_boundary: Option<&str>,
@@ -2935,7 +2969,9 @@ fn reconcile_pending_effect(
             .context(
                 "parse pending surface-recovery effect payload during startup reconciliation",
             )?;
-        if !recovery_postcondition(snapshot, &payload)? {
+        if !recovery_baseline_was_observably_degraded(&payload)
+            || !recovery_postcondition(snapshot, &payload)?
+        {
             return Ok(StartupReconcileOutcome::Clear);
         }
         store.settle_effect(
@@ -3877,6 +3913,32 @@ mod actor_tests {
             StartupReconcileOutcome::SettledObservedRecovery
         );
         assert!(store.pending_effects(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn startup_reconciliation_keeps_healthy_stall_recovery_pending_after_crash() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        let task_id = TaskId::new("task-recover-healthy-stall");
+        let run_id = RunId::new("run-recover-healthy-stall");
+        let baseline = ChatSurfaceSnapshot {
+            app_healthy: true,
+            composer_ready: true,
+            current_dispatch_id: Some(DispatchId::new("dispatch-recover")),
+            user_turn_boundary: Some(UserTurnBoundary::new("turn-recover")),
+            conversation_fingerprint: Some(ConversationFingerprint::new(
+                "conversation-recover",
+            )),
+            hydration: HydrationState::Ready,
+            ..Default::default()
+        };
+        create_pending_recovery(&mut store, &task_id, &run_id, &baseline);
+
+        let effect = store.pending_effects(10).unwrap().remove(0);
+        assert_eq!(
+            reconcile_pending_effect(&mut store, &baseline, &effect).unwrap(),
+            StartupReconcileOutcome::Clear
+        );
+        assert_eq!(store.pending_effects(10).unwrap().len(), 1);
     }
 
     #[test]
