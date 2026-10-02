@@ -8,12 +8,12 @@
   "target": {
     "repository": "bhrumom/fabushi-plugin-chatgpt-auto-confirm-rs",
     "spec": "docs/specs/desktop-chat-userscript-parity-rust-cli.md",
-    "lastVerifiedExactHead": "ef15d4ad5b65221c01ad964e3dd71b34a45f204a",
-    "lastVerifiedCiRun": 36997940315,
+    "lastVerifiedExactHead": "eb83b0b844a930c71f39d4e4e8ea789e409c18ef",
+    "lastVerifiedCiRun": 37000139413,
     "lastVerifiedArtifact": {
-      "id": 11222233133,
+      "id": 11223821227,
       "name": "fabushi-chatgpt-auto-confirm-linux-x86_64",
-      "sha256": "428c77411d6fad015670ad0e1eab639745b4cb65ecfbb3e385bf0e8b470cb1ca"
+      "sha256": "6c0d428cc7b7a5fa907517e4f1b1202fd96da7fed66b4ddd9f1cb78d31b24106"
     }
   },
   "rules": {
@@ -282,7 +282,10 @@
         ".github/workflows/ci.yml packages fabushi-chatgpt-auto-confirm-linux-x86_64 on every exact candidate HEAD",
         "pre-scheduler exact-head run 36990315718 is green at 4e24b107315827c1c398be809f5726d5c73cb0f1 across Linux, macOS aarch64, and macOS x86_64",
         "pre-scheduler Linux artifact 11219432631 / fabushi-chatgpt-auto-confirm-linux-x86_64 / sha256:d5db20b959d5df9391dbaec8fee0a7d5f96a425f9b24708e115a6cd4bc5c9471",
-        "the exact-head packaged binary executed --help and doctor on htch-runtime; doctor is blocked before app attach because the Hatch Ubuntu 24.04 desktop session cannot safely launch Electron: root is rejected, unprivileged user namespaces are AppArmor-restricted, the sysctl is read-only, and the package has no SUID chrome-sandbox"
+        "the exact-head packaged binary executed --help and doctor on htch-runtime; doctor is blocked before app attach because the Hatch Ubuntu 24.04 desktop session cannot safely launch Electron: root is rejected, unprivileged user namespaces are AppArmor-restricted, the sysctl is read-only, and the package has no SUID chrome-sandbox",
+        "exact-head run 37000139413 is green at eb83b0b844a930c71f39d4e4e8ea789e409c18ef across Linux, macOS aarch64, and macOS x86_64",
+        "Linux artifact 11223821227 / fabushi-chatgpt-auto-confirm-linux-x86_64 / sha256:6c0d428cc7b7a5fa907517e4f1b1202fd96da7fed66b4ddd9f1cb78d31b24106 is bound to eb83b0b844a930c71f39d4e4e8ea789e409c18ef",
+        "htch-runtime artifact download was attempted through gh api and gh run download but no valid file was materialized, so packaged-binary live acceptance remains pending"
       ],
       "missing": [
         "current exact-head real canary after htch-runtime provides a sandbox-capable non-root ChatGPT desktop session",
