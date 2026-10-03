@@ -914,6 +914,12 @@ def wait_for_composer_draft(expected, timeout_seconds=2.0):
             return None
         time.sleep(0.05)
 
+def prepared_prompt_retained(prompt):
+    composer = unique_composer(flattened(find_app()))
+    if composer is None:
+        return False
+    return composer_draft(composer["node"]) == prompt
+
 def explicit_renderer_error(items):
     return any(
         item["visible"]
@@ -1901,6 +1907,36 @@ def fresh_draft_safety_contract_self_test():
                 globals()[name] = value
 
 
+def prepared_prompt_retained_contract_self_test():
+    state = {"draft": "prepared prompt [Fabushi:deadbeef]"}
+    composer_node = object()
+    old_find_app = globals().get("find_app")
+    old_flattened = globals().get("flattened")
+    old_unique = globals().get("unique_composer")
+    old_composer_draft = globals().get("composer_draft")
+    globals()["find_app"] = lambda: object()
+    globals()["flattened"] = lambda app: []
+    globals()["unique_composer"] = lambda items: {"node": composer_node}
+    globals()["composer_draft"] = lambda node: state["draft"]
+    try:
+        if not prepared_prompt_retained("prepared prompt [Fabushi:deadbeef]"):
+            return False
+        if prepared_prompt_retained("different prompt [Fabushi:deadbeef]"):
+            return False
+        globals()["unique_composer"] = lambda items: None
+        return not prepared_prompt_retained("prepared prompt [Fabushi:deadbeef]")
+    finally:
+        for name, value in (
+            ("find_app", old_find_app),
+            ("flattened", old_flattened),
+            ("unique_composer", old_unique),
+            ("composer_draft", old_composer_draft),
+        ):
+            if value is None:
+                globals().pop(name, None)
+            else:
+                globals()[name] = value
+
 def composer_write_contract_self_test():
     values = {"draft": "", "typed": []}
     pyatspi.STATE_FOCUSABLE, pyatspi.STATE_EDITABLE, pyatspi.STATE_FOCUSED = 1001, 1002, 1003
@@ -2005,6 +2041,8 @@ def main():
         result = composer_write_contract_self_test()
     elif op == "contract-fresh-draft-safety":
         result = fresh_draft_safety_contract_self_test()
+    elif op == "contract-prepared-prompt-retained":
+        result = prepared_prompt_retained_contract_self_test()
     elif op == "contract-conversation-ref":
         result = conversation_ref_contract_self_test()
     elif op == "contract-response-boundary":
@@ -2019,6 +2057,8 @@ def main():
         result = popup_contract_self_test()
     elif op == "snapshot":
         result = snapshot()
+    elif op == "prepared-prompt-retained":
+        result = prepared_prompt_retained(sys.argv[2])
     elif op == "send":
         result = send_prompt(sys.argv[2])
     elif op == "fresh":

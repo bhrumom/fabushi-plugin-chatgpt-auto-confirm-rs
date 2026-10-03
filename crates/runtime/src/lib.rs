@@ -352,6 +352,10 @@ impl ChatSurfacePort for DesktopSessionActorHandle {
         self.surface.observe().await
     }
 
+    async fn prepared_prompt_retained(&self, prompt: &str) -> Result<bool> {
+        self.surface.prepared_prompt_retained(prompt).await
+    }
+
     async fn set_reasoning_preset(&self, preset: ReasoningPreset) -> Result<bool> {
         self.request(|reply| DesktopMutation::SetReasoning { preset, reply })
             .await
@@ -1135,6 +1139,12 @@ impl ChatSurfacePort for DurableRunSurface {
             .await
             .bind_owned_conversation_ref(&dispatch_id, &snapshot)?;
         Ok(snapshot)
+    }
+
+    async fn prepared_prompt_retained(&self, prompt: &str) -> Result<bool> {
+        let dispatch_id = self.dispatch_id.lock().await.clone();
+        let prepared_prompt = format!("{prompt} [Fabushi:{}]", dispatch_id.as_str());
+        self.surface.prepared_prompt_retained(&prepared_prompt).await
     }
 
     async fn set_reasoning_preset(&self, preset: ReasoningPreset) -> Result<bool> {
@@ -2251,6 +2261,10 @@ impl ChatSurfacePort for ReattachingDesktopSurface {
                 self.observe_after_confirmed_restart().await
             }
         }
+    }
+
+    async fn prepared_prompt_retained(&self, prompt: &str) -> Result<bool> {
+        self.surface.prepared_prompt_retained(prompt).await
     }
 
     async fn set_reasoning_preset(&self, preset: ReasoningPreset) -> Result<bool> {
