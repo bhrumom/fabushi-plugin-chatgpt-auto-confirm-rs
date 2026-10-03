@@ -84,10 +84,6 @@ impl ChatSurfacePort for ChatGptDesktopAtspi {
         self.bridge("set-reasoning", Some(&target)).await
     }
 
-    async fn prepared_prompt_retained(&self, prompt: &str) -> Result<bool> {
-        self.bridge("prepared-prompt-retained", Some(prompt)).await
-    }
-
     async fn send_prompt(&self, prompt: &str) -> Result<()> {
         let sent: bool = self.bridge("send", Some(prompt)).await?;
         if !sent {
@@ -240,27 +236,6 @@ mod tests {
         assert!(BRIDGE.contains(
             "ChatGPT composer contains an unrelated draft; refusing destructive fresh conversation"
         ));
-    }
-
-    #[test]
-    fn prepared_prompt_retained_contract_is_exact_and_read_only() {
-        use std::process::Command as StdCommand;
-        let wrapper = format!(
-            "import sys,types; sys.modules['pyatspi']=types.SimpleNamespace(); sys.argv=['bridge','contract-prepared-prompt-retained']; exec({:?})",
-            BRIDGE
-        );
-        let output = StdCommand::new("python3")
-            .arg("-c")
-            .arg(wrapper)
-            .output()
-            .expect("run prepared prompt retained bridge contract");
-        assert!(
-            output.status.success(),
-            "stdout={} stderr={}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "true");
     }
 
     #[test]

@@ -436,18 +436,6 @@ impl ChatSurfacePort for ChatGptDesktopMacSurface {
         Ok(snapshot)
     }
 
-    async fn prepared_prompt_retained(&self, prompt: &str) -> Result<bool> {
-        let nodes = self.tree()?;
-        let composers = Self::composers(&nodes);
-        let [composer] = composers.as_slice() else {
-            return Ok(false);
-        };
-        let observed = composer
-            .string_attribute("AXValue")
-            .context("read ChatGPT composer for prepared-prompt retention")?;
-        Ok(observed.as_deref() == Some(prompt))
-    }
-
     async fn set_reasoning_preset(&self, preset: ReasoningPreset) -> Result<bool> {
         let nodes = self.tree()?;
         let Some(control) = Self::reasoning_control(&nodes) else {

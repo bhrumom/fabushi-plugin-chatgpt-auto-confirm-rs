@@ -68,9 +68,6 @@ impl WakeReason {
 #[async_trait]
 pub trait ChatSurfacePort: Send + Sync {
     async fn observe(&self) -> Result<ChatSurfaceSnapshot>;
-    async fn prepared_prompt_retained(&self, _prompt: &str) -> Result<bool> {
-        Ok(false)
-    }
     async fn set_reasoning_preset(&self, _preset: ReasoningPreset) -> Result<bool> {
         Ok(false)
     }
@@ -460,25 +457,15 @@ impl<'a> RunPrompt<'a> {
                 && dispatch_identity_matches;
 
             if !dispatch_confirmed {
-                if now.saturating_sub(dispatched) >= options.dispatch_confirm_after {
-                    // Source 2.10.15 inherits the v2.9.64 ambiguous-send guard:
-                    // if the exact prepared prompt is still retained in the
-                    // composer, preserve the original attempt and wait for its
-                    // user-turn/route evidence instead of risking a blind
-                    // duplicate in a fresh conversation.
-                    let retained_prepared_prompt =
-                        self.surface.prepared_prompt_retained(prompt).await?;
-                    if !retained_prepared_prompt
-                        && self.destructive_handoff_is_safe().await?
-                        && !self.surface.prepared_prompt_retained(prompt).await?
-                    {
-                        self.surface.start_fresh_conversation().await?;
-                        self.surface.send_prompt(prompt).await?;
-                        dispatch_preconfirmed = false;
-                        recoveries += 1;
-                        dispatch_retries += 1;
-                        dispatched = now;
-                    }
+                if now.saturating_sub(dispatched) >= options.dispatch_confirm_after
+                    && self.destructive_handoff_is_safe().await?
+                {
+                    self.surface.start_fresh_conversation().await?;
+                    self.surface.send_prompt(prompt).await?;
+                    dispatch_preconfirmed = false;
+                    recoveries += 1;
+                    dispatch_retries += 1;
+                    dispatched = now;
                 }
                 self.clock
                     .sleep_for(WakeReason::DispatchConfirmation, options.poll_interval)
@@ -2200,7 +2187,6 @@ mod tests {
         popup_dismissals: Mutex<u32>,
         retry_stream_cache_once: bool,
         stream_cache_retries: Mutex<u32>,
-        retained_prepared_prompt: Mutex<Option<String>>,
     }
 
     impl ScriptedSurface {
@@ -2216,7 +2202,6 @@ mod tests {
                 popup_dismissals: Mutex::new(0),
                 retry_stream_cache_once: false,
                 stream_cache_retries: Mutex::new(0),
-                retained_prepared_prompt: Mutex::new(None),
             }
         }
 
@@ -2227,11 +2212,6 @@ mod tests {
 
         fn with_popup_dismiss(mut self) -> Self {
             self.dismiss_popup = true;
-            self
-        }
-
-        fn with_retained_prepared_prompt(self, prompt: &str) -> Self {
-            *self.retained_prepared_prompt.lock().unwrap() = Some(prompt.to_owned());
             self
         }
 
@@ -2267,10 +2247,6 @@ mod tests {
             } else {
                 Ok(self.last_snapshot.lock().unwrap().clone())
             }
-        }
-
-        async fn prepared_prompt_retained(&self, prompt: &str) -> Result<bool> {
-            Ok(self.retained_prepared_prompt.lock().unwrap().as_deref() == Some(prompt))
         }
 
         async fn send_prompt(&self, prompt: &str) -> Result<()> {
@@ -2702,48 +2678,6 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(clock.now(), Duration::ZERO);
-    }
-
-    #[tokio::test]
-    async fn retained_prepared_prompt_prevents_blind_fresh_resend_after_confirmation_timeout() {
-        let before = ChatSurfaceSnapshot {
-            user_turn_boundary: Some(UserTurnBoundary::new("u0")),
-            ..Default::default()
-        };
-        let waiting = ChatSurfaceSnapshot {
-            app_healthy: true,
-            composer_ready: true,
-            ..Default::default()
-        };
-        let finished = owned_review_snapshot("current final", "a-current");
-        let surface = ScriptedSurface::new(vec![
-            before,
-            waiting.clone(),
-            waiting.clone(),
-            waiting,
-            finished,
-        ])
-        .with_retained_prepared_prompt("prepared prompt");
-        let clock = FakeClock::new();
-        let options = RunOptions {
-            poll_interval: Duration::from_secs(1),
-            timeout: Duration::from_secs(30),
-            dispatch_confirm_after: Duration::from_secs(2),
-            stale_reload_after: Duration::from_secs(1_000),
-            ..RunOptions::default()
-        };
-
-        let report = RunPrompt::new(&surface, &clock)
-            .execute("prepared prompt", options)
-            .await
-            .unwrap();
-
-        assert_eq!(report.state, RunState::Complete);
-        assert_eq!(report.assistant_text, "current final");
-        assert_eq!(surface.fresh_count(), 0);
-        assert_eq!(surface.send_count(), 1);
-        assert_eq!(report.dispatch_retries, 0);
-        assert!(clock.now() >= Duration::from_secs(2));
     }
 
     #[tokio::test]

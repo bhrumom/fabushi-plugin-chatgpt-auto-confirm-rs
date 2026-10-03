@@ -233,15 +233,12 @@
         "recover_current_surface now journals the pre-reload semantic baseline and only settles after same conversation/user-turn/dispatch identity is ready and degraded error/hydration state has cleared",
         "healthy-stall reload now persists an opaque adapter-supplied surface generation; startup reconciliation settles a crash-left reload only when the same conversation/user-turn/dispatch identity is restored and the generation independently changed, while pre-reload or unobservable ambiguity remains pending",
         "startup_reconciliation_settles_recovery_only_from_same_identity_ready_surface and startup_reconciliation_keeps_healthy_stall_recovery_pending_after_crash prove crash-left degraded recovery is reconcilable while ambiguous healthy-stall reload remains pending",
-        "explicit-load crash-left recoveries can be settled as ambiguous/accounted without replay only when a durable numbered load-failure attempt already exists; supervision resumes at the preserved absolute retry deadline",
-        "source-2.10.15/v2.9.64 retained-prepared-composer ambiguous-Send guard is production-wired: after the 90-second confirmation window, RunPrompt asks whether the unique composer still exactly retains the original prepared prompt; DurableRunSurface compares the marker-bearing prepared prompt; Linux AT-SPI and macOS AX perform exact semantic readback; retained state preserves the original attempt with zero fresh-chat or duplicate Send",
-        "retained_prepared_prompt_prevents_blind_fresh_resend_after_confirmation_timeout plus the executable AT-SPI prepared_prompt_retained contract"
+        "explicit-load crash-left recoveries can be settled as ambiguous/accounted without replay only when a durable numbered load-failure attempt already exists; supervision resumes at the preserved absolute retry deadline"
       ],
       "missing": [
         "exact-head packaged-artifact live healthy-stall reload/crash-restart acceptance",
         "exact-artifact task lifecycle acceptance",
-        "real crash/restart acceptance",
-        "exact-artifact retained-prepared-composer ambiguous-send/late-adoption acceptance"
+        "real crash/restart acceptance"
       ]
     },
     {
