@@ -1144,7 +1144,9 @@ impl ChatSurfacePort for DurableRunSurface {
     async fn prepared_prompt_retained(&self, prompt: &str) -> Result<bool> {
         let dispatch_id = self.dispatch_id.lock().await.clone();
         let prepared_prompt = format!("{prompt} [Fabushi:{}]", dispatch_id.as_str());
-        self.surface.prepared_prompt_retained(&prepared_prompt).await
+        self.surface
+            .prepared_prompt_retained(&prepared_prompt)
+            .await
     }
 
     async fn set_reasoning_preset(&self, preset: ReasoningPreset) -> Result<bool> {
