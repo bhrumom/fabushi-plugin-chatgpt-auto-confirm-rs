@@ -16,6 +16,11 @@ DOMAIN_CARGO="crates/domain/Cargo.toml"
 APP_CARGO="crates/application/Cargo.toml"
 CDP_CARGO="crates/adapters/chatgpt-cdp/Cargo.toml"
 LINUX_CARGO="crates/adapters/linux-browser/Cargo.toml"
+SQLITE_CARGO="crates/adapters/sqlite-store/Cargo.toml"
+ATTACHMENT_CARGO="crates/adapters/attachment-store/Cargo.toml"
+PROCESS_CARGO="crates/adapters/chatgpt-desktop-process/Cargo.toml"
+ATSPI_CARGO="crates/adapters/chatgpt-desktop-atspi/Cargo.toml"
+MACOS_CARGO="crates/adapters/chatgpt-desktop-macos/Cargo.toml"
 CLI_CARGO="crates/cli/Cargo.toml"
 
 if contains "$DOMAIN_CARGO" 'fabushi-chatgpt-(application|cdp|runtime|linux-browser)|tokio|reqwest|tungstenite|rusqlite|sqlx'; then
@@ -34,14 +39,34 @@ if contains "$LINUX_CARGO" 'fabushi-chatgpt-(runtime|cdp|auto-confirm)'; then
   fail "Linux browser adapter depends on another outer adapter/runtime"
 fi
 
+if contains "$SQLITE_CARGO" 'fabushi-chatgpt-(runtime|cdp|linux-browser|auto-confirm)'; then
+  fail "SQLite adapter depends on runtime, another outer adapter, or CLI"
+fi
+
+if contains "$ATTACHMENT_CARGO" 'fabushi-chatgpt-(runtime|cdp|linux-browser|sqlite-store|auto-confirm)'; then
+  fail "attachment adapter depends on runtime, another outer adapter, or CLI"
+fi
+
+if contains "$ATSPI_CARGO" 'fabushi-chatgpt-(runtime|cdp|linux-browser|sqlite-store|attachment-store|auto-confirm)'; then
+  fail "desktop AT-SPI adapter depends on runtime, another outer adapter, or CLI"
+fi
+
+if contains "$PROCESS_CARGO" 'fabushi-chatgpt-(runtime|cdp|linux-browser|sqlite-store|attachment-store|auto-confirm)'; then
+  fail "desktop process adapter depends on runtime, another outer adapter, or CLI"
+fi
+
+if contains "$MACOS_CARGO" 'fabushi-chatgpt-(runtime|cdp|linux-browser|sqlite-store|attachment-store|auto-confirm)'; then
+  fail "desktop macOS adapter depends on runtime, another outer adapter, or CLI"
+fi
+
 if contains "$CLI_CARGO" 'fabushi-chatgpt-(application|domain|cdp|linux-browser)'; then
   fail "CLI bypasses the runtime composition root"
 fi
 
-if grep -R -n -E 'querySelector|data-testid|Runtime\.evaluate|Page\.reload|remote-debugging-port' \
+if grep -R -n -E 'querySelector|data-testid|Runtime\.evaluate|Page\.reload|remote-debugging-port|PageSnapshot|BrowserPort|canonical_conversation_url|https://chatgpt\.com/c/' \
   crates/domain/src crates/application/src >/tmp/fabushi-architecture-selector-leaks.txt 2>/dev/null; then
   cat /tmp/fabushi-architecture-selector-leaks.txt >&2
-  fail "browser/CDP implementation detail leaked into domain/application"
+  fail "browser/desktop implementation detail or superseded web abstraction leaked into domain/application"
 fi
 
 if grep -R -n -E 'Allow once|允许一次|Approve once|仅允许本次|允许本次' crates/domain/src >/tmp/fabushi-domain-ui-labels.txt 2>/dev/null; then

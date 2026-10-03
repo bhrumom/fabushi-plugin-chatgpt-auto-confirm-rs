@@ -27,3 +27,49 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: release build
         run: cargo build --release -p fabushi-chatgpt-auto-confirm
+      - name: upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fabushi-chatgpt-auto-confirm-linux-x86_64
+          path: target/release/fabushi-chatgpt-auto-confirm
+          if-no-files-found: error
+          retention-days: 7
+
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
+          components: rustfmt, clippy
+      - name: Configure Swift runtime lookup on Intel
+        if: matrix.runner == 'macos-15-intel'
+        run: |
+          swift_runtime_paths="$(swiftc -print-target-info | jq -r '.paths.runtimeLibraryPaths | join(":")')"
+          echo "DYLD_LIBRARY_PATH=${swift_runtime_paths}${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+      - name: architecture
+        run: ./scripts/check-architecture.sh
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: test
+        run: cargo test --workspace
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: release build
+        run: cargo build --release -p fabushi-chatgpt-auto-confirm
+      - name: upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fabushi-chatgpt-auto-confirm-macos-${{ matrix.target }}
+          path: target/release/fabushi-chatgpt-auto-confirm
+          if-no-files-found: error
+          retention-days: 7

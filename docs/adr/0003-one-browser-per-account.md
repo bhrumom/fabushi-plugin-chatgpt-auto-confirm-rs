@@ -1,18 +1,21 @@
 # ADR-0003: One Browser Process per Account, One Target per Run
 
-Status: Accepted
+Status: Superseded by ADR-0004
 
-## Decision
+## Historical decision
 
-On Linux, own one authenticated Chromium/Chrome process per account profile and lease a distinct page target to each active run.
+The previous browser/CDP implementation owned one authenticated Chromium/Chrome process per account profile and leased a distinct page target to each active run.
 
-## Rationale
+## Supersession
 
-A Chromium profile should not be concurrently written by multiple independent browser processes. Copying a live profile per task is fragile and can create stale sessions. A single account browser safely shares authenticated state while target ownership isolates conversations.
+The authoritative desktop migration spec no longer uses browser process/target ownership as the production topology.
 
-## Consequences
+For the ChatGPT desktop product path, ownership is defined by ADR-0004:
 
-- AccountBrowserActor is the sole process/profile owner;
-- RunWorker touches only its target lease;
-- browser crash recovery uses durable canonical conversation URLs;
-- concurrency is bounded by Supervisor policy.
+- one runtime UI-session lease;
+- one `DesktopSessionActor` as the sole desktop UI mutation owner;
+- multiple `RunWorker` instances may supervise independent server-side conversations;
+- desktop conversation identity is semantic and opaque rather than a canonical web URL;
+- browser/CDP code is migration-only scaffolding.
+
+This ADR remains only as historical context for the legacy comparison adapter.

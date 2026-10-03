@@ -1,0 +1,977 @@
+# Desktop ChatGPT Userscript-Parity Rust CLI Migration Spec
+
+Status: authoritative migration spec  
+Last updated: 2026-09-30  
+Target repository: `bhrumom/fabushi-plugin-chatgpt-auto-confirm-rs`  
+Target baseline commit: `7e9f2f1625b3ac9dd79ce0f91771e27a4d01c26b`  
+Source repository: `bhrumom/fabushi-chatgpt-auto-confirm-userscript`  
+Source baseline commit: `587a03d6e607851ee8ced5d3ad13f65242fea07c`  
+Source release at baseline: `2.10.15`  
+Primary production surface: ChatGPT desktop application  
+Reference real-device acceptance host: `htch-runtime`  
+Build/test policy: htch-runtime may build/test during development; GitHub Actions remains the merge/release authority
+
+## 0. Precedence
+
+This document is the product and migration authority for the requested desktop ChatGPT Rust CLI.
+
+It supersedes the browser/CDP product direction in `docs/specs/rust-linux-chatgpt-auto-confirm.md` and any browser-specific production-topology text in `docs/architecture.md` when those documents conflict with this spec. The existing Hexagonal Architecture dependency direction remains valid and should be preserved, but browser-only types, ports, actors, ownership rules and acceptance gates must be reconciled before implementing desktop parity.
+
+The old Chromium/CDP implementation is migration scaffolding only. It must not remain the default shipping runtime once desktop parity is declared complete.
+
+The pinned userscript source commit, its latest applicable specs and its regression tests are the behavioral oracle. Historical README sections describe evolution and can contain behavior later superseded by newer releases; when they conflict, the pinned source code plus the newest applicable spec/test at the pinned commit wins.
+
+## 1. Objective
+
+Migrate the behavior of `fabushi-chatgpt-auto-confirm-userscript` release 2.10.15 into a Rust CLI that operates the **desktop ChatGPT application**, not the web page.
+
+The result must preserve the userscript's task semantics, safety boundaries, recovery rules, continuous Work -> Review orchestration, attachment handling, exact conversation-scoped authorization behavior, model/reasoning verification, abnormal-session carry, multi-task fairness and terminal-completion guarantees while replacing browser-specific implementation mechanisms with desktop-native mechanisms.
+
+The migration is semantic parity, not a JavaScript-to-Rust line translation and not a DOM-to-accessibility selector transcription.
+
+A desktop-specific difference is acceptable only when:
+
+1. the userscript behavior cannot exist on the desktop surface in the same form;
+2. the replacement preserves the same user-visible intent and safety invariant;
+3. the difference is documented in the migration ledger;
+4. deterministic contract tests cover it; and
+5. real-device acceptance proves the production path where that behavior is observable.
+
+## 2. Non-goals and hard safety boundaries
+
+- Do not control a standalone Chromium/Chrome window as the production implementation.
+- Do not require CDP as the primary desktop automation path.
+- Do not embed browser URL, DOM selector, Electron renderer, AT-SPI role, process ID, screen coordinate or accessibility label knowledge into `domain` or `application`.
+- Do not use fixed screen coordinates, image matching or OCR as the normal production path. Those may be diagnostics only and never the sole evidence for a destructive action.
+- Do not read, export, log, synthesize or transmit ChatGPT passwords, cookies, OTPs, API tokens, payment details or other secrets.
+- Login remains user-owned inside the desktop ChatGPT application.
+- Automatic authorization is restricted to the exact current-conversation/current-session grant. Never choose persistent/global authorization such as "Always allow".
+- A disabled authorization control is never authorization-success evidence.
+- Stop-button disappearance alone is never successful completion evidence.
+- Sidebar titles alone are never sufficient conversation identity.
+- An old Copy action elsewhere in the app is never current-run terminal evidence.
+- A mock, fixture or device-controller click is never evidence that the Rust CLI itself performed the equivalent production action.
+- Do not claim full source parity while a required migration-ledger row is `pending`, `partial` or `blocked`.
+
+## 3. Architecture decision
+
+Use a **recoverable modular monolith** with:
+
+- Hexagonal Architecture / Ports and Adapters;
+- deterministic domain/application state machines;
+- SQLite WAL durable state and append-only event journal;
+- transactional outbox/effect intents for recoverable UI effects;
+- actor-style runtime supervision;
+- a single-writer desktop UI ownership model;
+- semantic desktop observations rather than implementation-specific UI trees in policy code.
+
+This is preferable to microservices for a local desktop automation runtime because process ownership, desktop session ownership, ChatGPT window focus, file pickers, recovery state and idempotency need one strongly coordinated local authority. Crate boundaries provide compile-time isolation; actors provide runtime isolation.
+
+The dependency direction remains:
+
+```
+cli
+ |
+ v
+runtime ------------------------------+
+ |                                     |
+ v                                     v
+application <---------------------- adapters
+ |
+ v
+domain
+```
+
+Rules:
+
+1. `domain` depends on no internal crate and no Tokio, SQLite, D-Bus, AT-SPI, Electron, filesystem, process or UI automation API.
+2. `application` depends only on `domain` plus interface-support libraries. It owns policy and use cases.
+3. adapters implement application ports and point inward.
+4. `runtime` is the composition root and actor supervisor.
+5. `cli` depends on `runtime` only among internal crates.
+6. selectors, accessibility roles/labels, process/window details and desktop-specific timing quirks remain inside adapters.
+7. recovery decisions never live in the desktop adapter.
+8. the desktop adapter reports semantic facts and executes requested effects; it does not decide what the task should do next.
+
+## 4. Target crate layout
+
+Target production layout:
+
+```
+crates/
+  domain/
+  application/
+  adapters/
+    chatgpt-desktop-atspi/
+    chatgpt-desktop-process/
+    sqlite-store/
+    attachment-store/
+  runtime/
+  cli/
+```
+
+Optional adapters may be added behind the same ports when a stronger stable interface becomes available, for example a verified native ChatGPT desktop automation/IPC endpoint. Such an adapter must not change domain/application semantics.
+
+During migration, `chatgpt-cdp` and `linux-browser` may temporarily remain for regression comparison, but they must be feature-gated or removed from the default production composition before Gate G.
+
+### 4.1 `crates/domain`
+
+Pure value types and invariants:
+
+- `TaskId`, `RunId`, `DispatchId`, `Phase`, `Round`, `GoalRevision`;
+- `ConversationRef` as an opaque value, never assumed to be a URL;
+- `ConversationFingerprint`;
+- `AssistantResponseBoundary`;
+- `ExecutionProfile` and five-position reasoning preset;
+- task/run states;
+- terminal evidence;
+- approval fingerprints and settlement identity;
+- recovery reasons;
+- attachment metadata and immutable attachment identity;
+- versioned `RecoveryEnvelope`;
+- durable event types;
+- completion and ownership invariants.
+
+### 4.2 `crates/application`
+
+Use cases and policy:
+
+- enqueue/run/pause/resume/cancel/delete/edit task;
+- one-shot and continuous-target orchestration;
+- Work -> Review transition;
+- strict `MAHAYANA_TASK_REPORT_V1` parsing and current task/round binding;
+- prompt dispatch confirmation and deduplication;
+- exact authorization policy;
+- terminal classification;
+- recovery matrix;
+- fresh-conversation handoff construction;
+- attachment readiness policy;
+- multi-task fairness;
+- execution-profile verification policy;
+- effect idempotency and settlement rules.
+
+Application ports include:
+
+- `ChatSurfacePort`;
+- `ChatProcessPort`;
+- `TaskStore` / `RunStore`;
+- `EventJournal`;
+- `EffectOutbox`;
+- `AttachmentStore`;
+- `Clock`;
+- `EvidenceSink`.
+
+### 4.3 `chatgpt-desktop-atspi`
+
+Primary Linux production UI adapter.
+
+It owns:
+
+- AT-SPI2/D-Bus accessibility discovery;
+- ChatGPT semantic window/surface discovery;
+- current conversation projection into semantic snapshots;
+- composer interaction;
+- response-local action discovery;
+- exact current-conversation authorization interaction;
+- model/reasoning controls;
+- native attachment/file-picker interaction where deterministic;
+- reload/new-conversation/reopen effects exposed by the desktop app;
+- bounded popup dismissal;
+- adapter-level accessibility fixtures.
+
+It must prefer semantic roles, accessible names, stable relationships and app-provided automation identifiers. It must fail closed when a destructive action cannot be unambiguously bound to the current semantic surface.
+
+### 4.4 `chatgpt-desktop-process`
+
+Owns desktop process/session lifecycle only:
+
+- discover installed ChatGPT application;
+- launch/attach without stealing ownership from another active runtime;
+- verify process health;
+- observe application restart/crash;
+- reattach after restart;
+- expose app build/version information for evidence;
+- graceful shutdown only when the runtime itself owns the process and shutdown is explicitly requested.
+
+It does not inspect conversation content.
+
+### 4.5 `sqlite-store`
+
+SQLite WAL durable source of truth.
+
+Minimum tables:
+
+- `tasks`;
+- `runs`;
+- `dispatch_attempts`;
+- `run_events`;
+- `effect_outbox`;
+- `approval_fingerprints`;
+- `ui_session_leases`;
+- `attachments`;
+- `acceptance_evidence`.
+
+State snapshot + event + next effect intent must be committed atomically before the effect is exposed for execution.
+
+### 4.6 `attachment-store`
+
+Stores user-selected file bodies or stable local references outside SQLite and stores only metadata/hash/reference in SQLite. It must not silently drop an attachment and send text-only work.
+
+### 4.7 `runtime`
+
+Composition root plus actor supervision.
+
+Target topology:
+
+```
+Supervisor
+  |
+  +-- DesktopSessionActor   # sole writer to ChatGPT desktop UI
+  |      |
+  |      +-- visible conversation lease
+  |      +-- process/window attachment
+  |
+  +-- RunWorker(task A)
+  +-- RunWorker(task B)
+  +-- RunWorker(task C)
+```
+
+The `DesktopSessionActor` serializes all mutating desktop actions. Server-side ChatGPT work may continue in multiple conversations, but the local UI is a single shared resource and only one actor may mutate it at a time.
+
+Each `RunWorker` owns exactly one run revision and communicates desired semantic effects to the desktop-session actor. No two workers may submit, approve, change the execution profile, attach files or navigate the desktop UI concurrently.
+
+### 4.8 `cli`
+
+Thin operator/API surface. It parses arguments, calls runtime entrypoints, prints machine-readable results and returns meaningful exit codes. It does not contain UI selectors, accessibility text, SQLite SQL or recovery policy.
+
+## 5. Desktop semantic contract
+
+The application must not consume a web-style `PageSnapshot`. Replace it with a platform-neutral `ChatSurfaceSnapshot`.
+
+Minimum semantic facts:
+
+- application health and session identity;
+- current conversation `ConversationRef` when a strong reopen identity exists;
+- `ConversationFingerprint`;
+- composer presence/readiness/current draft fingerprint;
+- current user-turn boundary and ownership confidence;
+- current assistant-response boundary and ownership confidence;
+- visible assistant prose fingerprint;
+- visible assistant work/activity trace fingerprint;
+- response streaming/busy state;
+- Stop/Cancel-generation availability;
+- authorization surface presence;
+- authorization surface actionability;
+- authorization settlement state;
+- response-local Copy action evidence;
+- strict review-report evidence;
+- rate-limit notice;
+- retryable network/send error;
+- explicit conversation-load failure;
+- connection-interrupted state;
+- conversation-length limit;
+- generic renderer/app-shell hydration state;
+- execution-profile picker availability;
+- verified selected reasoning preset;
+- attachment upload/preview/readiness state;
+- blocker/modal state;
+- progress fingerprint.
+
+The snapshot may contain sanitized bounded text needed for classification, but logs and evidence default to hashes, lengths and semantic flags rather than full user prompts or private conversation text.
+
+## 6. Conversation and task identity
+
+Web URLs are not a universal desktop identity mechanism.
+
+The durable identity stack is:
+
+1. `TaskId / RunId / Phase / Round / GoalRevision`;
+2. a random Fabushi dispatch marker embedded in the authored task message;
+3. current user-turn boundary;
+4. current assistant-response boundary;
+5. `ConversationFingerprint`;
+6. optional opaque `ConversationRef` supplied by the desktop adapter when a deterministic reopen mechanism is available.
+
+`ConversationRef` may internally be a deep link, app route, stable accessibility identity or another verified desktop-native reference, but application/domain code must not parse its platform representation.
+
+A conversation is considered strongly owned only when the current semantic observations are consistent with the durable dispatch identity. A title match, recency, visible assistant text or a single sidebar item is insufficient.
+
+If a desktop release does not expose a safe deterministic reopen identity, the runtime must fail closed for workflows that require reopening rather than fabricating one.
+
+## 7. Transaction, outbox and idempotency rules
+
+Desktop UI effects cannot be atomic with SQLite. Therefore:
+
+1. calculate the next state and intended effect;
+2. append a durable event;
+3. update the materialized run/task state;
+4. append an effect-outbox record with an idempotency key;
+5. commit all of the above in one SQLite transaction;
+6. execute the UI effect;
+7. observe semantic postconditions;
+8. settle the outbox item with the observed result.
+
+Never assume exactly-once UI effects.
+
+Required examples:
+
+- prompt submission: dispatch fingerprint + observed new authored user boundary;
+- authorization: approval fingerprint + 12-second settlement latch + semantic postcondition;
+- execution-profile change: requested profile + independently observed selected profile;
+- file attachment: attachment hash/ref + observed desktop preview/readiness;
+- new conversation: handoff identity + observed new conversation fingerprint;
+- reopen/reload: idempotent request + post-recovery conversation ownership check.
+
+Crash recovery replays unsettled effects only after deciding from current observations whether the effect already happened.
+
+## 8. Source-parity behavior contracts
+
+### 8.1 Startup and exclusive ownership
+
+- Only one runtime may own the desktop ChatGPT UI session for mutation.
+- Runtime startup acquires a durable, expiring UI-session lease.
+- A stale/crashed owner can be recovered using lease expiry plus process/session evidence.
+- Restart restores unfinished tasks/runs from SQLite.
+- Restart must never blindly repeat a Send, approval or file upload.
+- User-owned app login/session state is reused; credentials are never copied into the Rust state store.
+
+### 8.2 Task modes
+
+#### One-shot
+
+Dispatch exactly one task phase and finish only after strong terminal evidence.
+
+#### Continuous target
+
+Preserve the userscript loop:
+
+1. Work conversation receives the current authoritative work prompt.
+2. Work final result is captured as the current round result.
+3. A separate Review/planning conversation is created.
+4. Review is bound to current `taskId` and `round`.
+5. Review must return strict `MAHAYANA_TASK_REPORT_V1`.
+6. `status=complete` finishes the target.
+7. `status=next` persists `next` verbatim as the next Work instruction and starts a new Work conversation.
+8. Previous Work result, current `next`, original goal and relevant abnormal carry remain distinct fields; historical report text may never override current report identity.
+
+### 8.3 Execution profile / model and reasoning
+
+The requested profile is task state, not ambient UI state.
+
+Five-position reasoning mapping at the source 2.10.15 baseline:
+
+| Index | Semantic preset |
+|---|---|
+| 0 | Instant / none |
+| 1 | Medium |
+| 2 | High |
+| 3 | Extra High / Max |
+| 4 | Pro |
+
+Before every actual dispatch:
+
+1. inspect the desktop model/reasoning control;
+2. select the requested preset;
+3. independently re-observe the selected value;
+4. only continue to attachment/send when verification succeeds.
+
+Never silently inherit a desktop default.
+
+If the picker/menu/slider equivalent is missing or loses its selected state, preserve the prepared dispatch intent and re-scan. After 60 seconds without a verifiable picker, recover the same desktop conversation/surface and repeat the same 60-second wait-and-recover cycle with no terminal retry cap. This dedicated recovery is independent from the generic renderer-recovery budget and must never duplicate Send.
+
+Default profile for migrated tasks without an explicit preset is Extra High/Max unless a later source baseline explicitly changes that behavior.
+
+### 8.4 Prompt dispatch and 90-second ambiguity rule
+
+- Persist the dispatch intent before touching the UI.
+- Prepare/clear the composer only when ownership and current draft safety are proven.
+- Fresh-conversation/recovery navigation is also draft-safe: before any destructive New chat action, the desktop adapter must read the unique composer draft. An unrelated non-Fabushi draft must remain byte-for-byte unchanged and the handoff must fail closed before invoking the New chat action unless a separately proven non-destructive surface mechanism is available.
+- Submit once.
+- Do not mark dispatch confirmed until a new authored user turn is observed and bound to this dispatch marker.
+- Preserve an unconfirmed attempt identity across restart.
+- If a safe dispatch still cannot be confirmed after 90 seconds, perform the source-equivalent recovery: create a fresh conversation and resend the **original prepared intent** rather than hot-looping same-surface reloads.
+- Never send two copies merely because the Send button disappeared or the desktop app changed focus.
+
+### 8.5 Attachments
+
+- Attachments are task-scoped and survive phase/recovery according to source semantics.
+- File body/reference is stored outside the prompt text; prompt contains bounded metadata only.
+- Use a deterministic desktop-native attachment action.
+- Require observed filename/preview/upload readiness before Send.
+- Initial readiness wait is 45 seconds.
+- Failed/ambiguous upload becomes a recoverable task state; never submit the task without required attachments.
+- Retries are bounded per attempt and backed off; no hot loop.
+- A fresh-conversation recovery keeps attachment identity and reattaches as needed.
+
+### 8.6 Authorization / auto-confirm
+
+Authorization detection and action are separate concepts.
+
+Required safety structure:
+
+- recognize an authorization surface only from a strong structural/semantic signature equivalent to current "Reject + Allow/Allow once + split options";
+- ordinary buttons containing "Allow" or "Allow once" are not enough;
+- surface presence remains true even when controls are disabled;
+- only an actionable current surface can be clicked;
+- open the split options and select only the **current conversation/session** grant;
+- never click the persistent/global grant;
+- generic popup dismissal must never consume an authorization surface.
+
+After selecting the conversation-scoped grant:
+
+- persist an approval fingerprint;
+- arm a 12-second settlement latch bound to task/run/phase/round/conversation fingerprint;
+- during the latch, a disabled/remounted/momentarily absent card does not permit abnormal-end, retry, load-failure or fresh-conversation recovery;
+- disabled state is not success;
+- actual success/failure is decided from later semantic observations.
+
+When Stop disappears at a potentially destructive handoff boundary:
+
+- discard any stale cached authorization result;
+- perform a live current-surface authorization scan;
+- if that scan sees no authorization surface, wait at least 8 seconds and scan again;
+- only after two stable no-authorization observations and all other safety guards pass may abnormal fresh-conversation recovery proceed.
+
+Optional global auto-approval may scan conversations not created by the CLI, but it is still limited to exact current-conversation grants and uses the same settlement safety.
+
+### 8.7 Completion
+
+Successful completion requires evidence owned by the current run's latest assistant response.
+
+At minimum:
+
+- current run ownership is strong;
+- response is not actively streaming/busy;
+- Stop/generation control is absent;
+- no authorization surface or active approval settlement exists;
+- no blocking/rate-limit/error condition is taking precedence;
+- the latest assistant response boundary owns a current response-local Copy action, or another explicitly source-approved strong terminal signal;
+- terminal evidence is stable for the required source-equivalent interval and repeated observations.
+
+Never use:
+
+- Stop disappearance alone;
+- any Copy action elsewhere in the window;
+- an old assistant response;
+- a title/sidebar change;
+- static assistant text alone when current response ownership cannot be proven.
+
+Normal terminal stability starts from the source-equivalent 4-second rule. Recovered/static fallback paths retain the stricter 8-second stability guard.
+
+For Review/planning:
+
+- Stop may disappear before final JSON/action UI hydrates;
+- keep a bounded two-minute final-settlement window;
+- a strict current `MAHAYANA_TASK_REPORT_V1` whose `taskId`, `round`, `status`, `summary` and `next` validate may qualify as strong review evidence before Copy hydration only when the same response boundary and all ownership/safety guards hold;
+- after two minutes without valid final evidence or progress, normal abnormal recovery may resume.
+
+### 8.8 Visible work trace and abnormal carry
+
+Visible assistant activity/progress steps are progress evidence, not terminal evidence.
+
+For a fresh-conversation abnormal handoff, capture a bounded ordered carry containing:
+
+1. the authoritative current Work/Review instruction;
+2. materially relevant visible assistant prose and desktop-exposed activity/work steps from the interrupted response;
+3. the previous completed Work result when applicable;
+4. current `next`;
+5. original goal;
+6. phase/round/task identity;
+7. completed work, remaining work and blockers inferable from current durable context.
+
+The handoff explicitly instructs the new conversation to continue rather than redo completed work.
+
+Carry is versioned, bounded and tied to the current run identity. It must not accumulate unbounded transcripts across repeated failures.
+
+### 8.9 Recovery matrix
+
+| Condition | Required desktop behavior |
+|---|---|
+| Missing/unverifiable reasoning picker | Preserve send intent; after 60s recover same surface; repeat indefinitely at 60s intervals; never Send unverified |
+| Generic no visible progress | After 15m, recover/reload the same owned conversation; visible prose/activity changes reset the timer |
+| Generic renderer/app-shell hydration | 30s initial window, bounded generic recovery budget of 2 for the same identity; do not create an infinite refresh loop |
+| Explicit "unable to load conversation" state | Recover the same conversation every 30s, max 7 attempts; after attempt 7 still failing, fresh conversation with carry |
+| Connection interrupted | Immediate fresh-conversation handoff with current visible work carry; preserve task/phase/round/goal/next/attachments |
+| Stream recovery polling timed out | Fresh-conversation handoff with carry |
+| Stream cache expired with current Retry action | Retry the current failed response once per failure identity; never mark it complete |
+| Rate limit / too many requests | Dismiss the explicit notice when safe, wait 5m; first 3 independent cooldown episodes stay with task; 4th episode fresh-conversation recovery preserving task context |
+| Conversation length limit | Wait/capture the current bounded assistant work, then fresh conversation; carry max 64,000 chars and preserve task context |
+| Stop disappeared, no final yet | Live authorization re-scan + at least 8s stable second check before destructive handoff; Review uses its 2m settlement rule |
+| Ambiguous/unconfirmed Send | 90s confirmation window; then safe fresh-conversation resend of original prepared intent, not repeated blind clicks |
+| Required attachment not confirmed | Do not Send; retain task and retry attachment according to bounded backoff |
+| Popup/modal | Close only explicit harmless Close/Later/Skip equivalents; never consume auth/payment/consent surfaces |
+| User closed task/app intentionally | Do not silently resurrect a user-closed task surface unless an explicit runtime resume policy applies |
+
+Every recovery effect is persisted before execution and has a post-effect ownership check.
+
+### 8.10 Rate-limit text safety
+
+Rate-limit detection must classify the desktop app's own current visible notice/alert semantics. Authored prompt text, assistant discussion, logs and task metadata containing the same phrase must not trigger rate-limit policy.
+
+### 8.11 Multi-task fairness
+
+- Multiple conversations may continue server-side while the desktop UI displays one at a time.
+- Only one task may mutate the UI at a time.
+- Tasks blocked on cooldown, navigation/reopen, attachment retry or authorization settlement expose a next-wake time.
+- Scheduler continues servicing other runnable tasks instead of globally sleeping.
+- A task switch never sends a new message merely to inspect status.
+- Switching must preserve exact run/conversation ownership and must not bind another task's visible response.
+
+### 8.12 Pause, resume, cancel, delete and edit goal
+
+- Per-task pause affects only that task.
+- Global pause is a separate explicit action.
+- Resume restores durable state and decides from observation whether an in-flight effect already settled.
+- Cancel stops future automation effects but does not claim to cancel already server-side generation unless the user/runtime explicitly sends a stop action.
+- Active tasks cannot be deleted until safely paused/cancelled/settled.
+- Editing a goal increments `GoalRevision`, preserves already-sent current work, invalidates stale future `next` when required and applies the new goal to subsequent orchestration.
+
+### 8.13 Memory/resource policy
+
+The source 2.10.15 direction treats browser memory pressure as diagnostic-only. The desktop Rust runtime likewise:
+
+- may report process/runtime memory diagnostics;
+- may compact its own bounded logs/caches safely;
+- must not reload/restart ChatGPT or abandon a task solely because a memory threshold was crossed;
+- must not pretend a renderer-specific heap metric is whole-app memory.
+
+### 8.14 Popup and consent safety
+
+Automatic generic popup handling is limited to harmless, unambiguous controls such as Close, Later or Skip. Any surface involving authorization, login, account choice, personal data, payment, security verification or consent must fail closed and stay outside generic dismissal.
+
+## 9. Web-to-desktop translation contract
+
+| Userscript mechanism | Desktop Rust equivalent |
+|---|---|
+| DOM query / data-testid / role selectors | Semantic `ChatSurfaceSnapshot` produced by desktop adapter |
+| ChatGPT `/c/<id>` URL | Opaque `ConversationRef` + strong `ConversationFingerprint` |
+| Tab/workspace Web Lock | Durable desktop UI-session lease |
+| localStorage task state | SQLite WAL task/run materialized state |
+| userscript event history | Append-only `run_events` |
+| IndexedDB attachment body | `attachment-store` body/ref + SQLite metadata |
+| page navigation/reload | Desktop-native reopen/recover effect behind `ChatSurfacePort` |
+| pagehide/hot reinjection recovery | Runtime/process restart recovery from durable journal |
+| DOM approval scan | Semantic authorization-surface projection |
+| DOM Copy/Stop detection | Response-bound semantic desktop action/state evidence |
+| single browser tab scheduler | Single-writer `DesktopSessionActor` scheduler |
+| userscript workbench UI | CLI JSON/JSONL commands plus durable task store |
+| browser-side host capability messages | Internal runtime ports/actors; no browser extension dependency |
+| browser JS heap diagnostics | Rust/app process diagnostics only |
+
+A translation is accepted only when it preserves the userscript invariant, not merely when it has a similar name.
+
+## 10. CLI contract
+
+The final CLI should expose stable structured commands similar to:
+
+```bash
+fabushi-chatgpt-auto-confirm doctor --json
+fabushi-chatgpt-auto-confirm desktop status --json
+fabushi-chatgpt-auto-confirm desktop start --json
+
+fabushi-chatgpt-auto-confirm task enqueue \
+  --goal "完成这个任务" \
+  --mode once \
+  --reasoning max \
+  --json
+
+fabushi-chatgpt-auto-confirm task enqueue \
+  --goal "持续完成这个目标" \
+  --mode continuous \
+  --reasoning max \
+  --attachment /path/to/file \
+  --json
+
+fabushi-chatgpt-auto-confirm task status <task-id> --json
+fabushi-chatgpt-auto-confirm task watch <task-id> --jsonl
+fabushi-chatgpt-auto-confirm task pause <task-id> --json
+fabushi-chatgpt-auto-confirm task resume <task-id> --json
+fabushi-chatgpt-auto-confirm task cancel <task-id> --json
+fabushi-chatgpt-auto-confirm task delete <task-id> --json
+
+fabushi-chatgpt-auto-confirm approve-once --json
+fabushi-chatgpt-auto-confirm supervise
+```
+
+A foreground `task run` convenience command may enqueue + watch one task, but it must use the same durable runtime path rather than a second simplified implementation.
+
+Exit codes must distinguish at least:
+
+- success;
+- user/action required;
+- task failed;
+- timeout;
+- desktop app unavailable;
+- unsafe/ambiguous UI;
+- storage/runtime corruption.
+
+## 11. Testing and verification policy
+
+**Development builds and tests may run directly on `htch-runtime` to shorten the desktop-integration feedback loop. GitHub Actions remains mandatory for merge/release qualification. Do not treat an `htch-runtime` result as a substitute for exact-HEAD CI evidence.**
+
+Required pyramid:
+
+### Layer 1 — domain unit/property tests
+
+Examples:
+
+- Stop disappeared is not completion;
+- stale/foreign Copy is not terminal;
+- approval disabled != success;
+- 12s settlement latch blocks destructive recovery;
+- 8s no-approval double-check;
+- Review 2m settlement semantics;
+- reasoning preset mapping;
+- recovery counters and timer precedence;
+- conversation fingerprint ownership;
+- recovery-envelope versioning/bounds;
+- idempotency keys.
+
+### Layer 2 — application fake ports + virtual clock
+
+Cover every recovery matrix row, Work -> Review orchestration, task fairness, pause/resume/cancel, attachment safety and crash/outbox replay.
+
+### Layer 3 — desktop adapter contract fixtures
+
+Use sanitized accessibility-tree fixtures/mock AT-SPI service for:
+
+- composer;
+- model/reasoning control;
+- latest user/assistant boundaries;
+- response-local Copy;
+- Stop;
+- approval surface including disabled/remounted/gap states;
+- rate-limit modal;
+- explicit load failure;
+- connection interruption;
+- conversation-length limit;
+- retryable error;
+- file-picker/attachment readiness.
+
+### Layer 4 — packaged desktop integration fixture
+
+GitHub Actions packages the actual CLI and runs it against a deterministic fake desktop surface through the same production port protocol. This proves wiring and process supervision, but not real ChatGPT behavior.
+
+During development, the same integration tests may also be built and run directly on `htch-runtime`; those runs are diagnostic/development evidence only.
+
+### Layer 5 — real desktop acceptance on `htch-runtime`
+
+For release qualification, runs an exact-HEAD GitHub Actions artifact against the installed ChatGPT desktop application. During development, locally built-on-device Rust binaries may also be exercised on `htch-runtime`, but they do not satisfy the release acceptance gate.
+
+A lower layer never substitutes for a higher gate.
+
+## 12. `htch-runtime` real-device protocol
+
+Discovery baseline observed on 2026-09-30:
+
+- device: `htch-runtime`;
+- platform: Linux x86_64;
+- ChatGPT desktop application is installed with stable device-controller app id `desktop:chatgpt`;
+- desktop launcher: `/usr/bin/chatgpt`;
+- the launcher executes the installed ChatGPT Electron application;
+- no target Rust CLI binary was present in PATH at discovery time.
+
+These facts are reference discovery evidence, not a frozen product contract.
+
+Real acceptance procedure:
+
+1. During development, `htch-runtime` may fetch/checkout the intended commit and run Rust build/test/format/clippy/architecture commands directly for rapid iteration.
+2. Device-side development results must record the exact commit SHA and commands used, and must never be reported as release qualification.
+3. For release qualification, GitHub Actions builds/tests/packages the exact candidate commit.
+4. Record workflow run id, artifact id/name and artifact SHA-256.
+5. Download that exact artifact to `htch-runtime` and use it for the formal real-device acceptance run.
+6. Ensure ChatGPT desktop uses a user-owned authenticated session. Never inject credentials.
+7. Run `doctor` and desktop attachment checks.
+8. Dispatch a canary task containing a unique Fabushi marker and a deterministic reasoning preset.
+9. Verify from the CLI event stream that preset verification preceded attachment/send and that Send settled to the correct authored user boundary.
+10. Use device accessibility inspection as an **independent read-only oracle** to corroborate app state and evidence.
+11. Let the Rust CLI, not the device-controller, perform the ChatGPT UI mutation under test.
+12. Verify a real final response is bound to the current response boundary and the CLI reaches terminal state only after valid evidence.
+13. When a safe real authorization scenario is available, verify current-conversation grant handling and settlement. If no safe authorization card is available, Gate F remains unpassed rather than being replaced by a fixture claim.
+14. Persist a sanitized acceptance report and hashes.
+
+During product acceptance, MCP/device `computer_*` actions must not click Send, choose reasoning, choose approval, attach files or perform another product action on behalf of the Rust CLI. They may inspect/read state, start the application when necessary, or assist an explicit user-owned login flow. This separation prevents false-positive E2E evidence.
+
+## 13. Source migration ledger
+
+The ledger must be updated as implementation proceeds. `partial` means useful Rust code exists but source-equivalent desktop behavior is not fully proven.
+
+| Source 2.10.15 responsibility | Desktop Rust destination | Baseline status |
+|---|---|---|
+| Task/run/round/goal state | domain + sqlite-store | partial |
+| One-shot task mode | application | partial browser-era implementation only |
+| Continuous Work -> Review loop | application/runtime + sqlite-store | partial: production CLI exposes a durable `continuous --task-id` path; Work result is persisted before entering an independent Review conversation, strict Review stays bound to current taskId/round, `status=next` advances the durable round, and orchestration state survives later UI-effect journaling. Fresh abnormal handoff carries a bounded versioned RecoveryEnvelope. On restart, runtime finds the latest phase-start run with no durable result, binds the current surface to its stored dispatch id with strong user-turn ownership, rebuilds the original durable RunWorker identity and resumes supervision without an initial Send. Ordinary recovered terminal evidence uses the 8-second stability window; an in-flight Work/Review continues through the normal authorization/recovery/settlement machinery instead of starting a duplicate fresh run. Review settlement now persists the source-equivalent progress signature plus absolute no-final-since time in SQLite, scoped to task/run/phase/round/conversation identity; resume/startup supervision restores the original elapsed window instead of granting a new two minutes, while new progress, unsafe/active state, strict final evidence, or fresh recovery resets/clears that state. Durable pause/resume/cancel is now wired through application/runtime/sqlite/CLI: a running worker reads the persisted lifecycle at supervision boundaries, paused/cancelled tasks stop before dispatching another UI Send, resume preserves the current phase/run recovery path without a blind duplicate Send, and resume/cancel clear stale Review no-final settlement state. Production delete now requires a stopped/completed lifecycle and no pending destructive effect, atomically tombstones and removes SQLite task state, then idempotently removes attachment bytes; startup resumes crash-left tombstone cleanup, and a missing task is treated as Cancelled by live RunControl so deletion cannot reactivate a worker. Exact-artifact live lifecycle acceptance remains open; production edit-goal persists the revised goal with GoalRevision+1 and future rounds reload that durable state; fair scheduling now has a production shared SupervisorClock with durable per-task wake deadlines, while macOS native attachment parity, exact-artifact attachment acceptance, and live concurrent-task acceptance remain open. |
+| Strict MAHAYANA_TASK_REPORT_V1 parser | application/domain + desktop adapter | partial: application owns the source-2.10.15-compatible strict parser and exact current taskId/round/response-boundary validation; the shipping desktop AT-SPI adapter now projects structured current-response evidence from bounded assistant prose, including optional JSON fences, and application can settle a valid Review before Copy hydration. Deterministic adapter/application contracts cover structured projection, wrong identity rejection, malformed reports and Copy-before-hydration settlement. Exact-artifact live Review acceptance remains pending. |
+| Userscript durable workbench state | sqlite-store + runtime | partial: WAL schema and atomic state/event/outbox transaction exist with rollback/idempotency tests; state-only orchestration transitions persist without manufacturing a pending UI effect, and UI-effect journaling preserves the durable `orchestration` subtree. SQLite now enumerates all durable task states for startup orchestration, runtime filters active incomplete continuous tasks from the persisted orchestration payload, and durable orchestration preserves a strong opaque ConversationRef once the desktop adapter can prove one. Single-task restart may rebind to that ref before exact dispatch-marker ownership validation. DurableRunSurface now captures the ref during the active phase immediately after the exact dispatch marker is observed with strong user-turn ownership, so a mid-phase crash no longer has to wait for a terminal RunReport to persist navigation identity; repeated identical observations are revision-idempotent and weak/wrong-dispatch observations cannot overwrite it. Multi-conversation startup/live acceptance remain pending. |
+| Tab/workspace ownership | DesktopSessionActor + UI lease | partial: production runtime serializes mutations through one DesktopSessionActor and now owns a SQLite fencing lease with periodic heartbeat, pre-mutation verification and release-on-actor-stop; deterministic competing-owner coverage exists, while formal htch-runtime cross-process acceptance remains pending |
+| Multi-task fair supervision | runtime Supervisor/RunWorker | partial: production RunWorkers now share one fair Supervisor that persists task-scoped absolute wake deadlines in SQLite, grants only due tasks with round-robin rotation, and sleeps to the earliest deadline when all tasks are deferred. Rate-limit, authorization settlement/safety, Review/no-final, dispatch confirmation and reasoning waits are routed through the shared scheduler; restart reuses the original durable deadline. Durable scheduler failures fail closed, explicit pause/resume/cancel clears stale per-task wake state, and durable wake registration prevents later deadlines from overtaking an unarmed due wake. Deterministic contracts prove deferred tasks do not block runnable tasks, earliest deadline ordering, restart does not extend a wake, due-only round-robin rotation, actor shutdown, foreground exclusivity through dispatch confirmation, authorization-settlement yielding, and DesktopSessionActor single-writer serialization without duplicate Send. Linux AT-SPI supplies a strong opaque ConversationRef only from one current/selected native accessibility link; the macOS AX adapter now applies the same adapter-private identity rule by hashing exactly one selected AXLink AXURL and exact-matching that opaque ref for AXPress rebinding while sensitive dialog/sheet surfaces fail closed. Rebind is routed through the single-writer actor and durable effect journal; single-task incomplete resume rebinds before dispatch ownership validation, and a crash-left rebind effect is settled only when startup observation exactly matches its target ConversationRef while mismatches remain pending/fail-closed. The top-level daemon now resumes multiple active tasks with durable ConversationRef bindings as independent RunWorkers while all desktop observation/mutation still flows through the shared DesktopSessionActor; task-scoped startup reconciliation prevents one conversation's pending destructive effect from being evaluated against another conversation's snapshot, and each worker rebinds to its own durable ConversationRef before observation. Incomplete phases lacking a durable ConversationRef and orphan destructive effects fail closed before cross-conversation startup. In-flight phase ConversationRef capture remains durable before terminal settlement. Exact-artifact live concurrent-task acceptance remains open. |
+| Prompt marker and ownership boundary | domain/application/runtime + desktop adapter | partial: opaque DispatchId/user-turn/assistant-response/conversation-fingerprint types are used end-to-end. The shipping AT-SPI adapter extracts the visible Fabushi dispatch marker from the owned user turn, projects strong user-turn ownership plus the current assistant response boundary and conversation fingerprint, and application accepts Send only when the observed marker matches the exact expected DispatchId. Linux AT-SPI additionally projects ConversationRef as an adapter-private hash of a unique current/selected accessibility link URI; titles/transcript text and ambiguous multiple-current links do not create identity. Runtime journals the prepared dispatch before mutation, routes ConversationRef rebind through DesktopSessionActor/DurableRunSurface, and requires post-rebind observation before resuming the stored dispatch. Exact-artifact live ownership/rebind acceptance and macOS parity remain pending. |
+| 90s send confirmation and safe resend | application/runtime | partial: desktop runtime passes the exact Fabushi DispatchId into application; a new strong user turn is accepted only when its observed marker matches; prepared dispatch intent remains stable across retry while each effect records its own baseline; Send is transactionally journaled before execution and settles only from the semantic postcondition; startup now reconciles a crash-left pending Send from the same DispatchId + new strong user turn and otherwise fails closed instead of blind replay. Linux AT-SPI fresh navigation now reads the unique live composer before New chat and refuses an unrelated non-Fabushi draft before invoking any navigation action; an executable contract proves the draft remains unchanged and action count stays zero. Formal crash/restart and exact-artifact live acceptance remain pending |
+| Five-position reasoning preset | domain + desktop adapter | partial: production runtime creates the durable RunWorker before reasoning selection, routes picker select/recovery through DurableRunSurface so the UI effect is journaled/outboxed before mutation, re-observes the desktop-neutral selected reasoning preset before Send, and startup semantically settles a crash-left reasoning effect only when the requested preset is already observed; ambiguous/mismatched restart state remains pending and fail-closed. Formal Rust CLI five-position and exact-artifact acceptance remain pending |
+| 60s unlimited missing-picker recovery | application/runtime | partial: dedicated unbounded 60s recovery is production-wired independently of generic hydration recovery; formal CLI/exact-artifact acceptance remains pending |
+| Attachment persistence/upload/readiness | attachment-store + desktop adapter | partial: immutable task attachment bytes are persisted atomically with SHA-256 integrity checks and traversal rejection; production `send`/`continuous` accept repeatable `--attachment`, persist task-scoped SQLite metadata, and recover the same bytes after restart. `ChatSurfacePort` exposes semantic filename+bytes attach/readiness operations, DesktopSessionActor remains the sole native mutation owner, and DurableRunSurface journals `attach_file` before mutation, requires filename/preview readiness before Send, waits up to 45 seconds, then retries with task-scoped Supervisor backoff of 5/10/20/40/60 seconds. Linux AT-SPI drives ChatGPT's attachment control and native file chooser without screen coordinates. The shipping macOS AXUIElement adapter now stages bytes under a SHA-256-scoped native path, requires a unique ChatGPT attachment control, uses the system-wide focused NSOpenPanel accessibility surface (Open panels are out-of-process on modern macOS), requires a unique Cancel + Open/Choose shape, writes and re-reads the exact path only through the focused editable AXTextField, confirms through AX actions, and binds readiness to the exact filename in ChatGPT accessibility evidence; ambiguous controls fail closed. Deterministic runtime contracts still cover attachment-before-Send, fresh-chat reattach and crash-left deadline preservation, while macOS-only adapter safety contracts cover traversal rejection, chooser uniqueness and filename-bound readiness. Exact-head macOS compile/test evidence and exact-artifact live Linux/macOS attachment acceptance remain pending. |
+| Authorization structural detection | desktop adapter semantic projection | partial: production AT-SPI projection now requires exact Allow + Reject + split-menu controls under the same bounded ancestor container; unrelated page controls cannot be combined into a card, while live-device positive/disabled/remount acceptance remains pending |
+| Exact current-conversation approval | application + desktop adapter | partial: production adapter reuses the bounded authorization card, opens only that card's split menu, rejects persistent/global choices and requires exactly one conversation/session-scoped grant candidate; formal live acceptance remains pending |
+| Disabled/remounted approval handling | application/domain + desktop adapter | partial: presence/actionability are distinct domain facts and desktop structural projection counts a disabled bounded card as present; durable 12s settlement/remount evidence and live acceptance remain pending |
+| 12s approval settlement latch | application/domain + store | partial: approval intent/fingerprint/outbox are now committed before the UI mutation; accepted conversation-scoped grants persist a task/run/phase/round/conversation-bound 12s settlement window, project durable Settling through DurableRunSurface, restore it for the same durable run identity, and settle only after a later semantic no-card postcondition. Adapter Ok(true) no longer settles the approval effect. Exact-artifact live disabled/remount/crash acceptance remains pending. |
+| 8s live no-approval recheck before handoff | application | partial: the 8s window is now a destructive fresh-handoff guard only. Dispatch-timeout fresh recovery, fourth rate-limit fresh recovery, and Review fresh recovery perform two live authorization scans separated by at least 8 seconds and cancel if authorization/settlement appears. Ordinary terminal completion keeps its independent ~4s stability rule, and ordinary rate-limit dismissal/cooldown is not delayed by this guard. Formal live desktop acceptance remains pending. |
+| Final latest-response Copy evidence | domain + desktop adapter | partial: production AT-SPI projection rejects marker-order-only Copy matching and now requires Copy to share a bounded non-document ancestor with the latest visible response text after the owned Fabushi marker; an older mounted assistant response can no longer satisfy terminal Copy merely because it appears after the marker. Domain/application still require strong current-response ownership and 4s/8s stability. Stable opaque response identity across live/virtualized renderer remounts and exact-artifact live acceptance remain pending. |
+| Review two-minute final settlement | application/runtime + sqlite-store + desktop adapter | partial: deterministic 120s tracker accepts only safe current-response evidence. The shipping desktop adapter now projects a structured strict Review report bound to the current assistant response boundary, while application independently validates taskId/round/status/summary/next and can settle before Copy hydration. Production continuous Review persists progress signature + absolute no-final-since under task/run/phase/round/conversation identity, restores elapsed time across restart (including the 110s + restart + 10s boundary), resets on real progress or unsafe/active state, and clears on strict final/fresh recovery. Exact-artifact live acceptance remains pending. |
+| Virtualized/missing task marker recovery | conversation fingerprint + response boundary | pending |
+| Visible assistant activity progress fingerprint | desktop adapter + application | partial: production AT-SPI bridge projects bounded assistant tertiary activity separately from terminal prose, groups it by the owned assistant-response scope, and once current prose exists accepts work trace only from that same current response scope. The executable response-boundary contract keeps a stale virtualized sibling mounted, remounts the current response, and proves stale sibling activity/Copy cannot contaminate current progress/terminal evidence while unchanged current prose preserves the same boundary. Live positive activity/remount acceptance remains pending. |
+| Abnormal visible-work carry | RecoveryEnvelope | partial: production fresh handoffs for connection interruption, stream polling timeout, conversation-length limit, fourth rate-limit episode and Review settlement now serialize a bounded V1 envelope with current task/run/phase/round, authoritative instruction, live assistant prose/activity trace, previous Work result, next, goal and bounded completed/remaining/blocker context. Exact-artifact live acceptance and fresh-handoff dispatch-id rotation remain pending. |
+| Generic 15m stall recovery | application/runtime + durable outbox | partial: shipping RunPrompt resets its progress clock from the current semantic progress fingerprint (assistant prose/activity and other current-run progress) and invokes `recover_current_surface` after the configured 15-minute stall window. In DesktopRuntime that mutation goes through DurableRunSurface, which journals a baseline-scoped recovery effect before DesktopSessionActor performs the desktop recovery; startup only settles a crash-left recovery when the same conversation/user-turn/dispatch identity is observably healthy and the prior degraded condition has cleared, otherwise it remains fail-closed. Exact-artifact live 15-minute stall/restart acceptance remains pending. |
+| Generic hydration bounded recovery | application/runtime + desktop adapter | partial: the shipping RunPrompt now wires `HydrationRecoveryState` after higher-priority authorization/error/rate-limit handling. When the current desktop composer identity remains unavailable with `HydrationState::Loading`, it waits the source-equivalent ~30-second window before `recover_current_surface`, permits at most two recoveries for that continuously missing identity, and then remains exhausted instead of resetting merely because more time passes; real composer readiness resets the state. In DesktopRuntime each recovery still flows through the durable baseline-scoped recovery outbox before DesktopSessionActor mutation. Deterministic shipping-path coverage proves a persistently loading run performs exactly two recoveries and then only observes until timeout. Exact-artifact live hydration/remount acceptance remains pending. |
+| Explicit load failure 30s x7 | application/runtime + sqlite-store | partial: shipping RunPrompt persists attempts and the absolute next-retry deadline through `SqliteLoadFailureState`, waits with the task-scoped Supervisor `RecoveryNavigation` wake, journals each `recover_current_surface` mutation through DurableRunSurface, and after seven exhausted retries uses the authorization-safe destructive-handoff guard before fresh RecoveryEnvelope carry. Startup reconciliation accounts for a crash-left explicit-load recovery attempt without replaying it blindly, and deterministic runtime/sqlite/application contracts cover persisted deadlines, restart accounting and the seven-attempt handoff. Exact-artifact live load-failure acceptance remains pending. |
+| Connection-interrupted fresh handoff | application/runtime | partial: a confirmed owned run now performs the destructive authorization gate, captures live assistant prose/work trace into a bounded RecoveryEnvelope, starts a fresh conversation and immediately sends the carry. Fresh-handoff dispatch-id rotation and exact-artifact desktop acceptance remain pending. |
+| Stream polling-timeout handoff | application/runtime | partial: confirmed owned runs now share the RecoveryEnvelope fresh-handoff production path; exact-artifact desktop acceptance and fresh-handoff dispatch-id rotation remain pending. |
+| Stream-cache-expired current retry | application/runtime + desktop adapter + sqlite-store | partial: the shipping AT-SPI adapter binds Stream cache expired and Retry to the current owned assistant response; RunPrompt permits one Retry per durable failure identity, journals that identity before UI mutation, and sqlite-store preserves it across pending/settled effects so crash/restart cannot click Retry twice. A repeated identical failure routes through authorization-safe fresh RecoveryEnvelope rather than terminal completion. Exact-artifact live retry acceptance remains pending. |
+| Rate-limit 5m / 3 episodes / 4th fresh | application/runtime + desktop adapter | partial: exact episode/cooldown policy is tested and production cooldown sleeps are task-scoped durable Supervisor wakes. Shipping AT-SPI rate-limit projection requires bounded alert/notification/status/dialog provenance so user/assistant transcript text cannot self-trigger. Source-2.10.15 history-access-only request-frequency popups are classified separately from current-request throttles, acknowledged only through a unique safe action in the same bounded container, and never enter the five-minute cooldown; authorization/consent/login/security/payment-like dialogs fail closed. The fourth true episode still uses authorization-safe fresh carry. Exact-artifact live rate-limit/popup acceptance remains pending. |
+| Conversation-length handoff / 64k carry | application/domain/runtime | partial: confirmed owned runs now use the bounded RecoveryEnvelope fresh-handoff path and retain the existing 64k conversation-carry bound; exact-artifact desktop acceptance and fresh-handoff dispatch-id rotation remain pending. |
+| Popup dismissal | desktop adapter + safety policy | partial: shipping AT-SPI popup handling is semantic and fail-closed. It can close only a uniquely identified harmless Close/Later/Skip-style action, and separately acknowledges the source-2.10.15 history-access-only request-frequency popup without cooldown. Authorization-like and other sensitive/unknown dialogs are blocked from generic dismissal. Deterministic fixtures cover harmless, sensitive, authorization-like, transcript-only and history-only cases; exact-artifact live popup acceptance remains pending. |
+| Pause/resume/cancel/delete/edit goal | application + runtime + store + cli | partial only for live acceptance: pause, resume, cancel, edit-goal, and delete are durable CLI controls on continuous tasks. Production RunWorker supervision reads lifecycle state from SQLite, returns Paused/Cancelled before another dispatch when control changes, and resume re-enters the existing durable phase/startup reconciliation path rather than creating a new task. Edit-goal rejects empty/completed/cancelled tasks, persists the new goal and increments GoalRevision so future Work rounds use the revised target. Delete rejects active tasks and pending destructive effects, records a schema-v4 `task_deletions` tombstone in the same transaction that removes task/run/effect/attachment metadata, then idempotently removes attachment bytes; startup resumes pending tombstones after a crash, and missing task state is fail-closed as Cancelled for an already-running worker. Deterministic contracts cover no-Send while paused/cancelled, durable control visibility, persisted GoalRevision updates, active-delete rejection, pending-effect rejection, attachment cleanup, crash-left cleanup, and deleted-worker stop semantics. Exact-artifact live lifecycle acceptance remains pending. |
+| Hot update/restart continuity | runtime + durable store/outbox | partial: startup reads pending outbox effects before a new mutation run, semantically settles previously executed Send/reasoning/approval only from their semantic postconditions, and blocks ambiguous/unsupported pending effects instead of replaying them. The production `continuous --task-id` path reloads stable orchestration identity/phase/round, locates the latest incomplete durable run, requires the live surface to match its stored dispatch id with strong ownership, and resumes that same RunWorker without a duplicate initial Send. The CLI exposes a durable `daemon` startup entrypoint: SQLite enumerates active incomplete tasks and runtime resumes every safely bound task with its persisted goal/reasoning identity. Each worker rebinds through the single shared DesktopSessionActor before observation, startup reconciliation is task-scoped, fresh-conversation effects atomically clear stale ConversationRef state, crash-left rebind effects settle only from an exact target-ref postcondition, and incomplete phases without a durable ref or orphan destructive effects fail closed. Deterministic contracts cover two independently running server-side Review conversations resuming under one desktop actor without duplicate Send. Review settlement deadline preservation and crash-left degraded-surface reconciliation remain production-wired. Real exact-artifact multi-conversation crash/restart acceptance remains pending. |
+| Memory diagnostic-only policy | runtime/observability | partial: production runtime exposes process-scoped diagnostics only for the Fabushi CLI/runtime itself; Linux reads VmRSS/VmSize from /proc/self/status, labels the output diagnostic-only, and doctor reports it without creating any threshold, recovery effect, reload/restart/fresh-chat/task-abandon branch. Non-Linux platforms fail closed as unsupported rather than inventing renderer/whole-app metrics. Deterministic parsing/contract coverage and exact-artifact doctor evidence remain required before promotion. |
+| Web URL identity | redesigned as ConversationRef/fingerprint | partial: domain/application treat ConversationRef as opaque and never parse platform representation. Linux shipping AT-SPI now derives it only from one strongly current/selected accessibility link with a native URI, hashes that adapter detail before projection, and can exact-match/rebind the same opaque ref through a durable single-writer effect while failing closed on ambiguity or sensitive/authorization surfaces. Production multi-task rotation and exact-artifact live acceptance remain pending; Linux in-flight phase refs are captured durably as soon as exact dispatch ownership is observed. macOS now has production opaque ConversationRef projection/rebind wiring, but exact-head macOS compile/test evidence and live acceptance are still required. |
+| localStorage/IndexedDB | redesigned as SQLite + attachment store | partial: production state no longer depends on browser localStorage/IndexedDB. SQLite WAL owns task/run/event/outbox/approval/lease/attachment metadata and scheduler/recovery state with transactional mutation contracts, while attachment-store persists immutable task bytes with digest verification and crash-resumable cleanup. Runtime/CLI read these durable stores for continuous resume/startup reconciliation. Exact-artifact crash/restart and live acceptance remain pending. |
+| Browser/CDP host capability glue | not applicable; replace with runtime ports | partial: core port is now ChatSurfacePort and architecture gate rejects BrowserPort/PageSnapshot in domain/application; default doctor/status/send CLI wiring already enters DesktopRuntime, while Chromium/CDP remains only behind explicitly named legacy commands. Packaged exact-artifact desktop acceptance is still pending. |
+| Real desktop ChatGPT acceptance | htch-runtime exact-HEAD artifact gate | pending |
+| macOS Rust CLI compile and packaging | macOS GitHub Actions arm64 + x86_64 | partial: platform composition and native AXUIElement adapter support composer/send, reasoning selection, and safe new-chat start. Authorization, terminal evidence, recovery, and full continuous-task parity remain pending. Actions results on the exact commit are required before claiming macOS compile support verified |
+
+No row may be marked `implemented` from type scaffolding alone. It requires shipping production wiring plus the highest applicable evidence layer.
+
+## 14. Implementation order
+
+### Phase 0 — reconcile authority
+
+1. Land this spec.
+2. Update `docs/architecture.md` and ADRs to the desktop topology.
+3. Update architecture gate to reject new browser-specific leakage.
+4. Freeze the userscript source baseline and create a machine-readable parity manifest.
+
+### Phase 1 — domain/application extraction
+
+1. Replace `PageSnapshot` / URL assumptions with semantic desktop-neutral types.
+2. Model Task/Run/Phase/Round/Dispatch/ConversationFingerprint.
+3. Port recovery policy and current source timer precedence.
+4. Port continuous Work -> Review orchestration.
+5. Port approval and completion invariants.
+6. Add versioned RecoveryEnvelope.
+7. Add fake-port/virtual-clock parity tests.
+
+### Phase 2 — durable runtime
+
+1. SQLite WAL store and schema migrations.
+2. Append-only event journal.
+3. Transactional effect outbox.
+4. UI-session lease.
+5. Supervisor/DesktopSessionActor/RunWorker.
+6. crash/startup recovery and graceful shutdown.
+
+### Phase 3 — desktop adapters
+
+1. ChatGPT process discovery/attach/start.
+2. AT-SPI semantic snapshot.
+3. composer/send.
+4. model/reasoning selection.
+5. response-bound terminal evidence.
+6. approval flow.
+7. attachments.
+8. desktop-native recover/reopen/new-conversation actions.
+
+### Phase 4 — CLI
+
+1. doctor/desktop commands;
+2. durable task CRUD/control;
+3. enqueue/run/watch JSON/JSONL;
+4. supervise daemon path;
+5. stable exit/error contract.
+
+### Phase 5 — development + CI verification
+
+1. optionally run architecture/fmt/test/clippy/integration on `htch-runtime` during development;
+2. run architecture gate in GitHub Actions;
+3. run fmt check in GitHub Actions;
+4. run domain/application tests in GitHub Actions;
+5. run adapter contract fixtures in GitHub Actions;
+6. run clippy in GitHub Actions;
+7. produce packaged release artifact in GitHub Actions;
+8. run fixture integration in GitHub Actions.
+
+### Phase 6 — `htch-runtime` acceptance
+
+1. exact-HEAD artifact only;
+2. simple dispatch;
+3. reasoning verification;
+4. terminal completion;
+5. restart/recovery;
+6. attachment journey;
+7. real approval journey when safely triggerable;
+8. evidence bundle.
+
+### Phase 7 — parity closure
+
+1. migration ledger contains no required pending/partial rows;
+2. old browser runtime is removed or non-default legacy-only;
+3. exact-HEAD GitHub Actions all green;
+4. real-device gates pass;
+5. final spec-compliance review proves every acceptance criterion.
+
+## 15. Acceptance gates
+
+### Gate A — architecture authority
+
+- this spec is authoritative;
+- `docs/architecture.md` and ADRs no longer prescribe browser-process/target ownership for the production desktop path;
+- architecture script rejects dependency-direction and desktop-implementation leakage.
+
+### Gate B — GitHub Actions code quality
+
+Required on exact candidate commit:
+
+- architecture gate;
+- `cargo fmt --all -- --check`;
+- `cargo test --workspace`;
+- `cargo clippy --workspace --all-targets -- -D warnings`;
+- release/package build.
+
+These commands must pass in GitHub Actions on the exact candidate commit. They may also be run on `htch-runtime` during development.
+
+### Gate C — source parity contract
+
+- machine-readable migration manifest is complete for source 2.10.15;
+- every required userscript behavior has deterministic domain/application/adapter coverage;
+- no historical superseded source rule is accidentally reintroduced.
+
+### Gate D — packaged desktop wiring
+
+- packaged CLI uses the desktop production composition root;
+- browser/CDP adapter is not selected by default;
+- fixture integration proves CLI -> runtime -> application -> desktop adapter wiring.
+
+### Gate E — real `htch-runtime` core journey
+
+Exact-HEAD artifact proves:
+
+- app discovery/attach;
+- deterministic reasoning verification before Send;
+- one canary prompt dispatched once;
+- correct authored turn bound;
+- response supervised to valid terminal evidence;
+- CLI structured report matches independent read-only device evidence.
+
+### Gate F — real authorization journey
+
+A safe real ChatGPT authorization card proves:
+
+- surface detected before destructive recovery;
+- only current-conversation/session grant selected;
+- settlement gap does not cause fresh handoff;
+- no persistent authorization selected.
+
+Fixtures do not satisfy this gate.
+
+### Gate G — full userscript behavioral replacement
+
+May be claimed only when:
+
+- migration ledger has no required `pending`, `partial` or `blocked` rows;
+- Gates A-F pass on the same release lineage;
+- exact-head artifact/evidence provenance is recorded;
+- browser runtime is not the default product path;
+- final spec-compliance review records each requirement as passed or justified not-applicable.
+
+## 16. Evidence contract
+
+Every real acceptance record binds:
+
+- target repository and exact commit SHA;
+- source baseline SHA/version;
+- GitHub Actions workflow/run/job identifiers;
+- artifact name/id;
+- artifact SHA-256;
+- CLI version/build provenance;
+- device id;
+- OS/kernel/architecture;
+- ChatGPT desktop executable/package version;
+- task/run/dispatch IDs;
+- command-line invocation with sensitive values redacted;
+- semantic event timeline;
+- requested and verified execution profile;
+- attachment hashes/metadata when applicable, not private file content;
+- final ownership/terminal-evidence summary;
+- approval evidence when applicable;
+- sanitized independent accessibility observation;
+- result status.
+
+Evidence must never include passwords, OTPs, cookies, tokens, full private prompts by default or unrelated conversation text.
+
+## 17. Definition of done
+
+This migration is done only when a user can install/run the Rust CLI, keep their normal authenticated desktop ChatGPT app, dispatch the same classes of tasks the userscript handled, and receive the same safety/recovery guarantees without relying on a browser userscript or standalone Chromium automation.
+
+Specifically:
+
+- the Rust CLI is the actor causing production desktop ChatGPT actions;
+- desktop UI implementation details are isolated in adapters;
+- task/recovery policy is deterministic and durable;
+- crashes/restarts do not create duplicate destructive effects;
+- execution profile is verified before Send;
+- attachments cannot be silently omitted;
+- authorization is conversation-scoped and fail-closed;
+- Stop disappearance is never mistaken for successful completion;
+- continuous Work -> Review can run across multiple conversations;
+- abnormal handoff preserves useful work context without transcript explosion;
+- multiple tasks are fairly supervised with a single UI writer;
+- development builds/tests may run on `htch-runtime`, while merge/release qualification still requires exact-HEAD GitHub Actions;
+- formal `htch-runtime` release acceptance uses the exact-HEAD packaged GitHub Actions artifact;
+- full parity is not claimed until the migration ledger and Gates A-G are closed.
+
+## 18. Baseline implementation status
+
+At target baseline `7e9f2f1625b3ac9dd79ce0f91771e27a4d01c26b`, the repository contains a useful Hexagonal Architecture skeleton and browser/CDP automation, including some recovery and terminal concepts.
+
+That implementation is **not** desktop ChatGPT userscript parity:
+
+- production runtime is still Chromium/CDP;
+- domain/application still expose browser/page/URL concepts;
+- no desktop AT-SPI adapter exists;
+- no SQLite durable event/outbox runtime exists;
+- continuous Work -> Review parity is incomplete;
+- source 2.10.13-2.10.15 authorization/reasoning races are partially ported: durable approval identity/latch and destructive-only 8s safety-gate wiring now exist with deterministic coverage, but exact-artifact real desktop authorization acceptance and the remaining migration ledger are still open;
+- desktop attachment/model/recovery behavior is not proven;
+- the latest fully qualified exact-head CI baseline is GitHub Actions run 37065730836 at `6a33d4fd949c37d1daf159d867be3218fa28df5d`: Linux job 111032941787, macOS aarch64 job 111032942126, and macOS x86_64 job 111032942280 all completed successfully through architecture, fmt, workspace tests, clippy, release build, and artifact upload. Artifacts are Linux 11252158901 (`fabushi-chatgpt-auto-confirm-linux-x86_64`, SHA-256 `eb91291c36a71ae4eaa8dba35f82169b04885f24d5b5ff0ed1507d9422d9dd26`), macOS arm64 11252966029 (`fabushi-chatgpt-auto-confirm-macos-aarch64-apple-darwin`, SHA-256 `bc015a80d67416a8844e374fa0164e1754071d9b2a35794996113840db6b5255`), and macOS x86_64 11253060968 (`fabushi-chatgpt-auto-confirm-macos-x86_64-apple-darwin`, SHA-256 `b65aa02caf0a0f12969d25371183125fbcaa368ddc90a139e5c1da5461bd75c1`). The macOS native attachment path therefore has exact-head compile/test/package evidence on both architectures, but its live native chooser/readiness acceptance remains open. The most recent successful read-only htch-runtime app inspection still found no installed/running ChatGPT desktop application and `/usr/bin/chatgpt` absent; in this verification pass the device went offline before a fresh app inspection, so Gate E/F remain environment-blocked and no device-controller mutation is credited.
+
+Current PR #2 migration progress on 2026-10-02:
+
+- Phase 0 architecture authority is reconciled to the desktop topology in `docs/architecture.md`.
+- ADR-0003 is superseded for the production path and ADR-0004 records the single-writer `DesktopSessionActor` topology.
+- `scripts/check-architecture.sh` rejects superseded `PageSnapshot`, `BrowserPort`, canonical web-conversation URL and browser/CDP leakage from domain/application.
+- `docs/parity/userscript-2.10.15.json` freezes the source baseline and records machine-readable partial/pending responsibilities.
+- domain/application now use desktop-neutral `ChatSurfaceSnapshot`, opaque conversation/turn boundaries, five-position reasoning semantics, authorization presence/actionability/settlement identity and deterministic recovery policy.
+- deterministic application/runtime tests now distinguish the 12-second durable authorization settlement window from the destructive-only 8-second double-scan guard: ordinary terminal remains ~4 seconds, ordinary rate-limit dismissal is immediate, the fourth rate-limit fresh handoff double-scans, authorization appearing between scans cancels the handoff, disabled authorization blocks, adapter Ok(true) leaves approval pending, and an unexpired durable latch restores Settling for the same task/run/phase/round/conversation identity. Top-level task-scoped startup reconciliation now validates that full durable approval identity and defers an armed Settling effect back to the restored RunWorker, while global/new-run startup continues to fail closed; this prevents restart from blind-replaying authorization or incorrectly forcing fresh/retry before the original latch is supervised.
+- strict Review parsing now mirrors the source 2.10.15 split between valid-JSON schema validation and syntax-error-only tolerant recovery, including wrapped reports with unescaped human quotes and exact current task/round selection over stale quoted evidence; `htch-runtime` domain/application scratch-workspace verification is green for the current source tree.
+- dispatch confirmation now binds the observed user turn to the exact runtime-generated Fabushi DispatchId; prepared dispatch identity remains stable across fresh-chat retry while each Send effect records its own baseline. A crash-left pending Send is reconciled at startup only when the live desktop snapshot proves the same DispatchId on a new strong owned user turn; otherwise a new destructive run is refused rather than blindly replaying the Send. Non-Send outbox reconciliation is now substantially wired for fresh-conversation, reload/recovery, reasoning, approval, attachment deferral and rebind effects; formal real crash/restart acceptance remains open.
+- Review settlement keeps task/round parsing in application: a strong current assistant response boundary may be parsed from `assistant_visible_prose` as strict review-final evidence before response-local Copy hydrates, while unsafe/streaming/authorization/error states remain blocked. The compatibility `RunPrompt` path can now be given an explicit Review identity: ordinary Copy/terminal evidence cannot finish Review, and 120 seconds without final/progress triggers a fresh Review conversation and re-dispatch of the same prepared Review prompt. Durable continuous Work -> Review orchestration is production-wired in the shipping runtime: Work results are durably saved, Review runs are fresh-conversation phases bound to the current taskId/runId/round, strict `MAHAYANA_TASK_REPORT_V1` is required, `status=next` persists the next instruction and advances to a fresh Work round, historical quoted reports remain non-authoritative, and incomplete phases resume through the persisted dispatch/conversation identity after restart. A shared production `continuous_phase_execution_plan` now constructs both fresh and resumed phase prompt/identity/RecoveryEnvelope context, with a focused deterministic contract covering fresh Work/Review boundaries, stale-report isolation, next-round Work context, and no destructive fresh-conversation action on restart-resume. Exact-artifact real multi-round Work -> Review -> Work acceptance remains open.
+- `chatgpt-desktop-process` implements the semantic `ChatProcessPort` boundary with Linux `/proc` discovery and the known `/usr/bin/chatgpt` launcher and is composed by the desktop runtime.
+- `chatgpt-desktop-atspi` now exists as the Linux desktop semantic adapter. Its Rust wrapper invokes the system AT-SPI2/D-Bus stack through installed `pyatspi`, projects the live ChatGPT accessibility tree into `ChatSurfaceSnapshot`, and owns semantic composer Send, fresh-conversation, reload, bounded rate-limit dismissal and fail-closed conversation-scoped authorization effects.
+- Fresh-conversation draft safety is now production-wired in the Linux AT-SPI adapter: `start_fresh()` requires one unique composer, reads its live draft before locating/clicking New chat, refuses an unrelated non-Fabushi draft without invoking the action, and permits only an empty or Fabushi-owned draft. An executable bridge contract proves the unrelated draft remains unchanged and New chat action count stays zero. Exact-artifact live Gate E remains pending until a clean composer exists or a separately proven non-destructive surface mechanism is implemented.
+- popup handling is now production-wired rather than a policy-only enum: the desktop adapter projects harmless versus sensitive/unknown modal state, excludes authorization-card structures from generic dismissal, and only exposes one exact semantic Close/Later/Skip-style action for automatic dismissal. Login, authorization, consent, account-selection, security-verification, payment and unknown dialogs remain blockers and are never auto-clicked. Executable AT-SPI fixture coverage exercises harmless, sensitive and authorization-like dialogs, and shipping `RunPrompt` tests prove harmless dismissal continues supervision while sensitive/unknown dialogs produce zero dismiss mutations.
+- Stream cache expired retry is now shipping behavior rather than an unused policy enum: the AT-SPI adapter recognizes the exact error only inside the latest owned assistant response and scopes Retry to that same response; `RunPrompt` asks for Retry once, `DurableRunSurface` journals the failure identity before the UI mutation, and SQLite remembers pending or settled identities so crash/restart cannot click Retry twice for the same failure. If that same failure is observed again after its one retry, supervision uses the normal authorization-safe fresh RecoveryEnvelope handoff instead of treating the failed response as terminal. Deterministic application, adapter and SQLite contracts cover the one-retry/fresh-handoff path, response-local projection, and durable duplicate guard; exact-artifact live cache-expiry acceptance remains open.
+- desktop rate-limit detection is now provenance-bound: `chatgpt-desktop-atspi` only projects a request-frequency condition when the matching text belongs to an accessibility alert/notification/status/dialog semantic notice, not merely because identical words appear in user or assistant transcript text. The acknowledgement action is likewise confined to that same notice container. Executable adapter contracts prove transcript text is ignored and a real alert is accepted. History-access-only frequency popups still require their source-specific acknowledgement/exclusion behavior before rate-limit parity is fully closed, and exact-artifact live acceptance remains open.
+- the default `doctor`, `status` and `send` CLI path now enters `DesktopRuntime`; Chromium/CDP is retained only behind explicitly named legacy commands. The desktop runtime adds a fresh Fabushi dispatch marker before Send and refuses to Send when the requested reasoning preset cannot be independently observed as already selected.
+- the live `htch-runtime` accessibility oracle confirms the application is exposed as AT-SPI application `Codex` with `ChatGPT` frame/document, `Ask ChatGPT` composer, `New chat`, and `Select ChatGPT model`. Adapter `snapshot` smoke currently observes a healthy ready composer from that real application.
+- reasoning remains `partial`, but its production chain is now wired: application owns the dedicated 60-second unbounded recovery policy, the desktop AT-SPI adapter drives the semantic `Power` control through its declared Left/Right keyboard contract, and runtime re-observes the selected position before Send. `htch-runtime` adapter smoke changed Extra High (4/5) -> High (3/5) -> Extra High (4/5) and re-read each state successfully. Formal Rust CLI five-position acceptance and exact release-artifact acceptance remain open. Attachments, durable SQLite/outbox actors, full response-boundary/activity projection and formal real authorization/terminal journeys also remain open.
+- terminal/response-boundary hardening now projects only the latest assistant response container owned by the current Fabushi user turn instead of concatenating every visible post-marker assistant text node. Response-local Copy must descend from that exact response container, and an executable deterministic bridge contract proves an older virtualized sibling response with its own mounted Copy cannot terminate the latest response. Live virtualized/remount acceptance remains open.
+- semantic-snapshot activity hardening now scopes tertiary assistant work trace to owned response groups instead of every post-marker tertiary node. The same executable contract leaves a stale virtualized sibling mounted, verifies only the current response activity enters progress/carry, then remounts the current response with unchanged prose and proves its semantic response boundary remains stable. This closes deterministic contamination/remount coverage only; live positive activity/remount acceptance and Gate E remain open.
+- fresh-conversation durable effects now persist the pre-effect user-turn/conversation baseline, execute through the single desktop mutation owner, and settle only after a re-observed clean fresh-surface postcondition. Startup reconciliation can settle a crash-left fresh-conversation effect from that semantic postcondition without replaying the UI action; if the old owned turn/conversation is still present, the effect stays pending and the runtime fails closed. Recover/reload now also journals its semantic baseline and settles only after a same-identity postcondition. Explicit unable-to-load retries additionally persist identity-scoped attempts plus absolute 30-second retry deadlines before reload; shipping `RunPrompt` performs seven bounded retries and then a fresh RecoveryEnvelope handoff. A crash-left explicit-load reload is never replayed blindly: the already-persisted attempt is accounted as ambiguous while its original deadline is preserved for the next numbered attempt. Healthy-stall reload now persists an opaque adapter-supplied surface generation before the effect. The Linux AT-SPI adapter hashes renderer object identity locally and verifies that reload exposes a distinct generation; startup reconciliation settles a crash-left healthy reload only when the same conversation/user-turn/dispatch identity is restored with an independently changed generation. Pre-reload crashes, missing generation evidence, unchanged generation, or identity drift remain pending and fail closed, so restart does not blindly replay reload or reset recovery accounting.
+- therefore no affected row is promoted to `implemented`, and Gates D-G are not yet satisfied.
+- runtime now also has a production `DesktopSessionActorHandle` mutation queue plus `RunWorker` path: all reasoning changes, Send, approval, rate-limit dismissal, harmless-popup dismissal, recover/reload and fresh-conversation mutations are serialized through one shared actor per `DesktopRuntime`; observations remain read-only. A deterministic fake-port test proves concurrent mutation requests never overlap. SQLite fencing-token `ui_session_leases` are production-wired with acquire/heartbeat/pre-mutation verification/release, and the RunWorker path records each destructive effect to the transactional event/outbox before execution and settles it afterward. The runtime now has read-side desktop process reattachment: if ChatGPT is observed NotRunning it may restart and wait for a new semantic accessibility surface, while destructive mutations fail closed instead of implicitly restarting/replaying after a crash. Fair task-scoped wake scheduling is production-wired; deterministic independent proof now covers ambiguous healthy-stall reload reconciliation through opaque surface-generation evidence. Opaque cross-conversation rebinding/production multi-RunWorker daemon coverage and formal htch-runtime live acceptance remain open.
+
+- live exact-artifact probing exposed a fresh-conversation projection defect where a non-visible historical Fabushi dispatch marker remained in the AT-SPI tree after New chat and was still projected as the current user turn. The Linux AT-SPI adapter now requires marker nodes to be visible in addition to excluding composer-draft markers, and the executable dispatch-marker contract covers both cases. This closes only the deterministic projection defect; exact-HEAD packaged fresh-conversation/continuous acceptance remains required before any affected parity row can be promoted.
+
+- exact-artifact Gate E probing at `39632937749698d5b3582d97f08be89280ceca20` then exposed a distinct crash/interruption recovery defect: the real ChatGPT composer still contained a previous Fabushi continuous prepared prompt, with an AT-SPI-truncated trailing dispatch marker, and the packaged CLI correctly refused to overwrite it as an unknown draft. Read-only AT-SPI inspection proved the draft was Fabushi-owned rather than user-authored. The shipping Linux AT-SPI composer path now permits replacement only when both the existing draft and the new prepared prompt end in a bounded Fabushi dispatch-marker suffix; it accepts a missing closing bracket only at the accessibility-text boundary, keeps every ordinary/non-Fabushi draft fail-closed, clears a stale Fabushi ProseMirror draft through the semantic keyboard path, verifies the composer is empty, writes the new prompt, and verifies exact readback. The executable composer-write contract covers stale-Fabushi replacement plus unrelated-draft rejection. This is deterministic production evidence only; Gate E remains pending until this new exact HEAD passes GitHub Actions, its packaged Linux artifact is provenance-checked on htch-runtime, and that packaged binary completes reasoning -> unique Send -> owned user-turn binding -> response-local terminal supervision.
+
+- packaged/live probing also exposed two Linux composer-input defects that deterministic fixtures had previously masked: the stale-Fabushi fixture invented a pyatspi.KEY_CONTROL constant that is absent on the real htch-runtime pyatspi build, and whole-prompt KEY_STRING input dropped non-ASCII CJK content. The AT-SPI composer path now clears only Fabushi-owned stale drafts by suffix Backspace with exact per-step draft readback, preserves unrelated user drafts fail-closed, and writes non-ASCII codepoints through Unicode X11 keysyms while waiting for exact prepared-prompt prefixes after every chunk/codepoint. composer_write_contract_self_test executes stale replacement, unrelated-draft rejection, Unicode content, and final exact readback. This remains deterministic production evidence only. The ChatGPT desktop application is again present and healthy on htch-runtime, but the exact `e640695525b129a87e26cdcf4e8a9dcae7405f53` packaged CLI currently sees an unrelated unsent draft fingerprint `56fa5e29e822d6d0e71910c7e0dfa443f1f6dbcdfc2417c20e753c9f125fef4f`; composer/Send acceptance remains pending and must fail closed until the surface is naturally clean or a separately proven non-destructive independent surface mechanism exists.
+
+- A source-2.10.15 rate-limit parity audit found a shipping mismatch in the fourth request-frequency episode: the Rust RunPrompt fresh-handoff path sent the recovery prompt immediately on the fresh root and only then entered cooldown, while the source moves off the old rate-limited conversation first and refuses to hammer another request if the fresh root still exposes a global rate-limit notice. Production now defers that recovery Send until the fresh surface is observed without rate-limit; if the notice persists, it begins a new five-minute cooldown episode and can re-escalate through the same authorization-safe fresh-handoff policy. `fourth_rate_limit_fresh_handoff_defers_resend_while_fresh_root_is_rate_limited` is the deterministic regression. The rate-limit ledger row remains partial until exact-artifact live acceptance.\n\nFuture implementation work must continue updating this section and the migration ledger from production wiring and evidence rather than changing status by assertion.

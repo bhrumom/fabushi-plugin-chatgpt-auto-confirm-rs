@@ -1,0 +1,391 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "repository": "bhrumom/fabushi-chatgpt-auto-confirm-userscript",
+    "commit": "587a03d6e607851ee8ced5d3ad13f65242fea07c",
+    "version": "2.10.15"
+  },
+  "target": {
+    "repository": "bhrumom/fabushi-plugin-chatgpt-auto-confirm-rs",
+    "spec": "docs/specs/desktop-chat-userscript-parity-rust-cli.md",
+    "lastVerifiedExactHead": "6a33d4fd949c37d1daf159d867be3218fa28df5d",
+    "lastVerifiedCiRun": 37065730836,
+    "lastVerifiedArtifact": {
+      "id": 11252158901,
+      "name": "fabushi-chatgpt-auto-confirm-linux-x86_64",
+      "sha256": "eb91291c36a71ae4eaa8dba35f82169b04885f24d5b5ff0ed1507d9422d9dd26"
+    },
+    "lastVerifiedArtifacts": [
+      {
+        "id": 11252158901,
+        "name": "fabushi-chatgpt-auto-confirm-linux-x86_64",
+        "headSha": "6a33d4fd949c37d1daf159d867be3218fa28df5d",
+        "sha256": "eb91291c36a71ae4eaa8dba35f82169b04885f24d5b5ff0ed1507d9422d9dd26"
+      },
+      {
+        "id": 11252966029,
+        "name": "fabushi-chatgpt-auto-confirm-macos-aarch64-apple-darwin",
+        "headSha": "6a33d4fd949c37d1daf159d867be3218fa28df5d",
+        "sha256": "bc015a80d67416a8844e374fa0164e1754071d9b2a35794996113840db6b5255"
+      },
+      {
+        "id": 11253060968,
+        "name": "fabushi-chatgpt-auto-confirm-macos-x86_64-apple-darwin",
+        "headSha": "6a33d4fd949c37d1daf159d867be3218fa28df5d",
+        "sha256": "b65aa02caf0a0f12969d25371183125fbcaa368ddc90a139e5c1da5461bd75c1"
+      }
+    ]
+  },
+  "rules": {
+    "implementedRequires": [
+      "production_implementation",
+      "production_wiring",
+      "deterministic_test",
+      "highest_applicable_acceptance_evidence"
+    ]
+  },
+  "responsibilities": [
+    {
+      "id": "semantic-snapshot",
+      "source": "page/task inspection",
+      "destination": "domain ChatSurfaceSnapshot + ChatSurfacePort",
+      "status": "partial",
+      "evidence": [
+        "crates/domain/src/lib.rs",
+        "crates/application/src/lib.rs",
+        "crates/adapters/chatgpt-desktop-atspi/src/lib.rs",
+        "crates/adapters/chatgpt-desktop-atspi/src/bridge.py",
+        "Linux AT-SPI latest_owned_activity_trace groups tertiary assistant activity by owned response scope and, once current prose exists, accepts activity only from that same current response scope; the executable response-boundary contract keeps a stale virtualized sibling mounted, remounts the current response, and proves stale activity/Copy cannot contaminate current progress/terminal evidence while the response boundary remains stable for unchanged prose"
+      ],
+      "missing": [
+        "live positive assistant activity/remount acceptance",
+        "live virtualized/remount assistant response-boundary acceptance",
+        "real desktop Gate E acceptance"
+      ]
+    },
+    {
+      "id": "reasoning-five-position",
+      "source": "v2.10.7/v2.10.15",
+      "destination": "ReasoningPreset + desktop adapter",
+      "status": "partial",
+      "evidence": [
+        "crates/domain/src/lib.rs",
+        "crates/application/src/lib.rs",
+        "crates/adapters/chatgpt-desktop-atspi/src/bridge.py",
+        "crates/adapters/chatgpt-desktop-atspi/src/lib.rs",
+        "crates/runtime/src/lib.rs"
+      ],
+      "missing": [
+        "formal Rust CLI htch-runtime acceptance across five positions",
+        "exact release artifact acceptance"
+      ]
+    },
+    {
+      "id": "authorization-settlement",
+      "source": "v2.10.13/v2.10.14",
+      "destination": "application authorization policy",
+      "status": "partial",
+      "evidence": [
+        "crates/application/src/lib.rs",
+        "crates/runtime/src/lib.rs",
+        "crates/adapters/sqlite-store/src/lib.rs",
+        "crates/adapters/chatgpt-desktop-atspi/src/bridge.py",
+        "task-scoped startup reconciliation validates the durable approval taskId/runId/phase/round/conversation fingerprint identity and defers an armed settling approval effect back to the restored RunWorker instead of blocking resume; global/new-run startup still fail-closes on that pending destructive effect"
+      ],
+      "missing": [
+        "formal exact-artifact live disabled/remount authorization acceptance",
+        "formal exact-artifact crash/restart authorization acceptance"
+      ]
+    },
+    {
+      "id": "terminal-evidence",
+      "source": "current response Copy + stability",
+      "destination": "domain/application",
+      "status": "partial",
+      "evidence": [
+        "crates/domain/src/lib.rs",
+        "crates/application/src/lib.rs",
+        "crates/adapters/chatgpt-desktop-atspi/src/bridge.py",
+        "AT-SPI response projection now groups visible prose by the owned Fabushi user-turn response container and selects only the latest response scope; response-local Copy must be a descendant of that same scope",
+        "response_boundary_contract_executes_against_virtualized_siblings executes the bridge against deterministic sibling response fixtures and proves an older mounted Copy cannot complete the latest response",
+        "AT-SPI dispatch-marker projection requires visible transcript evidence and excludes composer-draft descendants; the executable dispatch-marker contract proves hidden historical markers and prepared drafts cannot become current owned user-turn evidence"
+      ],
+      "missing": [
+        "live virtualized/remount assistant response-boundary acceptance",
+        "real desktop acceptance"
+      ]
+    },
+    {
+      "id": "strict-review-report",
+      "source": "MAHAYANA_TASK_REPORT_V1",
+      "destination": "application",
+      "status": "partial",
+      "evidence": [
+        "crates/application/src/lib.rs",
+        "crates/runtime/src/lib.rs",
+        "crates/adapters/sqlite-store/src/lib.rs",
+        "crates/cli/src/main.rs"
+      ],
+      "missing": [
+        "exact-artifact live acceptance"
+      ]
+    },
+    {
+      "id": "continuous-work-review",
+      "source": "Work -> Review -> Work",
+      "destination": "application/runtime",
+      "status": "partial",
+      "evidence": [
+        "crates/application/src/lib.rs",
+        "crates/adapters/sqlite-store/src/lib.rs",
+        "crates/runtime/src/lib.rs",
+        "crates/cli/src/main.rs",
+        "fresh-handoff dispatch rotation is production-wired and covered by fresh_handoff_rotates_durable_dispatch_identity_and_visible_marker",
+        "pre-scheduler exact-head run 36990315718 passed architecture/fmt/workspace tests/clippy/release packaging on Linux and both macOS targets at 4e24b107315827c1c398be809f5726d5c73cb0f1",
+        "shared production SupervisorClock + durable task_wakes scheduling in crates/runtime/src/lib.rs and sqlite-store",
+        "rate_limit_deferred_task_does_not_block_runnable_task, due_task_selection_round_robins_only_due_tasks, scheduler_rotation_keeps_ui_single_writer_without_duplicate_send, durable_wait_fails_closed_when_supervisor_is_unavailable, dispatch_confirmation_holds_foreground_until_owner_yields, authorization_settlement_releases_foreground_for_other_tasks, and restart_wait_uses_original_durable_deadline",
+        "two-phase durable wake arming fixes SQLite-latency ordering while preserving absolute deadlines; supervisor shutdown after final external handle is deterministic",
+        "CLI daemon + DesktopRuntime::resume_active_continuous_tasks enumerate durable active incomplete tasks and resume all safely bound tasks as independent RunWorkers behind one DesktopSessionActor",
+        "startup_daemon_resumes_two_bound_server_side_reviews_under_one_session_actor proves two independently running server-side conversations are rebound and resumed without duplicate Send; startup_daemon_fails_closed_for_incomplete_phase_without_conversation_ref and startup_daemon_fails_closed_for_orphan_destructive_effect preserve fail-closed startup semantics",
+        "Linux desktop AT-SPI projects an opaque hashed ConversationRef only from one unambiguous current/selected accessibility link with a native URI; transcript/title text alone cannot create identity",
+        "ChatSurfacePort/DesktopSessionActor/DurableRunSurface now expose journaled single-writer rebind_conversation, and incomplete single-task resume rebinds to the persisted ConversationRef before validating the exact dispatch marker",
+        "startup scan preserves durable ConversationRef while ambiguous/missing refs and sensitive/authorization surfaces fail closed",
+        "DurableRunSurface now captures the current ConversationRef during an in-flight phase as soon as the exact durable dispatch marker has strong user-turn ownership; the state-only transition is idempotent and wrong-dispatch/weak-ownership observations cannot overwrite it",
+        "in_flight_owned_observation_durably_binds_conversation_ref_once proves pre-terminal crash-survivable binding without poll-time revision churn",
+        "macOS AX adapter hashes the unique selected AXLink AXURL into an opaque ConversationRef and exact-matches the same opaque identity for AXPress rebinding; ambiguous/missing links and sensitive dialog/sheet surfaces fail closed",
+        "DurableRunSurface observe() now rebinds to the task's persisted ConversationRef before projection, startup reconciliation is task-scoped, and fresh-conversation journaling atomically clears the stale bound ref",
+        "crash-left rebind_conversation effects settle only when startup observation exactly matches the durable target ConversationRef; mismatch remains pending and fail-closed",
+        "shipping DesktopRuntime continuous loop already persists Work results, creates a fresh Review phase with current taskId/runId/round identity, requires strict MAHAYANA_TASK_REPORT_V1, applies status=next into durable current_next + next Work round, and resumes incomplete Work/Review phases after restart",
+        "continuous_phase_execution_plan is shared by fresh and resumed production phases so authoritative prompt, RecoveryEnvelope context, taskId/runId/phase/round identity, Review identity, and fresh-vs-resume conversation boundary cannot drift between orchestration paths",
+        "continuous_phase_plan_preserves_identity_context_and_fresh_phase_boundaries deterministically proves fresh Work/Review phase boundaries, Review task/round binding, stale quoted report isolation, status=next next-Work prompt/context, and restart-resume without a destructive fresh-conversation action"
+      ],
+      "missing": [
+        "exact-artifact real multi-round Work -> Review -> Work acceptance",
+        "live macOS ConversationRef projection/rebind acceptance",
+        "live concurrent-task acceptance"
+      ]
+    },
+    {
+      "id": "explicit-load-failure",
+      "source": "v2.10.8",
+      "destination": "application RecoveryState",
+      "status": "partial",
+      "evidence": [
+        "crates/application/src/lib.rs",
+        "SQLite schema v5 load_failure_states persists task/run/phase/round attempts and absolute next_retry_unix_ms",
+        "RunWorker injects SqliteLoadFailureState into shipping RunPrompt; unable-to-load waits to the preserved 30-second deadline, performs seven recoveries, then fresh-handoffs with RecoveryEnvelope",
+        "shipping_run_prompt_persists_seven_explicit_load_retries_then_handoffs and explicit_load_failure_state_round_trips_absolute_deadline",
+        "startup_reconciliation_accounts_crash_left_explicit_load_attempt_without_replay preserves the already-durable attempt/deadline and never replays the ambiguous old reload"
+      ],
+      "missing": [
+        "exact-head packaged-artifact live unable-to-load acceptance"
+      ]
+    },
+    {
+      "id": "connection-interrupted",
+      "source": "current 2.10.15",
+      "destination": "application RecoveryState",
+      "status": "partial",
+      "evidence": [
+        "crates/application/src/lib.rs",
+        "crates/runtime/src/lib.rs",
+        "fresh handoff now rotates the durable dispatch identity and visible Fabushi marker before resend",
+        "fresh_handoff_rotates_durable_dispatch_identity_and_visible_marker",
+        "pre-scheduler exact-head run 36990315718 passed at 4e24b107315827c1c398be809f5726d5c73cb0f1"
+      ],
+      "missing": [
+        "exact-artifact real acceptance"
+      ]
+    },
+    {
+      "id": "rate-limit",
+      "source": "5m; first 3 preserve; 4th fresh",
+      "destination": "application RecoveryState",
+      "status": "partial",
+      "evidence": [
+        "crates/application/src/lib.rs",
+        "production rate-limit cooldown uses task-scoped durable Supervisor wake",
+        "rate_limit_deferred_task_does_not_block_runnable_task",
+        "desktop AT-SPI rate-limit projection requires alert/notification/status/dialog provenance instead of scanning the conversation transcript",
+        "dismiss_rate_limit scopes Got it/明白了 to the same semantic notice container, preventing unrelated page controls from being clicked",
+        "rate_limit_contract_rejects_transcript_text_and_accepts_alert_notice plus rate_limit_detection_requires_semantic_notice_provenance",
+        "source-2.10.15 history-access-only request-frequency popup is classified separately, acknowledged in its own bounded semantic container, and excluded from rate-limit cooldown",
+        "shipping_run_prompt_acknowledges_history_only_popup_without_rate_limit_cooldown plus adapter popup fixtures prove history-only acknowledgement while authorization/sensitive dialogs fail closed",
+        "source-2.10.15 fourth-episode rate-limit escalation is production-wired so fresh-chat handoff defers the recovery Send until the fresh surface is no longer rate-limited; a persistent global rate-limit on the fresh root starts a new cooldown episode instead of hammering another request, covered by fourth_rate_limit_fresh_handoff_defers_resend_while_fresh_root_is_rate_limited"
+      ],
+      "missing": [
+        "exact-artifact live rate-limit/history-popup acceptance"
+      ]
+    },
+    {
+      "id": "sqlite-outbox",
+      "source": "browser durable state replacement",
+      "destination": "sqlite-store",
+      "status": "partial",
+      "evidence": [
+        "crates/adapters/sqlite-store/src/lib.rs",
+        "crates/adapters/sqlite-store/Cargo.toml",
+        "crates/runtime/src/lib.rs",
+        "start_fresh_conversation persists baseline user-turn/conversation identity, re-observes a clean fresh-surface postcondition before settlement, and startup reconciliation can settle crash-left fresh effects without replay",
+        "startup_reconciliation_settles_fresh_conversation_only_from_clean_postcondition and startup_reconciliation_keeps_fresh_conversation_pending_when_old_owned_turn_remains",
+        "SQLite schema v4 task_deletions tombstone makes task deletion crash-resumable across database cleanup and attachment-byte cleanup",
+        "task_delete_is_transactional_and_refuses_pending_effects plus restart_finishes_crash_left_task_attachment_cleanup prove fail-closed deletion and restart cleanup",
+        "recover_current_surface now journals the pre-reload semantic baseline and only settles after same conversation/user-turn/dispatch identity is ready and degraded error/hydration state has cleared",
+        "healthy-stall reload now persists an opaque adapter-supplied surface generation; startup reconciliation settles a crash-left reload only when the same conversation/user-turn/dispatch identity is restored and the generation independently changed, while pre-reload or unobservable ambiguity remains pending",
+        "startup_reconciliation_settles_recovery_only_from_same_identity_ready_surface and startup_reconciliation_keeps_healthy_stall_recovery_pending_after_crash prove crash-left degraded recovery is reconcilable while ambiguous healthy-stall reload remains pending",
+        "explicit-load crash-left recoveries can be settled as ambiguous/accounted without replay only when a durable numbered load-failure attempt already exists; supervision resumes at the preserved absolute retry deadline"
+      ],
+      "missing": [
+        "exact-head packaged-artifact live healthy-stall reload/crash-restart acceptance",
+        "exact-artifact task lifecycle acceptance",
+        "real crash/restart acceptance"
+      ]
+    },
+    {
+      "id": "desktop-atspi",
+      "source": "desktop replacement",
+      "destination": "chatgpt-desktop-atspi",
+      "status": "partial",
+      "evidence": [
+        "crates/adapters/chatgpt-desktop-atspi/Cargo.toml",
+        "crates/adapters/chatgpt-desktop-atspi/src/lib.rs",
+        "crates/adapters/chatgpt-desktop-atspi/src/bridge.py",
+        "crates/runtime/src/lib.rs",
+        "crates/cli/src/main.rs",
+        "popup_semantics classifies accessibility dialogs without leaking AT-SPI roles upstream, excludes bounded authorization cards from generic dismissal, and exposes only one explicit harmless dismiss action",
+        "popup_contract_executes_safe_sensitive_and_authorization_fixtures plus shipping RunPrompt harmless/sensitive popup behavioral contracts",
+        "Stream cache expired is projected only from the latest assistant response scope owned by the current Fabushi user turn; page-global or historical text cannot trigger recovery",
+        "shipping RunPrompt invokes response-local Retry through DesktopSessionActor/DurableRunSurface, journals failureIdentity before UI mutation, and effect_identity_seen prevents a second Retry for the same failure identity across restart",
+        "shipping_run_prompt_retries_same_stream_cache_failure_once_then_fresh_handoffs, effect_identity_guard_survives_settlement, and stream_cache_expired_projection_and_retry_are_response_local",
+        "strict Review report projection is bounded to the current owned assistant response and emits structured MAHAYANA_TASK_REPORT_V1 evidence before Copy hydration",
+        "review_report_projection_is_response_local_and_structured plus application Copy-before-hydration contracts",
+        "macOS AXUIElement attachment path stages content-addressed bytes, requires unique ChatGPT attachment and native Open-panel actions, uses system-wide focused Accessibility for the out-of-process NSOpenPanel, writes/re-reads the exact path, and binds readiness to the exact filename",
+        "composer-write production safety distinguishes unrelated user drafts from stale Fabushi-owned prepared drafts using the real bounded dispatch-marker regex; ordinary drafts remain fail-closed, while stale Fabushi drafts are removed only by exact suffix deletion with semantic draft readback after every Backspace",
+        "non-ASCII prepared prompt input uses Unicode X11 keysyms instead of whole-prompt KEY_STRING and waits for the composer draft to equal each expected prefix before continuing; any dropped, duplicated, or reordered codepoint fails closed before Send",
+        "composer_write_contract_self_test executes ordinary-draft rejection, truncated stale-Fabushi replacement, CJK Unicode input, and exact prepared-prompt readback without inventing the non-existent pyatspi.KEY_CONTROL constant",
+        "exact-head run 37059254691 at eede5504d48583e6bd72dd51f054c50c6dbabf26 passed macOS aarch64/x86_64 architecture, fmt, workspace tests, clippy, release build, and artifact upload, covering the shipping macOS adapter build/tests"
+      ],
+      "missing": [
+        "real authorization, attachment and terminal acceptance",
+        "current-exact packaged Linux composer/Send acceptance after the unrelated user draft no longer occupies the composer, or after a separately proven non-destructive independent surface mechanism exists"
+      ]
+    },
+    {
+      "id": "desktop-process",
+      "source": "desktop lifecycle",
+      "destination": "chatgpt-desktop-process",
+      "status": "partial",
+      "evidence": [
+        "crates/application/src/lib.rs",
+        "crates/adapters/chatgpt-desktop-process/src/lib.rs",
+        "crates/runtime/src/lib.rs",
+        "ReattachingDesktopSurface restarts ChatGPT only for read-side observation after confirmed NotRunning and waits for a newly discoverable semantic surface",
+        "reattaching_surface_restarts_only_for_read_side_observation and reattaching_surface_never_restarts_or_replays_destructive_send prove read rebind plus mutation fail-closed behavior"
+      ],
+      "missing": [
+        "htch-runtime lifecycle acceptance"
+      ]
+    },
+    {
+      "id": "runtime-actors",
+      "source": "multi-task workbench",
+      "destination": "Supervisor/DesktopSessionActor/RunWorker",
+      "status": "partial",
+      "evidence": [
+        "crates/runtime/src/lib.rs",
+        "crates/adapters/sqlite-store/src/lib.rs",
+        "task_wakes SQLite deadlines + shared SupervisorClock production wiring",
+        "rate_limit_deferred_task_does_not_block_runnable_task",
+        "attachment_backoff_leaves_other_tasks_runnable",
+        "authorization_settlement_is_task_scoped_not_global",
+        "deferred_tasks_wake_in_deadline_order",
+        "restart_wait_uses_original_durable_deadline",
+        "two-phase durable wake arming fixes SQLite-latency ordering while preserving absolute deadlines; supervisor shutdown after final external handle is deterministic",
+        "htch-runtime cross-process durable UI lease contract spawns a separate test process holding the production SQLite-backed DesktopSessionActor lease, proves the competing parent process is fenced, and proves acquisition succeeds after child release"
+      ],
+      "missing": [
+        "htch-runtime concurrent-task acceptance",
+        "exact-artifact live attachment wait/retry acceptance"
+      ]
+    },
+    {
+      "id": "attachments",
+      "source": "task attachment continuity",
+      "destination": "attachment-store + desktop adapter",
+      "status": "partial",
+      "evidence": [
+        "crates/adapters/attachment-store/src/lib.rs",
+        "crates/adapters/attachment-store/Cargo.toml",
+        "crates/runtime/src/lib.rs stages task-scoped attachment bytes through attachment-store and persists SQLite metadata before any desktop run",
+        "crates/cli/src/main.rs exposes repeatable --attachment for send and continuous",
+        "task_attachments_are_persisted_by_task_identity",
+        "task_attachment_ingestion_persists_bytes_metadata_and_fails_closed_before_send",
+        "ChatSurfacePort exposes semantic attach_file(file_name, bytes) and attachment_ready(file_name) without OS paths in domain/application",
+        "DesktopSessionActor serializes native attachment mutation; DurableRunSurface journals attach_file before mutation and settles only after filename/preview readiness",
+        "Linux AT-SPI bridge selects attachment controls semantically, drives the native file chooser without screen coordinates, and fails closed on ambiguous chooser entries",
+        "required_attachment_precedes_send_and_fresh_chat_reattaches",
+        "startup_reconciliation_defers_attachment_to_task_scoped_worker",
+        "restart_reconciles_ready_attachment_without_duplicate_native_attach",
+        "45-second readiness window plus 5/10/20/40/60-second task-scoped Supervisor AttachmentWait backoff is production-wired",
+        "attachment effect payload persists the absolute readiness deadline so restart does not extend the 45-second attempt window or blindly repeat an already-observed native attach",
+        "macOS ChatSurfacePort production path stages content-addressed bytes, drives the native file chooser through Accessibility, and reports readiness only from exact filename/preview semantics; exact-head macOS CI compiles/tests this path on both architectures"
+      ],
+      "missing": [
+        "exact-head packaged-artifact live Linux attachment acceptance on a real ChatGPT desktop accessibility surface",
+        "live macOS native attachment action/readiness acceptance"
+      ]
+    },
+    {
+      "id": "desktop-release-acceptance",
+      "source": "full parity",
+      "destination": "htch-runtime exact-head Actions artifact",
+      "status": "pending",
+      "evidence": [
+        ".github/workflows/ci.yml packages fabushi-chatgpt-auto-confirm-linux-x86_64 on every exact candidate HEAD",
+        "pre-scheduler exact-head run 36990315718 is green at 4e24b107315827c1c398be809f5726d5c73cb0f1 across Linux, macOS aarch64, and macOS x86_64",
+        "pre-scheduler Linux artifact 11219432631 / fabushi-chatgpt-auto-confirm-linux-x86_64 / sha256:d5db20b959d5df9391dbaec8fee0a7d5f96a425f9b24708e115a6cd4bc5c9471",
+        "the exact-head packaged binary executed --help and doctor on htch-runtime; doctor is blocked before app attach because the Hatch Ubuntu 24.04 desktop session cannot safely launch Electron: root is rejected, unprivileged user namespaces are AppArmor-restricted, the sysctl is read-only, and the package has no SUID chrome-sandbox",
+        "exact-head run 37000139413 is green at eb83b0b844a930c71f39d4e4e8ea789e409c18ef across Linux, macOS aarch64, and macOS x86_64",
+        "Linux artifact 11223821227 / fabushi-chatgpt-auto-confirm-linux-x86_64 / sha256:6c0d428cc7b7a5fa907517e4f1b1202fd96da7fed66b4ddd9f1cb78d31b24106 is bound to eb83b0b844a930c71f39d4e4e8ea789e409c18ef",
+        "Linux artifact 11223821227 was downloaded through the GitHub connector onto htch-runtime; device-side ZIP sha256 exactly matched 6c0d428cc7b7a5fa907517e4f1b1202fd96da7fed66b4ddd9f1cb78d31b24106, and the packaged binary is 12708992 bytes with sha256:58b9cfe421bdffdf1b438ed4810d5485145081b7f803e2e462d9709e765ed741",
+        "the exact packaged binary executed --help on htch-runtime; doctor currently fails before app attach because /usr/bin/chatgpt is absent and read-only device application enumeration finds no installed ChatGPT desktop application",
+        "production-code exact-head run 37004568576 is green at f572592df361ea31f32391f01c40c0e63177fc33 across Linux, macOS aarch64, and macOS x86_64; every job passed architecture, fmt, workspace tests, clippy, release build, and artifact upload",
+        "Linux artifact 11225421625 / fabushi-chatgpt-auto-confirm-linux-x86_64 / sha256:0cf555a5fd47fef6c31d640ceec1f1082e059a62413c8a285b730d640b181e04; macOS arm64 artifact 11225556788 / sha256:130769cfd4fb445d600b8e62cf0ce254b034a3498e88cd4037d1211c238f4b8c; macOS x86_64 artifact 11225037580 / sha256:ac905854b476c26e616c5b0fa6d714e3c3d4f26bcfe41c8af7ebe82bf7a507e8",
+        "Linux artifact 11225421625 was downloaded through the GitHub connector onto htch-runtime; device-side ZIP sha256 exactly matched 0cf555a5fd47fef6c31d640ceec1f1082e059a62413c8a285b730d640b181e04, and the packaged binary is 12790144 bytes with sha256:f05bd6afa9fd7b0288a6998897d29e387b5f8f54c8a01e27ecf117edaa6a3aa5",
+        "the f572592 packaged binary executed --help on htch-runtime and exposed edit-goal/delete; doctor still fails before app attach because /usr/bin/chatgpt is absent, so Gates E/F remain pending",
+        "exact-head run 37007291813 at e914a11804c5ad623df6019f2f08365b0e543dd9 passed architecture/fmt/workspace tests/clippy/release packaging on Linux and both macOS targets",
+        "Linux artifact 11226720838 / fabushi-chatgpt-auto-confirm-linux-x86_64 / sha256:0aba210f346752b8d9e3224bae409cda2cd0068e67fe0c37a722c111adff7337 is bound to e914a11804c5ad623df6019f2f08365b0e543dd9",
+        "macOS arm64 artifact 11226960989 sha256:176dfd318357ca1335f8a99eed95fdecba885a2a1f1b7a63a4b67e826cbf3f71 and macOS x86_64 artifact 11226871819 sha256:a53ff36fbe97864b830562cb845f34c386cdc13ef9c0d9babba6e70d5b0a9009 are from the same exact-head run",
+        "exact-head run 37028529796 at 39632937749698d5b3582d97f08be89280ceca20 passed architecture/fmt/workspace tests/clippy/release packaging on Linux, macOS aarch64, and macOS x86_64; both macOS jobs executed attachment_readiness_is_bound_to_exact_file_name_semantics, conversation_ref_projection_is_strong_opaque_and_fail_closed_on_ambiguity, macOS rebind contracts, and startup reconciliation tests",
+        "Linux artifact 11235699064 / fabushi-chatgpt-auto-confirm-linux-x86_64 / sha256:4262f2978cb62b931e4fdc31e8aa68d54acc5300c30e71dac674067bb137a153 was downloaded to htch-runtime; device-side ZIP sha256 matched exactly and packaged doctor/status attached to the real AT-SPI ChatGPT application",
+        "the 39632937 packaged Gate E canary safely failed before Send because the composer contained a stale prior Fabushi continuous prepared draft; read-only AT-SPI inspection proved the draft ended in [Fabushi:f985...], exposing a production stale-draft recovery gap rather than a user-draft ownership failure",
+        "exact-head run 37054592733 is green at 6b9e1b8512957885df8eb83d6275a26363dd77df across Linux, macOS aarch64, and macOS x86_64; every job passed architecture, fmt, workspace tests, clippy, release build, and artifact upload",
+        "artifacts from run 37054592733: Linux 11248151562 sha256:7ad3b464076e4fd0db2ec53db158fb8de5c5a39cb95e72e7ddc424117bb4139a; macOS arm64 11248855715 sha256:648c295a5c5b5c3d8b0ea8e5f7ada0b0e8474760c11bebaaf30084027d488676; macOS x86_64 11247932849 sha256:f4cdd8df3b92916cac7fef14b6b5e6ed12568755c9777a5fdb33480095ca232a",
+        "artifact 11248151562 is the formal Linux release candidate for the verified 6b9e1b8 baseline, but it was not downloaded in the current round because htch-runtime has no installed/running ChatGPT desktop application and /usr/bin/chatgpt is absent",
+        "current read-only htch-runtime application enumeration confirms the desktop environment remains unavailable, so Gates E/F stay environment-blocked without any device-controller mutation; no packaged-binary Gate E evidence is claimed for 6b9e1b8",
+        "exact-head run 37059254691 is green at eede5504d48583e6bd72dd51f054c50c6dbabf26 across Linux, macOS aarch64, and macOS x86_64; every job passed architecture, fmt, workspace tests, clippy, release build, and artifact upload",
+        "artifacts from run 37059254691: Linux 11249014383 sha256:a5eccb82b592f91b209f3ca8b38ecd03afa34077d6302e03a560553c9659193f; macOS arm64 11250497832 sha256:dd6c74a87200eb03077fbba54a5a0a68a22f4e8b41af3bb875e6d217d8513e78; macOS x86_64 11250947768 sha256:3508f4d137cf8820ca657cbe9046e62ed5c551f975df3e8e40044a1dfaea41fe"
+      ],
+      "missing": [
+        "restore/install a real ChatGPT desktop application on htch-runtime without using the device controller to substitute CLI actions; current read-only enumeration has no ChatGPT application and /usr/bin/chatgpt is absent",
+        "current exact-head packaged-artifact reasoning/Send/terminal journey",
+        "current exact-head packaged-artifact Linux attachment journey",
+        "current exact-head packaged-artifact authorization journey when a real conversation-scoped authorization card can be safely observed"
+      ]
+    },
+    {
+      "id": "generic-hydration",
+      "source": "~30s initial hydration window; max 2 recoveries per continuously missing identity",
+      "destination": "application/runtime durable recovery",
+      "status": "partial",
+      "evidence": [
+        "HydrationRecoveryState is wired into shipping RunPrompt after higher-priority authorization/error/rate-limit handling",
+        "recover_current_surface is routed through DurableRunSurface so the desktop mutation is journaled/outboxed first",
+        "shipping_run_prompt_stops_generic_hydration_recovery_after_two_attempts and hydration_exhaustion_does_not_reset_just_because_time_passes"
+      ],
+      "missing": [
+        "exact-artifact live hydration/remount acceptance"
+      ]
+    }
+  ]
+}
