@@ -210,7 +210,8 @@
         "dismiss_rate_limit scopes Got it/明白了 to the same semantic notice container, preventing unrelated page controls from being clicked",
         "rate_limit_contract_rejects_transcript_text_and_accepts_alert_notice plus rate_limit_detection_requires_semantic_notice_provenance",
         "source-2.10.15 history-access-only request-frequency popup is classified separately, acknowledged in its own bounded semantic container, and excluded from rate-limit cooldown",
-        "shipping_run_prompt_acknowledges_history_only_popup_without_rate_limit_cooldown plus adapter popup fixtures prove history-only acknowledgement while authorization/sensitive dialogs fail closed"
+        "shipping_run_prompt_acknowledges_history_only_popup_without_rate_limit_cooldown plus adapter popup fixtures prove history-only acknowledgement while authorization/sensitive dialogs fail closed",
+        "source-2.10.15 fourth-episode rate-limit escalation is production-wired so fresh-chat handoff defers the recovery Send until the fresh surface is no longer rate-limited; a persistent global rate-limit on the fresh root starts a new cooldown episode instead of hammering another request, covered by fourth_rate_limit_fresh_handoff_defers_resend_while_fresh_root_is_rate_limited"
       ],
       "missing": [
         "exact-artifact live rate-limit/history-popup acceptance"

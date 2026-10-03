@@ -379,6 +379,7 @@ impl<'a> RunPrompt<'a> {
             None => None,
         };
         let mut hydration_recovery = HydrationRecoveryState::default();
+        let mut deferred_fresh_rate_limit_prompt: Option<String> = None;
 
         loop {
             let now = self.clock.now();
@@ -402,6 +403,46 @@ impl<'a> RunPrompt<'a> {
             }
 
             let snapshot = self.surface.observe().await?;
+
+            if let Some(recovery_prompt) = deferred_fresh_rate_limit_prompt.clone() {
+                if snapshot.rate_limit {
+                    terminal_since = None;
+                    if self.surface.dismiss_rate_limit_notice().await? {
+                        rate_limits += 1;
+                        if rate_limits > options.max_rate_limit_pauses
+                            && self.destructive_handoff_is_safe().await?
+                        {
+                            self.surface.start_fresh_conversation().await?;
+                            recoveries += 1;
+                            rate_limits = 0;
+                            progress = now;
+                            fingerprint.clear();
+                            if let Some(tracker) = review_tracker.as_mut() {
+                                *tracker = ReviewSettlementTracker::default();
+                            }
+                            continue;
+                        }
+                        self.clock
+                            .sleep_for(WakeReason::RateLimitCooldown, options.rate_limit_pause)
+                            .await?;
+                    } else {
+                        self.clock
+                            .sleep_for(WakeReason::Poll, options.poll_interval)
+                            .await?;
+                    }
+                    continue;
+                }
+
+                self.surface.send_prompt(&recovery_prompt).await?;
+                deferred_fresh_rate_limit_prompt = None;
+                dispatch_preconfirmed = false;
+                dispatched = now;
+                progress = now;
+                fingerprint.clear();
+                terminal_since = None;
+                continue;
+            }
+
             let expected_dispatch_id = self
                 .surface
                 .expected_dispatch_id()
@@ -672,7 +713,7 @@ impl<'a> RunPrompt<'a> {
                         &snapshot,
                     )?;
                     self.surface.start_fresh_conversation().await?;
-                    self.surface.send_prompt(&recovery_prompt).await?;
+                    deferred_fresh_rate_limit_prompt = Some(recovery_prompt);
                     dispatch_preconfirmed = false;
                     recoveries += 1;
                     dispatched = now;
@@ -683,6 +724,7 @@ impl<'a> RunPrompt<'a> {
                     if let Some(tracker) = review_tracker.as_mut() {
                         *tracker = ReviewSettlementTracker::default();
                     }
+                    continue;
                 }
                 self.clock
                     .sleep_for(WakeReason::RateLimitCooldown, options.rate_limit_pause)
@@ -2516,6 +2558,85 @@ mod tests {
         assert_eq!(
             clock.now(),
             NO_APPROVAL_RECHECK_WINDOW + ORDINARY_TERMINAL_STABILITY
+        );
+    }
+
+    #[tokio::test]
+    async fn fourth_rate_limit_fresh_handoff_defers_resend_while_fresh_root_is_rate_limited() {
+        let before = ChatSurfaceSnapshot {
+            user_turn_boundary: Some(UserTurnBoundary::new("u0")),
+            ..Default::default()
+        };
+        let rate_limited = ChatSurfaceSnapshot {
+            user_turn_boundary: Some(UserTurnBoundary::new("u1")),
+            user_turn_ownership: OwnershipConfidence::Strong,
+            rate_limit: true,
+            ..Default::default()
+        };
+        let safe_scan = ChatSurfaceSnapshot {
+            user_turn_boundary: Some(UserTurnBoundary::new("u1")),
+            user_turn_ownership: OwnershipConfidence::Strong,
+            ..Default::default()
+        };
+        let fresh_rate_limited = ChatSurfaceSnapshot {
+            app_healthy: true,
+            composer_ready: true,
+            rate_limit: true,
+            ..Default::default()
+        };
+        let fresh_clear = ChatSurfaceSnapshot {
+            app_healthy: true,
+            composer_ready: true,
+            ..Default::default()
+        };
+        let final_snapshot = ChatSurfaceSnapshot {
+            app_healthy: true,
+            user_turn_boundary: Some(UserTurnBoundary::new("u2")),
+            user_turn_ownership: OwnershipConfidence::Strong,
+            assistant_response_boundary: Some(AssistantResponseBoundary::new("a2")),
+            assistant_response_ownership: OwnershipConfidence::Strong,
+            response_local_copy: true,
+            ..Default::default()
+        };
+        let surface = ScriptedSurface::new(vec![
+            before,
+            rate_limited.clone(),
+            rate_limited.clone(),
+            rate_limited.clone(),
+            rate_limited,
+            safe_scan.clone(),
+            safe_scan,
+            fresh_rate_limited,
+            fresh_clear,
+            final_snapshot.clone(),
+            final_snapshot.clone(),
+            final_snapshot.clone(),
+            final_snapshot.clone(),
+            final_snapshot,
+        ])
+        .with_rate_limit_dismiss();
+        let clock = FakeClock::new();
+        let options = RunOptions {
+            poll_interval: Duration::from_secs(1),
+            rate_limit_pause: RATE_LIMIT_COOLDOWN,
+            timeout: Duration::from_secs(2_000),
+            stale_reload_after: Duration::from_secs(10_000),
+            ..RunOptions::default()
+        };
+
+        let report = RunPrompt::new(&surface, &clock)
+            .execute("prepared prompt", options)
+            .await
+            .unwrap();
+
+        assert_eq!(report.state, RunState::Complete);
+        assert_eq!(surface.fresh_count(), 1);
+        assert_eq!(surface.send_count(), 2);
+        assert_eq!(
+            clock.now(),
+            Duration::from_secs(4 * 5 * 60)
+                + NO_APPROVAL_RECHECK_WINDOW
+                + ORDINARY_TERMINAL_STABILITY
         );
     }
 
