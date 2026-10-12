@@ -18,15 +18,15 @@ CDP_CARGO="crates/adapters/chatgpt-cdp/Cargo.toml"
 LINUX_CARGO="crates/adapters/linux-browser/Cargo.toml"
 CLI_CARGO="crates/cli/Cargo.toml"
 
-if contains "$DOMAIN_CARGO" 'fabushi-chatgpt-(application|cdp|runtime|linux-browser)|tokio|reqwest|tungstenite|rusqlite|sqlx'; then
+if contains "$DOMAIN_CARGO" 'fabushi-chatgpt-(application|cdp|runtime|linux-browser|macos-desktop|sqlite-store)|tokio|reqwest|tungstenite|rusqlite|sqlx'; then
   fail "domain depends on an outer layer or runtime/infrastructure library"
 fi
 
-if contains "$APP_CARGO" 'fabushi-chatgpt-(cdp|runtime|linux-browser)|reqwest|tungstenite|rusqlite|sqlx'; then
+if contains "$APP_CARGO" 'fabushi-chatgpt-(cdp|runtime|linux-browser|macos-desktop|sqlite-store)|reqwest|tungstenite|rusqlite|sqlx'; then
   fail "application depends on a concrete adapter/runtime"
 fi
 
-if contains "$CDP_CARGO" 'fabushi-chatgpt-(runtime|linux-browser|auto-confirm)'; then
+if contains "$CDP_CARGO" 'fabushi-chatgpt-(runtime|linux-browser|macos-desktop|auto-confirm)'; then
   fail "CDP adapter depends on runtime, Linux adapter, or CLI"
 fi
 
@@ -34,7 +34,7 @@ if contains "$LINUX_CARGO" 'fabushi-chatgpt-(runtime|cdp|auto-confirm)'; then
   fail "Linux browser adapter depends on another outer adapter/runtime"
 fi
 
-if contains "$CLI_CARGO" 'fabushi-chatgpt-(application|domain|cdp|linux-browser)'; then
+if contains "$CLI_CARGO" 'fabushi-chatgpt-(application|domain|cdp|linux-browser|macos-desktop|sqlite-store)'; then
   fail "CLI bypasses the runtime composition root"
 fi
 
@@ -47,6 +47,14 @@ fi
 if grep -R -n -E 'Allow once|允许一次|Approve once|仅允许本次|允许本次' crates/domain/src >/tmp/fabushi-domain-ui-labels.txt 2>/dev/null; then
   cat /tmp/fabushi-domain-ui-labels.txt >&2
   fail "localized approval UI labels leaked into domain"
+fi
+
+if contains crates/adapters/macos-desktop/Cargo.toml 'fabushi-chatgpt-(runtime|cdp|auto-confirm|linux-browser)'; then
+  fail "macOS desktop adapter depends on an outer implementation"
+fi
+
+if contains crates/adapters/sqlite-store/Cargo.toml 'fabushi-chatgpt-(runtime|cdp|auto-confirm|linux-browser|macos-desktop)'; then
+  fail "SQLite adapter depends on an outer implementation"
 fi
 
 echo "architecture gate: PASS"

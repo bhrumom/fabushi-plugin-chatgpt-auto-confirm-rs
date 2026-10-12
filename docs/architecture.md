@@ -436,3 +436,11 @@ Architecture is a release gate, not documentation advice.
 10. run real authenticated Linux acceptance.
 
 Do not split into distributed services unless profiling or isolation evidence proves the modular monolith insufficient.
+
+
+## 18. macOS desktop adapter
+
+`crates/adapters/macos-desktop` owns macOS LaunchServices process startup only.
+`runtime` composes it with the existing CDP adapter. Desktop CDP target selection,
+Chat mode checks and native renderer selectors remain in `chatgpt-cdp`. CLI imports
+only runtime. Recovery and terminal policy remain in application/domain.

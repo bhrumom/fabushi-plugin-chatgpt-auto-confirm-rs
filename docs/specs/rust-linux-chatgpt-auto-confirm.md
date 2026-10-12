@@ -258,3 +258,60 @@ Not yet claimed complete:
 - source account/session/Actions orchestration parity.
 
 Until Gates D and E pass, this repository is a working Linux Rust automation implementation and migration base, not a certified complete replacement of the Swift/Node source.
+
+
+## 11. macOS desktop extension
+
+The default CLI backend now targets the installed macOS ChatGPT Electron client.
+Linux Chromium remains available with explicit `--backend browser`.
+
+Implemented locally:
+- a separate `macos-desktop` adapter launches ChatGPT.app through LaunchServices;
+- a separate user-owned profile and loopback CDP port, without credential export;
+- exact main-renderer selection (`app://-/index.html`), excluding browser pages,
+  avatar overlays and prewarmed/auxiliary app windows;
+- inspect and new-chat operations inside the desktop renderer;
+- Chat composer readiness checks, refusal to dispatch into Work or overwrite drafts;
+- native desktop user/assistant selector fallback without double-counting turns;
+- active message-region selection when the app renders multiple main panes;
+- pointerdown-aware mode switching followed by the native Chat/Work composer toggle;
+- latest-turn response-action scope and canonical desktop conversation identity;
+- asynchronous composer update settlement before looking for Send.
+
+Regression coverage includes desktop target exclusion and launcher argument handling,
+plus the sanitized local DOM contract suite in `scripts/test-desktop-dom.cjs` for
+duplicate desktop selectors, multiple panes, sibling response actions, stale Copy,
+React input settlement, draft protection, scoped Send, exact visible Allow once,
+and native ChatGPT/Chat mode switching.
+The application terminal invariant, two-poll stability and exact Allow once scope remain
+unchanged. Live desktop dispatch, reply and authorization evidence must be recorded
+separately; these changes do not establish Linux production acceptance or full queue,
+model-selection or source-replacement parity.
+
+
+Local macOS smoke evidence (2026-10-12): the installed arm64 runtime sent
+"请只回复 FABUSHI_DESKTOP_OK" to the desktop main renderer and returned
+`state: complete`, `assistant_text: ChatGPT 说： FABUSHI_DESKTOP_OK`, with zero
+retries, reloads or continuations. No live authorization card appeared, so exact
+Allow once has fixture coverage only. This was a native local desktop conversation;
+no remote canonical URL was exposed and the report correctly retained null.
+
+## 11. Implemented desktop workbench extension
+
+The current desktop contract is `desktop-tui-userscript-parity.md`, based on
+userscript 2.10.47 at `4ff2f386dc40ab0e542250c0710f05c77bf1f612`.
+The original Linux single-prompt behavior above remains a distinct backend.
+
+Implemented: macOS app launcher and explicit main-renderer targeting; terminal
+goal workbench; SQLite WAL queue/journal, revisions and endpoint leases;
+verified model/effort and attachments; separate conversation rotation with
+exact marker checks; durable dispatch intent; execution/independent review
+rounds and report parsing; conversation-first scoped approvals; paced same-card
+load retry; interruption/length-limit context handoff; pause/edit/cancel/delete,
+queue import/export, scan/switch/recovery logs and live dashboard.
+
+Validation covers 30 Rust tests and sanitized DOM contracts. Local desktop
+observations demonstrated two complete goal dispatches, matching conversation
+markers, both conversation switches and current-conversation authorization.
+These observations do not prove completion of the mobile goals, exhaustive
+userscript parity, or authenticated Linux acceptance. CI evaluates each PR HEAD.

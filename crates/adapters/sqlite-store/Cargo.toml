@@ -1,0 +1,13 @@
+[package]
+name = "fabushi-chatgpt-sqlite-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+fabushi-chatgpt-domain = { path = "../../domain" }
+fabushi-chatgpt-application = { path = "../../application" }

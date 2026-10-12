@@ -1,7 +1,9 @@
+mod supervisor;
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use fabushi_chatgpt_domain::{PageSnapshot, RunReport, RunState};
 use std::time::Duration;
+pub use supervisor::*;
 
 #[async_trait]
 pub trait BrowserPort: Send + Sync {

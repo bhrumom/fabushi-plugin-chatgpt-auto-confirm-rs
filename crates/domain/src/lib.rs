@@ -1,5 +1,7 @@
+mod task;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+pub use task::*;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PageSnapshot {

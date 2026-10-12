@@ -12,4 +12,12 @@ fabushi-chatgpt-application = { path = "../application" }
 fabushi-chatgpt-cdp = { path = "../adapters/chatgpt-cdp" }
 fabushi-chatgpt-domain = { path = "../domain" }
 fabushi-chatgpt-linux-browser = { path = "../adapters/linux-browser" }
+fabushi-chatgpt-macos-desktop = { path = "../adapters/macos-desktop" }
 tokio.workspace = true
+
+fabushi-chatgpt-sqlite-store = { path = "../adapters/sqlite-store" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
