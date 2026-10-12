@@ -4,6 +4,15 @@ use async_trait::async_trait;
 use fabushi_chatgpt_domain::*;
 use std::time::Duration;
 
+#[derive(Debug)]
+pub struct NavigationUnavailable(pub String);
+impl std::fmt::Display for NavigationUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "任务会话暂未定位：{}", self.0)
+    }
+}
+impl std::error::Error for NavigationUnavailable {}
+
 pub trait TaskStore: Send + Sync {
     fn list(&self) -> Result<Vec<Task>>;
     fn insert(&self, task: &Task) -> Result<()>;
@@ -178,9 +187,13 @@ impl Supervisor<'_> {
                 t.retries += 1;
                 t.last_error = error.to_string();
                 t.cooldown_until = now
-                    + 15_000u64
-                        .saturating_mul(1u64 << t.retries.min(4))
-                        .min(180_000);
+                    + if error.downcast_ref::<NavigationUnavailable>().is_some() {
+                        30_000
+                    } else {
+                        15_000u64
+                            .saturating_mul(1u64 << t.retries.min(4))
+                            .min(180_000)
+                    };
                 t.state = if t.send_clicked {
                     TaskState::Waiting
                 } else {
@@ -500,6 +513,10 @@ impl Supervisor<'_> {
         let binding = t.binding.as_ref().expect("binding checked");
         if observed.binding.identity != binding.identity
             && (binding.sidebar_id.is_empty() || observed.binding.sidebar_id != binding.sidebar_id)
+            && !(observed.marker_present
+                && !observed.foreign_marker
+                && (observed.binding.sidebar_id.is_empty()
+                    || observed.binding.sidebar_id.starts_with("local-chatgpt:")))
         {
             bail!("会话切换尚未确认，拒绝读取或推进其他任务");
         }

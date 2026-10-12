@@ -136,3 +136,22 @@ execution/review stage only after its exact marker and stable binding are
 verified and the composer is empty. Preserve that task's binding and pending
 card for its next supervision visit; never dismiss or grant it on behalf of
 the new stage. Unowned authorization and all drafts still block navigation.
+
+## Autonomous sidebar recovery
+
+A missing mounted sidebar row is not proof that the conversation was deleted.
+Locate only the registered conversation id: open an explicitly labelled sidebar
+control if collapsed, scroll its list to mount virtual rows, then click only the
+matching id. Never open other conversations to search their transcripts. All
+render waits are bounded timers, not indefinite animation-frame promises.
+Navigation-unavailable errors preserve the dispatch/binding and retry after
+thirty seconds, independent of prior retry count. Startup prevents background
+renderer/timer throttling; TUI checks worker leases and can restart a missing
+worker, while an operator service can keep supervision alive without the TUI.
+The dashboard distinguishes an online worker from tasks undergoing recovery.
+
+An exact owned marker may identify the already open task even when its sidebar
+row is unmounted and only a transient native identity is projected. Keep its
+registered durable id; a different stable sidebar id still fails ownership.
+Bound each list scan to 24 steps and retain its scroll position for a later
+retry, avoiding an endless restart from the top of a long virtual list.

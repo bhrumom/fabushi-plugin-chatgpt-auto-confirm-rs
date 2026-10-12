@@ -87,6 +87,7 @@ struct Desktop {
     fail_dispatch: bool,
     stay_success: bool,
     new_chats: AtomicU64,
+    navigation_unavailable: bool,
 }
 #[async_trait]
 impl TaskDesktop for Desktop {
@@ -95,6 +96,9 @@ impl TaskDesktop for Desktop {
         Ok(())
     }
     async fn activate(&self, _b: &SessionBinding, _token: &str) -> Result<()> {
+        if self.navigation_unavailable {
+            return Err(NavigationUnavailable("temporarily unmounted".into()).into());
+        }
         Ok(())
     }
     async fn observe(&self, _token: &str) -> Result<TaskObservation> {
@@ -185,6 +189,7 @@ fn setup(t: Task, o: TaskObservation, pause: bool, fail: bool) -> (Arc<Store>, D
         fail_dispatch: fail,
         stay_success: true,
         new_chats: AtomicU64::new(0),
+        navigation_unavailable: false,
     };
     (store, desktop, Time(AtomicU64::new(1_000_000)))
 }
@@ -575,4 +580,35 @@ async fn unowned_approval_blocks_fresh_stage_navigation() {
     tick(&s, &d, &c).await;
     assert_eq!(d.new_chats.load(Ordering::SeqCst), 0);
     assert!(!s.list().unwrap()[0].send_clicked);
+}
+
+#[tokio::test]
+async fn missing_navigation_keeps_owned_binding_and_retries_in_thirty_seconds() {
+    let (s, mut d, c) = setup(bound_task(), TaskObservation::default(), false, false);
+    d.navigation_unavailable = true;
+    for _ in 0..8 {
+        tick(&s, &d, &c).await;
+        let t = s.list().unwrap()[0].clone();
+        assert_eq!(t.cooldown_until - c.0.load(Ordering::SeqCst), 30_000);
+        assert_eq!(t.binding.as_ref().unwrap().sidebar_id, "sidebar-a");
+        assert!(t.send_clicked);
+        assert_eq!(t.token, "owned");
+        assert_eq!(d.new_chats.load(Ordering::SeqCst), 0);
+        c.0.fetch_add(31_000, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn owned_marker_remains_authoritative_when_sidebar_is_unmounted() {
+    let mut o = terminal("completed owned work");
+    o.binding = SessionBinding {
+        identity: "local-chatgpt:current".into(),
+        sidebar_id: "local-chatgpt:current".into(),
+        title: "task".into(),
+    };
+    let (s, d, c) = setup(bound_task(), o, false, false);
+    tick(&s, &d, &c).await;
+    c.0.fetch_add(16_000, Ordering::SeqCst);
+    tick(&s, &d, &c).await;
+    assert_eq!(s.list().unwrap()[0].phase, Phase::Review);
 }

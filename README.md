@@ -105,3 +105,17 @@ Legacy single-prompt browser recovery policy:
 ## Security
 
 This runtime does not request or export your ChatGPT password, OTP, cookies, or API tokens. Authentication remains in the user-owned Chromium profile.
+
+Task-owned sidebar recovery also handles collapsed/virtualized lists, with
+bounded waits when desktop rendering is backgrounded. Missing navigation
+retries every 30 seconds without replaying a task or opening unrelated chats.
+The r3 TUI shows recovery counts instead of treating an online lease as healthy
+progress, and periodically restores a worker whose lease has expired.
+
+For supervision independent of an open TUI on macOS, install the per-user launch agent after stopping the previous worker:
+
+```sh
+python3 scripts/install-supervisor-launchagent.py --binary /absolute/path/fabushi-chatgpt-auto-confirm --database /absolute/path/state.sqlite --log /absolute/path/supervisor.log
+```
+
+The agent starts at login and restarts an exited worker with a 30-second throttle. It shares the endpoint lease with the TUI, so only one worker controls the desktop. ChatGPT must remain available at the configured CDP endpoint; this does not bypass login or network failures. The installer prints inspection and stop commands.
