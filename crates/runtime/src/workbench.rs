@@ -226,6 +226,10 @@ impl Queue {
         self.store
             .activity(id, wall_ms().saturating_sub(7_200_000), 360)
     }
+    pub fn operations(&self, id: &str) -> Result<Vec<Activity>> {
+        self.store
+            .operations(id, wall_ms().saturating_sub(3_600_000), 10_000)
+    }
     pub fn export(&self, path: &Path) -> Result<()> {
         let data = QueueExport {
             version: 1,

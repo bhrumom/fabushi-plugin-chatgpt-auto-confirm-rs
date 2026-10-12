@@ -10,6 +10,13 @@ pub trait TaskStore: Send + Sync {
     fn save(&self, task: &mut Task, expected: u64, activity: Option<Activity>) -> Result<bool>;
     fn delete(&self, id: &str) -> Result<()>;
     fn activity(&self, id: &str, since: u64, limit: usize) -> Result<Vec<Activity>>;
+    fn operations(&self, id: &str, since: u64, limit: usize) -> Result<Vec<Activity>> {
+        Ok(self
+            .activity(id, since, limit)?
+            .into_iter()
+            .filter(|a| matches!(a.role.as_str(), "status" | "switch" | "action"))
+            .collect())
+    }
     fn settings(&self) -> Result<Settings>;
     fn save_settings(&self, settings: &mut Settings) -> Result<bool>;
     fn lease(&self, endpoint: &str, owner: &str, now: u64, ttl: u64) -> Result<bool>;
@@ -32,6 +39,7 @@ pub trait TaskDesktop: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct SupervisorPolicy {
     pub rotation_ms: u64,
+    pub max_wait_ms: u64,
     pub send_gap_ms: u64,
     pub confirmation_ms: u64,
     pub stable_ms: u64,
@@ -45,6 +53,7 @@ impl Default for SupervisorPolicy {
     fn default() -> Self {
         Self {
             rotation_ms: 15_000,
+            max_wait_ms: 60_000,
             send_gap_ms: 60_000,
             confirmation_ms: 90_000,
             stable_ms: 4_000,
@@ -88,7 +97,7 @@ impl Supervisor<'_> {
                 t.round,
                 t.phase,
                 role,
-                if matches!(role, "scan" | "switch" | "status") {
+                if matches!(role, "scan" | "switch" | "status" | "action") {
                     bounded(&text, 1500)
                 } else {
                     "内容已保存到私有任务记录；操作日志不输出正文".into()
@@ -113,12 +122,26 @@ impl Supervisor<'_> {
         let selected = tasks
             .iter()
             .filter(|t| t.state.runnable() && t.cooldown_until <= now)
+            .filter(|t| {
+                settings.last_navigation_task.is_empty()
+                    || settings.last_navigation_task == t.id
+                    || now.saturating_sub(settings.last_navigation_at) >= self.policy.rotation_ms
+            })
             .min_by_key(|t| {
                 (
-                    if t.state == TaskState::Sending || t.state == TaskState::Approval {
+                    if t.state == TaskState::Sending
+                        && t.binding.is_none()
+                        && now.saturating_sub(t.dispatch_at) < self.policy.confirmation_ms
+                    {
                         0
-                    } else {
+                    } else if t.terminal_polls > 0 {
                         1
+                    } else if now.saturating_sub(t.last_scan_at) >= self.policy.max_wait_ms {
+                        2
+                    } else if matches!(t.state, TaskState::Sending | TaskState::Approval) {
+                        3
+                    } else {
+                        4
                     },
                     t.last_scan_at,
                     t.created_at,
@@ -216,15 +239,87 @@ impl Supervisor<'_> {
                 return Ok(());
             }
             let foreground = self.desktop.observe("").await?;
-            if foreground.approval_present || !foreground.page.composer_text.trim().is_empty() {
+            if foreground.chat_work_offer && !foreground.approval_present {
+                let clicked = self.desktop.stay_chat().await?;
+                t.cooldown_until = now + if clicked { 3_000 } else { 1_000 };
+                self.persist(
+                    t,
+                    Some((
+                        if clicked { "action" } else { "status" },
+                        if clicked {
+                            "派发前点击当前卡片「留在聊天模式」；等待界面结算后再打开新阶段会话"
+                                .into()
+                        } else {
+                            "派发前发现 Work 转换卡片；等待留在聊天按钮，不切换或发送".into()
+                        },
+                    )),
+                )?;
+                return Ok(());
+            }
+            let mut parked_other_approval = false;
+            if foreground.approval_present && foreground.page.composer_text.trim().is_empty() {
+                let other = self.store.list()?.into_iter().find(|other| {
+                    other.id != t.id
+                        && other.binding.as_ref().is_some_and(|b| {
+                            !b.sidebar_id.is_empty()
+                                && b.sidebar_id == foreground.binding.sidebar_id
+                        })
+                });
+                if let Some(other) = other {
+                    let verified = self.desktop.observe(&other.token).await?;
+                    if verified.marker_present
+                        && !verified.foreign_marker
+                        && verified.binding.sidebar_id == foreground.binding.sidebar_id
+                        && verified.page.composer_text.trim().is_empty()
+                    {
+                        parked_other_approval = true;
+                        self.persist(t,Some(("action",format!("保留另一队列任务 {} 的授权卡片及会话绑定；转入本任务新阶段，稍后回原会话处理授权",other.title))))?;
+                    }
+                }
+            }
+            if (foreground.approval_present && !parked_other_approval)
+                || !foreground.page.composer_text.trim().is_empty()
+            {
                 bail!("当前界面有未结算授权或未发送草稿，保留当前会话");
             }
             self.desktop.new_chat().await?;
+            let mut navigation = self.store.settings()?;
+            navigation.last_navigation_at = self.now();
+            navigation.last_navigation_task = t.id.clone();
+            self.store.save_settings(&mut navigation)?;
+            self.persist(
+                t,
+                Some((
+                    "action",
+                    format!(
+                        "点击新聊天：准备第 {} 轮 {:?}；接力原因：{}",
+                        t.round,
+                        t.phase,
+                        if t.last_error.is_empty() {
+                            "新阶段派发"
+                        } else {
+                            &t.last_error
+                        }
+                    ),
+                )),
+            )?;
             if !self.current(t)? {
                 return Ok(());
             }
             self.desktop.ensure_profile(&t.profile).await?;
             self.desktop.upload(&t.attachments).await?;
+            self.persist(
+                t,
+                Some((
+                    "action",
+                    format!(
+                        "派发预检通过：模型 {} / {}；{} 个附件已就绪",
+                        t.profile.model,
+                        t.profile.effort_label(),
+                        t.attachments.len()
+                    ),
+                )),
+            )?;
             if !self.current(t)? {
                 return Ok(());
             }
@@ -251,12 +346,31 @@ impl Supervisor<'_> {
                 return Ok(());
             }
             self.desktop.dispatch(&t.prepared_prompt).await?;
+            self.persist(
+                t,
+                Some((
+                    "action",
+                    format!(
+                        "已触发发送：第 {} 轮 {:?}，{} 字符，任务标记 {}；等待原会话确认",
+                        t.round,
+                        t.phase,
+                        t.prepared_prompt.chars().count(),
+                        t.token
+                    ),
+                )),
+            )?;
             let mut config = self.store.settings()?;
             config.last_send_at = self.now();
             self.store.save_settings(&mut config)?;
             return Ok(());
         }
-        if let Some(binding) = &t.binding {
+        if let Some(binding) = t.binding.as_ref().or(t.pending_binding.as_ref()) {
+            if settings.last_navigation_task != t.id {
+                let mut navigation = self.store.settings()?;
+                navigation.last_navigation_at = now;
+                navigation.last_navigation_task = t.id.clone();
+                self.store.save_settings(&mut navigation)?;
+            }
             self.desktop.activate(binding, &t.token).await?;
         }
         if !self.current(t)? {
@@ -266,14 +380,72 @@ impl Supervisor<'_> {
         if observed.foreign_marker {
             bail!("当前回复属于另一个任务，保留绑定并等待正确会话");
         }
+        // A loading error may occur before a new conversation gets a stable id.
+        // Keep the possible-send intent and retry this same visible conversation.
+        if observed.load_failed || t.load_failure_pending {
+            if !observed.load_failed && observed.marker_present && !observed.foreign_marker {
+                t.load_failure_pending = false;
+                self.persist(
+                    t,
+                    Some((
+                        "action",
+                        "原会话加载恢复，任务标记已确认；继续原轮次".into(),
+                    )),
+                )?;
+            } else {
+                t.load_failure_pending = true;
+                t.cooldown_until = now + 15_000;
+                t.recovery_guard_since = 0;
+                t.terminal_since = 0;
+                t.terminal_polls = 0;
+                if t.last_load_retry_at == 0 || now.saturating_sub(t.last_load_retry_at) >= 30_000 {
+                    t.last_load_retry_at = now;
+                    let clicked = self.desktop.retry_load().await?;
+                    t.state = if t.binding.is_none() {
+                        TaskState::Sending
+                    } else {
+                        TaskState::Waiting
+                    };
+                    self.persist(t, Some((if clicked {"action"} else {"status"}, if clicked {
+                        "点击原会话加载错误卡片的「重试」；保留会话、发送意图及上下文；30 秒后再检查".into()
+                    } else { "原会话加载尚未恢复：重试控件未就绪；保留发送意图，不新建或重发".into() })))?;
+                } else {
+                    self.persist(t, None)?;
+                }
+                return Ok(());
+            }
+        }
+        if observed.chat_work_offer && !observed.approval_present {
+            let clicked = self.desktop.stay_chat().await?;
+            t.approval_settle_until = now + if clicked { 3_000 } else { 1_000 };
+            self.persist(
+                t,
+                Some((
+                    if clicked { "action" } else { "status" },
+                    if clicked {
+                        "点击 Work 转换卡片的「留在聊天模式」；继续当前聊天任务".into()
+                    } else {
+                        "识别到 Work 转换卡片，留在聊天按钮尚未就绪；下一次扫描重试".into()
+                    },
+                )),
+            )?;
+            return Ok(());
+        }
         if t.binding.is_none() {
             if observed.marker_present
-                && observed.page.user_turns > t.baseline_users
+                && !observed.foreign_marker
+                && !observed.binding.sidebar_id.is_empty()
+            {
+                t.pending_binding = Some(observed.binding.clone());
+            }
+            if observed.marker_present
+                && observed.page.user_turns > 0
                 && !observed.binding.identity.is_empty()
                 && !observed.binding.sidebar_id.is_empty()
                 && !observed.binding.sidebar_id.starts_with("local-chatgpt:")
             {
                 t.binding = Some(observed.binding.clone());
+                t.pending_binding = None;
                 t.sessions.push(SessionRecord {
                     binding: observed.binding.clone(),
                     phase: t.phase,
@@ -295,19 +467,15 @@ impl Supervisor<'_> {
                         format!("已确认派发与会话归属：{}", observed.binding.identity),
                     )),
                 )?;
-            } else if now.saturating_sub(t.dispatch_at) >= self.policy.confirmation_ms
-                && !observed.approval_present
-                && !observed.page.response_in_flight()
-                && observed.page.composer_text.trim().is_empty()
-            {
-                t.reset_dispatch();
-                t.retries += 1;
-                t.cooldown_until = now + 15_000u64.saturating_mul(u64::from(t.retries.min(12)));
+            } else if now.saturating_sub(t.dispatch_at) >= self.policy.confirmation_ms {
+                t.state = TaskState::Sending;
+                t.cooldown_until = now + 15_000;
                 self.persist(
                     t,
                     Some((
                         "status",
-                        "90 秒未确认原发送，重新排队同一阶段；不会重复已确认的会话".into(),
+                        "发送确认超过 90 秒：保留原发送意图与标记，等待原会话恢复；不重发、不新建"
+                            .into(),
                     )),
                 )?;
             } else {
@@ -423,15 +591,6 @@ impl Supervisor<'_> {
             self.persist(t, None)?;
             return Ok(());
         }
-        if observed.chat_work_offer {
-            self.desktop.stay_chat().await?;
-            t.approval_settle_until = now + 45_000;
-            self.persist(
-                t,
-                Some(("status", "已选择留在聊天模式，等待界面恢复".into())),
-            )?;
-            return Ok(());
-        }
         if observed.page.rate_limit_notice {
             t.rate_limit_episodes += 1;
             t.cooldown_until = now + self.policy.rate_limit_ms;
@@ -442,27 +601,15 @@ impl Supervisor<'_> {
             self.persist(t, Some(("status", "请求频繁：等待五分钟后继续".into())))?;
             return Ok(());
         }
-        if observed.load_failed {
-            // Loading failure is a retry of this same conversation, not a
-            // new model turn or reason to discard its saved checkpoint.
-            if t.last_load_retry_at == 0 || now.saturating_sub(t.last_load_retry_at) >= 30_000 {
-                t.last_load_retry_at = now;
-                let clicked = self.desktop.retry_load().await?;
-                t.state = TaskState::Waiting;
-                self.persist(
-                    t,
-                    Some((
-                        "status",
-                        if clicked {
-                            "对话无法加载：已点击原会话重试，30 秒后仍失败再重试".into()
-                        } else {
-                            "对话无法加载：等待重试按钮，保留原会话与上下文".into()
-                        },
-                    )),
-                )?;
-            } else {
-                self.persist(t, None)?;
-            }
+        if !observed.marker_present {
+            t.state = TaskState::Waiting;
+            self.persist(
+                t,
+                Some((
+                    "status",
+                    "原会话内容或任务标记尚未加载：保留绑定与上下文，暂不判定结束或新开会话".into(),
+                )),
+            )?;
             return Ok(());
         }
         if observed.interrupted || observed.length_limit || observed.empty_final {
@@ -510,7 +657,11 @@ impl Supervisor<'_> {
             {
                 return self.finish(t, &observed.page.assistant_text);
             }
-            self.persist(t, None)?;
+            if t.terminal_polls == 1 {
+                self.persist(t,Some(("status", format!("第 {} 轮 {:?} 回复已出现完整结束证据；等待第二次稳定检查，确认后解析验收并推进下一阶段",t.round,t.phase))))?;
+            } else {
+                self.persist(t, None)?;
+            }
             return Ok(());
         }
         t.terminal_since = 0;
@@ -578,6 +729,8 @@ impl Supervisor<'_> {
             self.persist(t, Some(("assistant", reply.into())))?;
             return Ok(());
         }
+        let completed_phase = t.phase;
+        let completed_round = t.round;
         match t.phase {
             Phase::Work => {
                 t.work_result = bounded(reply, 64_000);
@@ -613,7 +766,24 @@ impl Supervisor<'_> {
                 }
             },
         }
-        self.persist(t, Some(("assistant", reply.into())))?;
+        if self.persist(t, Some(("assistant", reply.into())))? {
+            let result = if t.state == TaskState::Done {
+                format!("独立验收第 {completed_round} 轮报告 complete 且身份匹配；任务标记完成")
+            } else if completed_phase == Phase::Work {
+                format!("执行第 {completed_round} 轮回复稳定结束；已保存执行结果，进入独立验收阶段")
+            } else if t.phase == Phase::Work {
+                format!(
+                    "独立验收第 {completed_round} 轮给出 next；进入第 {} 轮执行，保留验收下一步",
+                    t.round
+                )
+            } else {
+                format!(
+                    "独立验收第 {completed_round} 轮报告无效；保留验收阶段等待修复：{}",
+                    t.last_error
+                )
+            };
+            self.persist(t, Some(("action", result)))?;
+        }
         Ok(())
     }
     pub async fn run(&self) -> Result<()> {

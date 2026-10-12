@@ -119,6 +119,23 @@ impl TaskStore for SqliteTaskStore {
         rows.reverse();
         Ok(rows)
     }
+    fn operations(&self, id: &str, since: u64, limit: usize) -> Result<Vec<Activity>> {
+        let c = self.lock()?;
+        // Filter before LIMIT so high-frequency scans cannot evict actions.
+        let mut stmt=c.prepare("SELECT task_id,at,role,text FROM events WHERE (task_id=?1 OR ?1='') AND at>=?2 AND role NOT IN ('scan','assistant') ORDER BY sequence DESC LIMIT ?3")?;
+        let mut rows = stmt
+            .query_map(params![id, since, limit.min(50_000)], |r| {
+                Ok(Activity {
+                    task_id: r.get(0)?,
+                    at: r.get(1)?,
+                    role: r.get(2)?,
+                    text: r.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.reverse();
+        Ok(rows)
+    }
     fn settings(&self) -> Result<Settings> {
         let body: String =
             self.lock()?
@@ -181,6 +198,44 @@ mod tests {
             .join("state.sqlite");
         let _ = std::fs::remove_file(&path);
         SqliteTaskStore::open(&path).unwrap()
+    }
+    #[test]
+    fn operation_history_survives_scan_flood_and_honors_hour_window() {
+        let root = std::env::temp_dir().join(format!("fabushi-operations-{}", std::process::id()));
+        let s = SqliteTaskStore::open(&root.join("state.sqlite")).unwrap();
+        let mut t = Task::new(
+            "history".into(),
+            "history".into(),
+            "goal".into(),
+            TaskMode::Goal,
+            1,
+        );
+        s.insert(&t).unwrap();
+        let event = |at, role: &str, text: &str| {
+            Some(Activity {
+                task_id: t.id.clone(),
+                at,
+                role: role.into(),
+                text: text.into(),
+            })
+        };
+        let first = event(1_000, "action", "older than one hour");
+        let recent = event(4_000_000, "action", "clicked stay in chat");
+        s.save(&mut t, 0, first).unwrap();
+        s.save(&mut t, 1, recent).unwrap();
+        for n in 0..500 {
+            let rev = t.revision;
+            let a = Activity {
+                task_id: t.id.clone(),
+                at: 4_000_100 + n,
+                role: "scan".into(),
+                text: "poll".into(),
+            };
+            s.save(&mut t, rev, Some(a)).unwrap();
+        }
+        let actions = s.operations("history", 3_600_000, 360).unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].text, "clicked stay in chat");
     }
     #[test]
     fn stale_worker_cannot_overwrite_manual_pause_and_only_one_owner_leases() {

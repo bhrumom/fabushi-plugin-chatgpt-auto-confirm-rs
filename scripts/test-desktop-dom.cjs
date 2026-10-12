@@ -105,6 +105,7 @@ const script = name => source.match(new RegExp(`const ${name}: &str = r#"([\\s\\
       });
       document.addEventListener('keydown',e=>{if(e.key==='Escape')document.querySelector('#popup')?.remove();});
     });
+    await page.locator('button[aria-label="Select ChatGPT model"], button[aria-label="选择 ChatGPT 模型"]').evaluate(e=>{e.style.display='none';setTimeout(()=>e.style.display='',500);});
     let result=await page.evaluate(native('PROFILE_SCRIPT').replace('__PROFILE__',JSON.stringify({model:'GPT-5.6 Sol',effort:3})));
     assert.equal(result.ok,true);assert.equal(result.effort,3);
     console.log('PASS model checked radio and exact 5-position effort verification');
@@ -138,6 +139,30 @@ const script = name => source.match(new RegExp(`const ${name}: &str = r#"([\\s\\
     result=await page.evaluate(native('RETRY_LOAD_SCRIPT'));assert.equal(result.clicked,true);
     assert.equal(await page.evaluate(()=>!!window.loadRetried && !window.wrongRetry),true);
     console.log('PASS role-less native load error retries only its own card');
+    await page.setContent('<main><div data-content-search-unit-key="x:user">[Fabushi:owned]</div><div><p>在 ChatGPT Work 中继续</p><p>创建和编辑文档、使用应用并完成多步骤任务</p><div><button onclick="window.stayed=true">留在聊天模式 <span>25</span></button><button onclick="window.movedWork=true">在 Work 中继续</button></div></div></main>');
+    c=await context('owned');assert.equal(c.chat_work_offer,true);
+    result=await page.evaluate(native('STAY_CHAT_SCRIPT'));assert.equal(result.clicked,true);
+    assert.equal(await page.evaluate(()=>!!window.stayed && !window.movedWork),true);
+    await page.setContent('<main><blockquote><p>在 ChatGPT Work 中继续</p><button>留在聊天模式 25</button><button>在 Work 中继续</button></blockquote></main>');
+    c=await context('owned');assert.equal(c.chat_work_offer,false);
+    assert.equal((await page.evaluate(native('STAY_CHAT_SCRIPT'))).clicked,false);
+    await page.setContent('<main><div>cached conversation</div></main><section><div><p>无法加载此 <span>ChatGPT</span> 对话</p><button onclick="window.nestedRetry=true">重试</button></div></section>');
+    c=await context('owned');assert.equal(c.load_failed,true);
+    assert.equal((await page.evaluate(native('RETRY_LOAD_SCRIPT'))).clicked,true);
+    await page.setContent('<main><div><blockquote>无法加载此 ChatGPT 对话</blockquote></div><button>重试</button></main>');
+    c=await context('owned');assert.equal(c.load_failed,false);
+    assert.equal((await page.evaluate(native('RETRY_LOAD_SCRIPT'))).clicked,false);
+    await page.setContent('<main><div class="rounded-xl">无法加载此 ChatGPT 对话<button onclick="window.directRetry=true">重试</button></div></main>');
+    c=await context('owned');assert.equal(c.load_failed,true);
+    assert.equal((await page.evaluate(native('RETRY_LOAD_SCRIPT'))).clicked,true);
+    assert.equal(await page.evaluate(()=>!!window.directRetry),true);
+    await page.setContent('<div role="button" onclick="window.unrelatedOpened=true"><span data-thread-title="true">Unrelated chat</span></div>');
+    await page.locator('[role="button"]').evaluate(e=>e.__reactFiber$fixture={memoizedProps:{conversation:{id:'unrelated-id'}},return:null});
+    result=await page.evaluate(native('SWITCH_SCRIPT').replace('__BINDING__',JSON.stringify({identity:'owned-id',sidebar_id:'owned-id',title:'task'})));
+    assert.equal(result.reason,'recorded-conversation-not-in-sidebar');
+    assert.equal(await page.evaluate(()=>!!window.unrelatedOpened),false);
+    console.log('PASS native role-less Work card, countdown, quoted exclusion and load error outside cached main');
+
 
 
 

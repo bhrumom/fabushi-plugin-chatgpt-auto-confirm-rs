@@ -92,3 +92,47 @@ and console log. V shows combined task events, newest first; selected-task
 events appear before the long original goal. The CLI logs command reads the
 same journal. Sidebar switching must wait for the requested conversation's
 marker or its own loading error before processing it.
+
+## Native card recovery and one-hour operation journal
+
+- Work-conversion cards may be ordinary containers with no dialog/group role.
+  Match the card heading plus both choices, including the countdown badge,
+  and click only the scoped Stay in chat control. Record success only when the
+  action executes; do not advance to independent review while that card exists.
+- Loading errors may be outside a cached transcript main and contain nested
+  inline markup. A loading-failure latch blocks terminal classification and
+  fresh handoff until the same task marker is visible again. This applies before
+  dispatch confirmation as well as after durable binding. Possible-send intents
+  never reset/replay merely because the 90-second confirmation window elapsed.
+  A marker-verified transient binding can be retained for identity resolution.
+- TUI and CLI logs show specific operations from the preceding hour. The SQLite
+  query filters scan/reply rows before applying the history limit. Navigation,
+  model/file preflight, send trigger/confirmation, approval, card retry, review
+  and context handoff remain separately visible. Scans remain in the raw journal
+  and operational worker log without displacing the action timeline.
+- Regression coverage includes role-less Work cards with countdowns, quoted
+  controls, nested loading errors outside cached main, unconfirmed-send loading
+  failures, successful/failed Stay actions and historical actions after 500 polls.
+
+Only task-owned navigation is permitted: a missing temporary sidebar id never
+triggers iteration/clicks through unrelated conversations. A current exact
+marker may resolve its own temporary id in place; otherwise retain the pending
+session and report that ownership cannot yet be recovered. The 15-second
+navigation interval is desktop-wide, not separately per task. Native load-error
+cards may have direct text nodes followed by their retry button; strip decision
+controls when projecting the error label and retry from that same container.
+
+A report with complete terminal controls receives its second stable check
+without being starved by a different task's approval state. Authorization
+priority is bounded by a sixty-second overdue-task threshold. Exact unique
+user markers confirm a desktop dispatch even when a cached transcript makes
+the user-turn baseline equal to the fresh conversation's count.
+
+Fresh-chat model preflight tolerates up to three seconds of native trigger
+mounting before failing closed, without selecting a guessed model.
+
+Another registered task's authorization card may be parked to start a ready
+execution/review stage only after its exact marker and stable binding are
+verified and the composer is empty. Preserve that task's binding and pending
+card for its next supervision visit; never dismiss or grant it on behalf of
+the new stage. Unowned authorization and all drafts still block navigation.

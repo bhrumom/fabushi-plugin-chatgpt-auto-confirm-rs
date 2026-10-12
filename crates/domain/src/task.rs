@@ -115,6 +115,8 @@ pub struct Task {
     pub attachments: Vec<Attachment>,
     pub workspace: String,
     pub binding: Option<SessionBinding>,
+    #[serde(default)]
+    pub pending_binding: Option<SessionBinding>,
     pub sessions: Vec<SessionRecord>,
     pub token: String,
     pub prepared_prompt: String,
@@ -138,6 +140,8 @@ pub struct Task {
     pub recoveries: u32,
     #[serde(default)]
     pub last_load_retry_at: u64,
+    #[serde(default)]
+    pub load_failure_pending: bool,
     pub rate_limit_episodes: u32,
     pub continuations: u32,
     pub review_repairs: u32,
@@ -166,6 +170,7 @@ impl Task {
             attachments: vec![],
             workspace: "桌面工作区".into(),
             binding: None,
+            pending_binding: None,
             sessions: vec![],
             token: String::new(),
             prepared_prompt: String::new(),
@@ -188,6 +193,7 @@ impl Task {
             approvals: 0,
             recoveries: 0,
             last_load_retry_at: 0,
+            load_failure_pending: false,
             rate_limit_episodes: 0,
             continuations: 0,
             review_repairs: 0,
@@ -200,6 +206,7 @@ impl Task {
     }
     pub fn reset_dispatch(&mut self) {
         self.binding = None;
+        self.pending_binding = None;
         self.token.clear();
         self.prepared_prompt.clear();
         self.send_clicked = false;
@@ -211,6 +218,8 @@ impl Task {
         self.approval_since = 0;
         self.approval_settle_until = 0;
         self.recovery_guard_since = 0;
+        self.load_failure_pending = false;
+        self.last_load_retry_at = 0;
         self.approval_fingerprint.clear();
         self.state = TaskState::Queued;
     }
@@ -302,6 +311,8 @@ pub struct Settings {
     pub last_scan_ms: u64,
     pub last_attempt_at: u64,
     pub last_confirmed_task: String,
+    pub last_navigation_at: u64,
+    pub last_navigation_task: String,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -322,6 +333,8 @@ impl Default for Settings {
             last_scan_ms: 0,
             last_attempt_at: 0,
             last_confirmed_task: String::new(),
+            last_navigation_at: 0,
+            last_navigation_task: String::new(),
         }
     }
 }

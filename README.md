@@ -54,8 +54,9 @@ continues. Start supervision without the TUI using `supervise`.
 
 The dashboard shows the attempted task separately from the last confirmed
 conversation, scan age, confirmed switch count, phase/round, authorization and
-recovery counts, errors, and retry countdowns. Activity is persisted in SQLite;
-`logs --limit 40` reads the journal. The TUI-started worker appends operational
+recovery counts, errors, and retry countdowns. Specific operations from the past hour are persisted in SQLite and shown
+before scan detail; `v` opens the full hour across tasks and PageDown scrolls
+older operations. `logs --limit 10000` reads that same one-hour action journal. The TUI-started worker appends operational
 logs alongside the database as `workbench.supervisor.log`.
 
 Continuous goals alternate execution and fresh independent review. A task is
@@ -65,7 +66,10 @@ separate from individual conversation recovery attempts.
 Native authorization opens the split menu and prefers the exact current
 conversation grant, including `Allow GitHub for this conversation`; allow-once
 is a fallback when that grant is unavailable. Persistent grants are excluded.
-Load failures retry the same error card every 30 seconds. Connection
+Load failures retry the same error card every 30 seconds, including failures
+before the first stable conversation id. Unconfirmed sends keep their intent
+after 90 seconds and are not automatically replayed. Work-conversion cards
+with countdown badges are answered with Stay in chat. Connection
 interruptions carry the original goal and saved public progress into a fresh
 conversation after an 8-second guard and the normal 60-second send interval.
 Drafts and pending authorizations block destructive recovery.
