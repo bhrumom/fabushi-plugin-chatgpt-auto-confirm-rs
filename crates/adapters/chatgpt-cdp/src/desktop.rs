@@ -1,7 +1,7 @@
 use super::ChatGptCdp;
 use anyhow::{Result, bail};
 use async_trait::async_trait;
-use fabushi_chatgpt_application::TaskDesktop;
+use fabushi_chatgpt_application::{NavigationUnavailable, TaskDesktop};
 use fabushi_chatgpt_domain::*;
 use serde_json::{Value, json};
 
@@ -63,6 +63,9 @@ impl ChatGptCdp {
                     return Ok(());
                 }
             }
+        }
+        if result["reason"] == "recorded-conversation-not-in-sidebar" {
+            return Err(NavigationUnavailable(result.to_string()).into());
         }
         bail!("desktop conversation switch failed: {result}");
     }
@@ -143,7 +146,9 @@ impl TaskDesktop for ChatGptCdp {
         if current.marker_present
             && !current.foreign_marker
             && (current.binding.sidebar_id == b.sidebar_id
-                || b.sidebar_id.starts_with("local-chatgpt:"))
+                || b.sidebar_id.starts_with("local-chatgpt:")
+                || current.binding.sidebar_id.is_empty()
+                || current.binding.sidebar_id.starts_with("local-chatgpt:"))
         {
             return Ok(());
         }
@@ -286,30 +291,67 @@ const CONTEXT_SCRIPT: &str = r#"
 const SWITCH_SCRIPT: &str = r#"
 (async () => {
   const binding=__BINDING__;
-  const identity=()=> ([...document.querySelectorAll('[data-above-composer-conversation-id]')].find(e=>e.getClientRects().length)?.getAttribute('data-above-composer-conversation-id') || '').replace(/^chatgpt:/,'');
-  const activeSidebarId=()=>{
-    const row=[...document.querySelectorAll('[data-thread-title="true"]')].map(t=>t.closest('[role="button"], a')).find(r=>r?.getAttribute('aria-current')==='page');
-    if(!row)return '';
+  const visible=e=>!!(e && e.getClientRects().length);
+  const norm=v=>String(v || '').replace(/\s+/g,' ').trim();
+  // Background windows may never service requestAnimationFrame. Use a bounded
+  // timer while locating mounted rows; no rendering callback can hang the visit.
+  const settle=()=>new Promise(r=>setTimeout(r,150));
+  const rows=()=>[...document.querySelectorAll('[data-thread-title="true"]')].filter(visible).map(t=>t.closest('[role="button"], a')).filter(e=>e && visible(e) && !e.closest('[data-message-author-role], [data-content-search-unit-key], pre, code, blockquote'));
+  const ids=row=>{
+    const match=row.getAttribute('href')?.match(/\/(?:c|work\/conversation)\/([^/?#]+)/);
+    if(match)return [decodeURIComponent(match[1])];
     const key=Object.keys(row).find(key=>key.startsWith('__reactFiber$'));let fiber=key?row[key]:null;
-    for(let i=0;fiber && i<10;i++,fiber=fiber.return){const p=fiber.memoizedProps||{};const id=p.conversation?.id || p.conversationId || p.thread?.id || p.threadId;if(typeof id==='string')return id;}
-    return decodeURIComponent(row.getAttribute('href')?.match(/\/(?:c|work\/conversation)\/([^/?#]+)/)?.[1] || '');
+    for(let i=0;fiber && i<20;i++,fiber=fiber.return){
+      const p=fiber.memoizedProps||{};const own=[p.conversation?.id,p.conversationId,p.thread?.id,p.threadId].filter(v=>typeof v==='string');
+      if(own.length)return own;
+    }return [];
   };
-  if(activeSidebarId()===binding.sidebar_id) return {ok:true};
-  if(!binding.sidebar_id) return {ok:false,reason:'sidebar-binding-not-confirmed'};
-  const rows=[...document.querySelectorAll('[data-thread-title="true"]')].map(t=>t.closest('[role="button"], a')).filter(Boolean);
-  const row=rows.find(row=>{
-    const ids=[];const key=Object.keys(row).find(key=>key.startsWith('__reactFiber$'));let fiber=key?row[key]:null;
-    for(let i=0;fiber && i<10;i++,fiber=fiber.return) {const p=fiber.memoizedProps||{};ids.push(p.conversation?.id,p.conversationId,p.thread?.id,p.threadId);}
-    const match=row.getAttribute('href')?.match(/\/(?:c|work\/conversation)\/([^/?#]+)/);if(match)ids.push(decodeURIComponent(match[1]));
-    return ids.includes(binding.sidebar_id) || ids.includes(binding.identity);
-  });
-  if(!row) return {ok:false,reason:'recorded-conversation-not-in-sidebar'};
-  const composer=[...document.querySelectorAll('textarea, [contenteditable="true"]')].find(e=>e.getClientRects().length);
-  if((composer?.value || composer?.innerText || '').trim()) return {ok:false,reason:'unsaved-composer-draft'};
-  row.scrollIntoView({block:'nearest',behavior:'instant'});
-  await new Promise(requestAnimationFrame);
+  const active=()=>rows().find(r=>r.getAttribute('aria-current')==='page');
+  if(active() && ids(active()).includes(binding.sidebar_id))return {ok:true};
+  if(!binding.sidebar_id)return {ok:false,reason:'sidebar-binding-not-confirmed'};
+  const composer=[...document.querySelectorAll('textarea, [contenteditable="true"]')].find(visible);
+  if((composer?.value || composer?.innerText || '').trim())return {ok:false,reason:'unsaved-composer-draft'};
+  let openedSidebar=false,scrolled=0;
+  if(!rows().length){
+    const toggle=[...document.querySelectorAll('button')].filter(visible).find(b=>/^(?:show sidebar|open sidebar|toggle sidebar|显示侧边栏|打开侧边栏|展开侧边栏|切换侧边栏|显示边栏|打开边栏|切换边栏|切换侧栏)$/i.test(norm(b.getAttribute('aria-label') || b.getAttribute('title') || b.innerText)));
+    if(toggle){toggle.click();openedSidebar=true;await settle();}
+    for(let n=0;!rows().length && n<8;n++)await settle();
+  }
+  const find=()=>rows().find(row=>ids(row).includes(binding.sidebar_id) || ids(row).includes(binding.identity));
+  let row=find();
+  if(!row){
+    const containers=[];
+    for(const item of rows()){
+      for(let e=item.parentElement;e && !e.matches('body, main');e=e.parentElement){
+        if(/auto|scroll/.test(getComputedStyle(e).overflowY) && e.scrollHeight>e.clientHeight+1){
+          if(!containers.includes(e))containers.push(e);break;
+        }
+      }
+    }
+    // Scroll sidebar lists only. Opening a chat is reserved for the exact id.
+    for(const list of containers.slice(0,3)){
+      const original=list.scrollTop;
+      await settle();row=find();let wrapped=false;
+      for(let n=0;!row && n<24 && scrolled<24;n++){
+        const before=list.scrollTop;
+        list.scrollTop=Math.min(list.scrollHeight-list.clientHeight,before+Math.max(160,list.clientHeight*.75));
+        if(list.scrollTop===before){
+          if(wrapped || before===0)break;
+          list.scrollTop=0;wrapped=true;
+        }
+        scrolled++;await settle();row=find();
+      }
+      if(row)break;
+      // Keep the bounded scan position so a later retry can continue through
+      // an older virtual list, without opening any unrelated conversation.
+      if(wrapped && list.scrollTop>=original){list.scrollTop=original;await settle();}
+    }
+  }
+  if(!row)return {ok:false,reason:'recorded-conversation-not-in-sidebar',mounted_rows:rows().length,opened_sidebar:openedSidebar,scroll_steps:scrolled};
+  row.scrollIntoView({block:'nearest',behavior:'instant'});await settle();
   const rect=row.getBoundingClientRect();
-  return {ok:false,needs_click:true,x:rect.x+rect.width/2,y:rect.y+rect.height/2};
+  if(rect.width<=0 || rect.height<=0)return {ok:false,reason:'recorded-conversation-not-in-sidebar',mounted_rows:rows().length};
+  return {ok:false,needs_click:true,x:rect.x+rect.width/2,y:rect.y+rect.height/2,opened_sidebar:openedSidebar,scroll_steps:scrolled};
 })()
 "#;
 const PROFILE_SCRIPT: &str = r#"

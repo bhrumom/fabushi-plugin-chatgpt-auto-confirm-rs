@@ -107,14 +107,25 @@ fn draw(frame: &mut Frame, queue: &Queue, endpoint: &str, ui: &Ui) -> Result<()>
             ),
         ]));
     }
-    let status = queue
+    let blocked = tasks
+        .iter()
+        .filter(|t| t.state.runnable() && !t.last_error.is_empty())
+        .count();
+    let status = if queue
         .heartbeat(endpoint)?
-        .filter(|(_, expires)| *expires > wall_ms())
-        .map(|_| "监督进程在线")
-        .unwrap_or("监督进程未连接");
+        .is_some_and(|(_, expires)| expires > wall_ms())
+    {
+        if blocked > 0 {
+            format!("监督在线 · {blocked} 项恢复中")
+        } else {
+            "监督在线 · 正在推进".into()
+        }
+    } else {
+        "监督进程未连接".into()
+    };
     let sidebar = Layout::vertical([Constraint::Min(5), Constraint::Length(8)]).split(cols[0]);
     let list = List::new(rows)
-        .block(block(" Fabushi 工作台 r2 "))
+        .block(block(" Fabushi 工作台 r3 "))
         .highlight_style(Style::default().bg(Color::Rgb(55, 45, 78)))
         .highlight_symbol("▸ ");
     let mut state = ListState::default().with_selected(if ui.new_view || tasks.is_empty() {
@@ -132,7 +143,7 @@ fn draw(frame: &mut Frame, queue: &Queue, endpoint: &str, ui: &Ui) -> Result<()>
     };
     frame.render_widget(
         Paragraph::new(format!(
-            "{} · {}\n尝试：{}\n确认：{}\n扫描 {} · 已确认切换 {}\n最近扫描 {} · 用时 {}ms\nr2 · V 一小时记录 · ? 帮助",
+            "{} · {}\n尝试：{}\n确认：{}\n扫描 {} · 已确认切换 {}\n最近扫描 {} · 用时 {}ms\nr3 · V 一小时记录 · ? 帮助",
             status, if settings.running { "开启" } else { "暂停" },
             selected_title(&settings.last_task), selected_title(&settings.last_confirmed_task),
             settings.scans, settings.switches, age(settings.last_attempt_at), settings.last_scan_ms
@@ -330,7 +341,14 @@ pub fn run_tui(queue: Queue, endpoint: String) -> Result<()> {
     let _guard = TerminalGuard;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let mut ui = Ui::default();
+    let mut worker_check = std::time::Instant::now();
     loop {
+        if worker_check.elapsed() >= Duration::from_secs(5) {
+            if let Err(error) = spawn_worker(&queue, &endpoint) {
+                ui.notice = format!("监督恢复失败：{error}");
+            }
+            worker_check = std::time::Instant::now();
+        }
         let len = queue.tasks()?.len();
         if len > 0 {
             ui.selected = ui.selected.min(len - 1);

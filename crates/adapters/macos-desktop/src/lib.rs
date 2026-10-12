@@ -38,6 +38,9 @@ fn desktop_arguments(profile: &Path, port: u16) -> Vec<String> {
         format!("--user-data-dir={}", profile.display()),
         "--remote-debugging-address=127.0.0.1".into(),
         format!("--remote-debugging-port={port}"),
+        "--disable-backgrounding-occluded-windows".into(),
+        "--disable-renderer-backgrounding".into(),
+        "--disable-background-timer-throttling".into(),
     ]
 }
 
@@ -51,6 +54,7 @@ mod tests {
         assert_eq!(args[0], "--user-data-dir=/tmp/desktop profile");
         assert_eq!(args[1], "--remote-debugging-address=127.0.0.1");
         assert_eq!(args[2], "--remote-debugging-port=9223");
-        assert_eq!(args.len(), 3);
+        assert_eq!(args.len(), 6);
+        assert!(args.contains(&"--disable-background-timer-throttling".into()));
     }
 }

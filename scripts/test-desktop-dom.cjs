@@ -161,6 +161,27 @@ const script = name => source.match(new RegExp(`const ${name}: &str = r#"([\\s\\
     result=await page.evaluate(native('SWITCH_SCRIPT').replace('__BINDING__',JSON.stringify({identity:'owned-id',sidebar_id:'owned-id',title:'task'})));
     assert.equal(result.reason,'recorded-conversation-not-in-sidebar');
     assert.equal(await page.evaluate(()=>!!window.unrelatedOpened),false);
+
+    await page.setContent('<div id="sidebar" style="height:100px;overflow-y:auto;width:220px"><div role="button" onclick="window.unrelatedOpened=true"><span data-thread-title="true">Unrelated</span></div><div style="height:1000px"></div></div>');
+    await page.evaluate(()=>{
+      window.unrelatedOpened=false;window.requestAnimationFrame=()=>0;
+      const list=document.querySelector('#sidebar');const row=list.querySelector('[role="button"]');row.__reactFiber$fixture={memoizedProps:{conversation:{id:'unrelated-id'}},return:null};
+      list.addEventListener('scroll',()=>{
+        if(list.scrollTop>=100 && !window.mountedOwned){window.mountedOwned=true;
+          list.innerHTML='<div style="height:160px"></div><div role="button"><span data-thread-title="true">Owned task</span></div><div style="height:840px"></div>';
+          list.querySelector('[role="button"]').__reactFiber$fixture={memoizedProps:{conversation:{id:'owned-id'}},return:null};
+        }
+      });
+    });
+    result=await Promise.race([page.evaluate(native('SWITCH_SCRIPT').replace('__BINDING__',JSON.stringify({identity:'owned-id',sidebar_id:'owned-id',title:'task'}))),new Promise((_,reject)=>setTimeout(()=>reject(Error('sidebar locator depended on paused animation frames')),3000))]);
+    assert.equal(result.needs_click,true);assert.ok(result.scroll_steps>0);
+    assert.equal(await page.evaluate(()=>!!window.unrelatedOpened),false);
+    await page.setContent('<button aria-label="Show sidebar">Show</button><div id="hidden-sidebar" style="display:none"><div role="button"><span data-thread-title="true">Owned</span></div></div>');
+    await page.locator('button[aria-label="Show sidebar"]').evaluate(e=>e.onclick=()=>document.querySelector('#hidden-sidebar').style.display='block');
+    await page.locator('#hidden-sidebar [role="button"]').evaluate(e=>e.__reactFiber$fixture={memoizedProps:{conversation:{id:'owned-id'}},return:null});
+    result=await page.evaluate(native('SWITCH_SCRIPT').replace('__BINDING__',JSON.stringify({identity:'owned-id',sidebar_id:'owned-id',title:'task'})));
+    assert.equal(result.needs_click,true);assert.equal(result.opened_sidebar,true);
+    console.log('PASS virtual sidebar mounts exact recorded id, bounded background wait, collapsed sidebar and no unrelated chat clicks');
     console.log('PASS native role-less Work card, countdown, quoted exclusion and load error outside cached main');
 
 
