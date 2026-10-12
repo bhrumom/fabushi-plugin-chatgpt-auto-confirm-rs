@@ -86,10 +86,12 @@ struct Desktop {
     pause_preflight: bool,
     fail_dispatch: bool,
     stay_success: bool,
+    new_chats: AtomicU64,
 }
 #[async_trait]
 impl TaskDesktop for Desktop {
     async fn new_chat(&self) -> Result<()> {
+        self.new_chats.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
     async fn activate(&self, _b: &SessionBinding, _token: &str) -> Result<()> {
@@ -182,6 +184,7 @@ fn setup(t: Task, o: TaskObservation, pause: bool, fail: bool) -> (Arc<Store>, D
         pause_preflight: pause,
         fail_dispatch: fail,
         stay_success: true,
+        new_chats: AtomicU64::new(0),
     };
     (store, desktop, Time(AtomicU64::new(1_000_000)))
 }
@@ -478,7 +481,8 @@ async fn preflight_settles_work_offer_before_creating_or_sending_new_stage() {
     tick(&s, &d, &c).await;
     let t = s.list().unwrap()[0].clone();
     assert!(!t.send_clicked);
-    assert!(t.prepared_prompt.is_empty());
+    assert_eq!(d.new_chats.load(Ordering::SeqCst), 0);
+    assert!(t.binding.is_none());
     assert_eq!(d.dispatches.lock().unwrap().as_slice(), ["STAY_CHAT"]);
     assert!(
         s.events
