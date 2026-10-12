@@ -1,0 +1,94 @@
+# Desktop TUI and continuous goal supervision
+
+Authority: explicit user request on 2026-10-12; userscript reference commit
+`4ff2f386dc40ab0e542250c0710f05c77bf1f612` (2.10.47).
+
+## Required behavior
+
+- Operate one installed ChatGPT desktop instance and its main renderer only.
+- Dispatch the complete supplied iOS and Android goals to separate conversations.
+- Rotate supervision without confusing transcripts, models, approvals or goals.
+- Provide a terminal workbench with task sidebar, selected task feed, multiline
+  goal input, once/continuous modes, per-task model/reasoning, attachments,
+  automatic authorization controls, pause/resume/cancel/delete/edit/open actions,
+  recent activity, settings, import/export and renderer cleanup.
+- Preserve persistent task/run state, dispatch intents, attachments, exact
+  conversation/marker binding, recovery context and independent review reports.
+- Continuous goals alternate work and fresh independent acceptance. Only a
+  correctly bound acceptance report may declare the goal complete. A terminal
+  assistant response is a completed turn, never proof of product completion.
+- Explicit connection interruption takes precedence over terminal Copy/actions.
+  After the eight-second guard and the normal send interval, dispatch a fresh
+  conversation with the original goal, phase/round, source conversation id,
+  recovery reason, prior checkpoint, work result and latest public tool/reply
+  progress. Empty rendering must not erase the previous checkpoint. Recognize
+  bilingual interruption banners beside the assistant body; exclude quotations.
+- Conversation loading failures click only the error card retry action, at
+  thirty-second intervals, preserving the same binding and checkpoint. They
+  never count as a final reply or trigger a new conversation.
+- Carry latest work/context into recovery; retries must not overwrite drafts,
+  abandon pending authorization or duplicate confirmed sends.
+- Model and reasoning must be verified before every new dispatch. Live edits
+  affect later unsent rounds only. Unsupported values fail closed.
+- Prefer the dropdown's current-conversation authorization over its default
+  allow-once button. Recognize provider-specific labels such as `Allow GitHub
+  for this conversation`, native cards without semantic roles, and shortcut
+  badges. Use allow-once only when a conversation grant is unavailable; never
+  persistent/global grants.
+- Supervision continues after the TUI closes and resumes after worker restart.
+- A single renewable endpoint lease and transactional revisions prevent multiple
+  supervisors or a stale worker from overriding a manual pause/cancel/edit.
+
+## Architecture
+
+`cli -> runtime -> application -> domain`, with SQLite and desktop CDP adapters
+pointing inward. Pure policy and report parsing live in domain/application.
+The CDP adapter contains DOM projection and requested effects only. TUI lives
+at the runtime composition boundary and uses the same durable store as the
+headless supervisor. SQLite WAL stores tasks, sessions, events, settings and
+endpoint leases. Local desktop conversation identity is persisted as native
+identity with a verified sidebar binding; it is never fabricated as a remote URL.
+
+## Reference mapping
+
+- bootstrap/config -> typed settings, model/effort presets and policy defaults;
+- storage/activity -> SQLite journal, bounded recent feed, import/export;
+- workspace ownership -> endpoint lease, revisions and logical workspace;
+- host navigation/memory -> desktop sidebar switching, checkpoint/reload;
+- attachments/identity -> private copied files, content hashes and task markers;
+- DOM/turn adapter -> native turn projection and exact conversation ownership;
+- task state -> durable task lifecycle and manual controls;
+- composer/model -> paced verified model/effort and upload-before-send;
+- reply/approval -> stable latest-turn actions, scoped approvals and safe modals;
+- send/navigation -> durable intent and post-send identity confirmation;
+- review/settlement -> identity-bound JSON, fresh review and next-work handoff;
+- supervision -> rotation, retries, stalls/rate limits/interruptions/length carry;
+- workbench/lifecycle -> native terminal sidebar/feed/composer and background worker.
+
+Browser-extension tabs/discard, page visibility timers, IndexedDB/localStorage
+budgets, drag-to-new-browser-workspace and inline image/video previews are
+replaced by a single desktop endpoint owner, independent Rust clock, SQLite,
+native file references and terminal file metadata. No browser extension or
+web-only recovery dependency is required.
+
+## Verification
+
+Regression gates cover report identity, stale completion, intent deduplication,
+pause/edit races, recovery priority, leases, durable restart, attachments,
+model readiness, sidebar switching and TUI controls. Run Rust fmt/test/clippy,
+architecture gate and sanitized desktop DOM fixtures. Live evidence must show
+both full goals dispatched into separate exact desktop conversations, rotation,
+durable restart and TUI operation. Task progress and actual mobile migration
+completion are recorded separately; no CI/source/packaged acceptance is inferred
+from a ChatGPT prose summary.
+
+## Observable supervision
+
+The workbench prioritizes the current attempt, last confirmed task marker,
+last scan age, elapsed scan time, phase/round and retry countdown. Attempted
+switches do not increment confirmed switch counts. Every scan start, result,
+confirmed conversation switch, recovery and failure produces a durable event
+and console log. V shows combined task events, newest first; selected-task
+events appear before the long original goal. The CLI logs command reads the
+same journal. Sidebar switching must wait for the requested conversation's
+marker or its own loading error before processing it.

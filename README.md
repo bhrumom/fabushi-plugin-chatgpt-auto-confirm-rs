@@ -1,6 +1,6 @@
 # fabushi-plugin-chatgpt-auto-confirm-rs
 
-Rust/Linux rewrite of bhrumom/fabushi-plugin-chatgpt-auto-confirm.
+Rust rewrite of bhrumom/fabushi-plugin-chatgpt-auto-confirm, with macOS ChatGPT desktop and explicit Linux browser backends.
 
 The current implementation can attach to a Chromium or Chrome session through CDP, send a ChatGPT prompt, automatically click Allow once / 允许一次, monitor the latest turn, recover from stalls, and return only after stable Copy-button terminal evidence.
 
@@ -14,7 +14,7 @@ This is a modular monolith with strict Hexagonal Architecture boundaries:
 - `crates/application` — use cases, recovery policy, Browser/Clock ports;
 - `crates/adapters/chatgpt-cdp` — ChatGPT/CDP implementation;
 - `crates/adapters/linux-browser` — Linux Chromium process implementation;
-- `crates/runtime` — composition root and future actor supervisor;
+- `crates/runtime` — composition root, terminal workbench and background supervisor;
 - `crates/cli` — thin operator surface.
 
 Run the architecture gate with `./scripts/check-architecture.sh`.
@@ -23,21 +23,75 @@ Run the architecture gate with `./scripts/check-architecture.sh`.
 
 cargo build --release -p fabushi-chatgpt-auto-confirm
 
+## macOS ChatGPT desktop (default)
+
+Build the binary, then launch the installed ChatGPT.app with its own profile:
+
+```sh
+./target/release/fabushi-chatgpt-auto-confirm desktop
+./target/release/fabushi-chatgpt-auto-confirm inspect
+./target/release/fabushi-chatgpt-auto-confirm new-chat
+./target/release/fabushi-chatgpt-auto-confirm send --prompt "完成这个任务"
+```
+
+The default backend is desktop, at http://127.0.0.1:9223. It connects only to the main `app://-/index.html` Electron renderer, excluding overlay and auxiliary windows. It never falls back to a browser tab. `send` refuses a Work composer or an existing unrelated draft. `new-chat` opens the client Chat interface. The task workbench verifies the configured model and thinking effort before each dispatch. Sign in interactively if the desktop client asks. Authentication remains in the client; no cookies or credentials are copied.
+
+`desktop --app /Applications/ChatGPT.app --profile /path/to/desktop-profile --port 9223` allows explicit installation/profile selection. An already-running app without debugging can remain open while this separate instance runs.
+
+## Desktop task workbench
+
+```sh
+./target/release/fabushi-chatgpt-auto-confirm desktop
+./target/release/fabushi-chatgpt-auto-confirm --database ./state/workbench.sqlite tui
+```
+
+The TUI accepts multiline goals, task files and attachments. Press `Ctrl+N` for
+new task, `i` to enter input, and `Ctrl+S` or `Alt+Enter` to dispatch. Use arrows
+or `j`/`k` to select a task, `p` to pause/resume, `P` to pause all, `s` to resume
+all, `e` to edit a goal, `m`/`r` for model/effort, and `v` for combined activity.
+Press `?` for all controls. `q` closes the TUI while its background worker
+continues. Start supervision without the TUI using `supervise`.
+
+The dashboard shows the attempted task separately from the last confirmed
+conversation, scan age, confirmed switch count, phase/round, authorization and
+recovery counts, errors, and retry countdowns. Activity is persisted in SQLite;
+`logs --limit 40` reads the journal. The TUI-started worker appends operational
+logs alongside the database as `workbench.supervisor.log`.
+
+Continuous goals alternate execution and fresh independent review. A task is
+complete only after a valid identity-bound review report. Review rounds are
+separate from individual conversation recovery attempts.
+
+Native authorization opens the split menu and prefers the exact current
+conversation grant, including `Allow GitHub for this conversation`; allow-once
+is a fallback when that grant is unavailable. Persistent grants are excluded.
+Load failures retry the same error card every 30 seconds. Connection
+interruptions carry the original goal and saved public progress into a fresh
+conversation after an 8-second guard and the normal 60-second send interval.
+Drafts and pending authorizations block destructive recovery.
+
+Tasks, session markers, dispatch intents, settings, private attachment copies
+and endpoint leases survive worker restarts. Only one worker controls each
+local endpoint. Browser-specific media previews and extension tab APIs are
+adapted to terminal file metadata and desktop/SQLite ownership. Full userscript
+or authenticated Linux replacement acceptance is not claimed; see
+`docs/specs/desktop-tui-userscript-parity.md` for the implemented contract.
+
 ## First login on Linux
 
 Install Chromium or Google Chrome, then run:
 
-./target/release/fabushi-chatgpt-auto-confirm browser --headed true
+./target/release/fabushi-chatgpt-auto-confirm --backend browser browser
 
 A dedicated browser profile is created under the local data directory. Log in to ChatGPT yourself in that browser.
 
 ## Run
 
-./target/release/fabushi-chatgpt-auto-confirm status
+./target/release/fabushi-chatgpt-auto-confirm --backend browser status
 
-./target/release/fabushi-chatgpt-auto-confirm send --prompt "继续完成所有" --auto-confirm true
+./target/release/fabushi-chatgpt-auto-confirm --backend browser send --prompt "继续完成所有"
 
-Default recovery policy:
+Legacy single-prompt browser recovery policy:
 - unconfirmed send after 90s -> resend original prompt;
 - no progress for 15m -> reload current conversation;
 - rate limit -> dismiss notice, wait 5m, at most 3 times;
