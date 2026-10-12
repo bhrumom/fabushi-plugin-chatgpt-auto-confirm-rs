@@ -310,8 +310,15 @@ rounds and report parsing; conversation-first scoped approvals; paced same-card
 load retry; interruption/length-limit context handoff; pause/edit/cancel/delete,
 queue import/export, scan/switch/recovery logs and live dashboard.
 
-Validation covers 30 Rust tests and sanitized DOM contracts. Local desktop
+Validation covers 36 Rust tests and sanitized DOM contracts. Local desktop
 observations demonstrated two complete goal dispatches, matching conversation
 markers, both conversation switches and current-conversation authorization.
 These observations do not prove completion of the mobile goals, exhaustive
 userscript parity, or authenticated Linux acceptance. CI evaluates each PR HEAD.
+
+Desktop recovery refinement: native role-less Work cards with countdown badges
+are answered with Stay in chat. Nested load errors outside cached transcript
+containers latch recovery on the same conversation even before dispatch
+confirmation. Unconfirmed desktop intents are retained after 90 seconds instead
+of automatically replayed. The past-hour operation journal filters polls before
+limiting history, with successful card clicks and dispatch preflight recorded.

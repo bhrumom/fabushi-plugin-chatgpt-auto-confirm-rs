@@ -7,12 +7,14 @@ use std::sync::{
 struct Store {
     tasks: Mutex<Vec<Task>>,
     settings: Mutex<Settings>,
+    events: Mutex<Vec<Activity>>,
 }
 impl Store {
     fn new(t: Task) -> Self {
         Self {
             tasks: Mutex::new(vec![t]),
             settings: Mutex::new(Settings::default()),
+            events: Mutex::new(vec![]),
         }
     }
 }
@@ -24,7 +26,7 @@ impl TaskStore for Store {
         self.tasks.lock().unwrap().push(t.clone());
         Ok(())
     }
-    fn save(&self, t: &mut Task, expected: u64, _a: Option<Activity>) -> Result<bool> {
+    fn save(&self, t: &mut Task, expected: u64, a: Option<Activity>) -> Result<bool> {
         let mut tasks = self.tasks.lock().unwrap();
         let Some(live) = tasks
             .iter_mut()
@@ -34,13 +36,16 @@ impl TaskStore for Store {
         };
         t.revision += 1;
         *live = t.clone();
+        if let Some(a) = a {
+            self.events.lock().unwrap().push(a);
+        }
         Ok(true)
     }
     fn delete(&self, _id: &str) -> Result<()> {
         Ok(())
     }
     fn activity(&self, _id: &str, _since: u64, _limit: usize) -> Result<Vec<Activity>> {
-        Ok(vec![])
+        Ok(self.events.lock().unwrap().clone())
     }
     fn settings(&self) -> Result<Settings> {
         Ok(self.settings.lock().unwrap().clone())
@@ -80,6 +85,7 @@ struct Desktop {
     store: Arc<Store>,
     pause_preflight: bool,
     fail_dispatch: bool,
+    stay_success: bool,
 }
 #[async_trait]
 impl TaskDesktop for Desktop {
@@ -115,7 +121,8 @@ impl TaskDesktop for Desktop {
         Ok(true)
     }
     async fn stay_chat(&self) -> Result<bool> {
-        Ok(true)
+        self.dispatches.lock().unwrap().push("STAY_CHAT".into());
+        Ok(self.stay_success)
     }
     async fn retry_load(&self) -> Result<bool> {
         self.dispatches.lock().unwrap().push("RETRY_LOAD".into());
@@ -174,6 +181,7 @@ fn setup(t: Task, o: TaskObservation, pause: bool, fail: bool) -> (Arc<Store>, D
         store: store.clone(),
         pause_preflight: pause,
         fail_dispatch: fail,
+        stay_success: true,
     };
     (store, desktop, Time(AtomicU64::new(1_000_000)))
 }
@@ -359,4 +367,124 @@ async fn load_failure_retries_same_conversation_at_intervals_and_preserves_conte
     assert_eq!(t.binding.as_ref().unwrap().sidebar_id, binding().sidebar_id);
     assert_eq!(t.latest_reply, "checkpoint");
     assert_eq!(t.phase, Phase::Work);
+}
+
+#[tokio::test]
+async fn unconfirmed_load_failure_never_requeues_or_discards_possible_send() {
+    let mut t = bound_task();
+    t.binding = None;
+    t.dispatch_at = 1;
+    t.prepared_prompt = "original prompt".into();
+    t.latest_reply = "saved checkpoint".into();
+    let o = TaskObservation {
+        load_failed: true,
+        binding: binding(),
+        ..Default::default()
+    };
+    let (s, d, c) = setup(t, o, false, false);
+    tick(&s, &d, &c).await;
+    assert!(s.list().unwrap()[0].load_failure_pending);
+    c.0.fetch_add(120_000, Ordering::SeqCst);
+    *d.observation.lock().unwrap() = TaskObservation {
+        empty_final: true,
+        interrupted: true,
+        binding: binding(),
+        ..Default::default()
+    };
+    tick(&s, &d, &c).await;
+    let t = s.list().unwrap()[0].clone();
+    assert!(t.send_clicked);
+    assert_eq!(t.token, "owned");
+    assert_eq!(t.round, 1);
+    assert_eq!(t.prepared_prompt, "original prompt");
+    assert_eq!(t.latest_reply, "saved checkpoint");
+    assert!(t.load_failure_pending);
+    assert!(t.carry.is_empty());
+    assert!(
+        d.dispatches
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|x| x == "RETRY_LOAD")
+    );
+}
+#[tokio::test]
+async fn unknown_send_after_confirmation_timeout_waits_without_duplicate_dispatch() {
+    let mut t = bound_task();
+    t.binding = None;
+    t.dispatch_at = 1;
+    let (s, d, c) = setup(t, TaskObservation::default(), false, false);
+    tick(&s, &d, &c).await;
+    let t = s.list().unwrap()[0].clone();
+    assert!(t.send_clicked);
+    assert_eq!(t.token, "owned");
+    assert_eq!(t.state, TaskState::Sending);
+    assert!(d.dispatches.lock().unwrap().is_empty());
+}
+#[tokio::test]
+async fn work_offer_click_is_recorded_only_after_success_and_blocks_terminal_review() {
+    let mut o = terminal("partial reply asking to continue in Work");
+    o.chat_work_offer = true;
+    let (s, mut d, c) = setup(bound_task(), o, false, false);
+    d.stay_success = false;
+    tick(&s, &d, &c).await;
+    assert!(
+        s.events
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|a| !a.text.contains("点击 Work 转换"))
+    );
+    c.0.fetch_add(16_000, Ordering::SeqCst);
+    d.stay_success = true;
+    tick(&s, &d, &c).await;
+    assert!(
+        s.events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|a| a.role == "action" && a.text.contains("留在聊天模式"))
+    );
+    assert_eq!(s.list().unwrap()[0].phase, Phase::Work);
+}
+
+#[tokio::test]
+async fn desktop_rotation_interval_is_global_not_per_task() {
+    let (s, d, c) = setup(bound_task(), terminal("progress"), false, false);
+    let mut other = bound_task();
+    other.id = "other-owned-task".into();
+    s.insert(&other).unwrap();
+    {
+        let mut settings = s.settings.lock().unwrap();
+        settings.last_navigation_task = "task".into();
+        settings.last_navigation_at = 1_000_000;
+        s.tasks.lock().unwrap()[0].last_scan_at = 1_000_000;
+    }
+    c.0.fetch_add(5_000, Ordering::SeqCst);
+    tick(&s, &d, &c).await;
+    assert_eq!(s.list().unwrap()[1].last_scan_at, 0);
+    c.0.fetch_add(11_000, Ordering::SeqCst);
+    tick(&s, &d, &c).await;
+    assert_eq!(s.list().unwrap()[1].last_scan_at, 1_016_000);
+}
+
+#[tokio::test]
+async fn preflight_settles_work_offer_before_creating_or_sending_new_stage() {
+    let o = TaskObservation {
+        chat_work_offer: true,
+        ..Default::default()
+    };
+    let (s, d, c) = setup(task(), o, false, false);
+    tick(&s, &d, &c).await;
+    let t = s.list().unwrap()[0].clone();
+    assert!(!t.send_clicked);
+    assert!(t.prepared_prompt.is_empty());
+    assert_eq!(d.dispatches.lock().unwrap().as_slice(), ["STAY_CHAT"]);
+    assert!(
+        s.events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|a| a.role == "action" && a.text.contains("留在聊天模式"))
+    );
 }

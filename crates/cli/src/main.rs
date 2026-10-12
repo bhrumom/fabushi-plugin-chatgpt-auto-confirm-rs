@@ -237,7 +237,7 @@ async fn main() -> Result<()> {
         }
         Commands::Logs { task, limit } => {
             let queue = Queue::open(&database)?;
-            for a in queue.activity(&task)?.iter().rev().take(limit) {
+            for a in queue.operations(&task)?.iter().rev().take(limit) {
                 println!("[{}] task={} {} {}", a.at, a.task_id, a.role, a.text);
             }
         }

@@ -137,6 +137,16 @@ impl TaskDesktop for ChatGptCdp {
         self.new_desktop_chat().await
     }
     async fn activate(&self, b: &SessionBinding, token: &str) -> Result<()> {
+        let current = self.task_observation(token).await?;
+        // A transient id may resolve while the dispatched conversation stays
+        // open. The exact owned token is sufficient; never search other chats.
+        if current.marker_present
+            && !current.foreign_marker
+            && (current.binding.sidebar_id == b.sidebar_id
+                || b.sidebar_id.starts_with("local-chatgpt:"))
+        {
+            return Ok(());
+        }
         match self.switch_conversation(b).await {
             Ok(()) => {
                 for _ in 0..32 {
@@ -148,46 +158,11 @@ impl TaskDesktop for ChatGptCdp {
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                 }
-                bail!("侧栏已切换，但内容/任务标记未确认；等待重新加载，未推进其他会话")
-            }
-            Err(error) if b.sidebar_id.starts_with("local-chatgpt:") => {
-                // Migrate a previously captured transient native id by the exact
-                // dispatched marker, never by a similar title or latest reply.
-                let rows = self.conversations().await?;
-                for row in rows.as_array().into_iter().flatten().take(30) {
-                    let Some(id) = row["ids"].as_array().and_then(|ids| {
-                        ids.iter()
-                            .find_map(|v| v.as_str().filter(|id| !id.starts_with("local-chatgpt:")))
-                    }) else {
-                        continue;
-                    };
-                    let candidate = SessionBinding {
-                        identity: id.into(),
-                        sidebar_id: id.into(),
-                        title: row["title"].as_str().unwrap_or("").into(),
-                    };
-                    if self.switch_conversation(&candidate).await.is_err() {
-                        continue;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-                    let first = self.task_observation(token).await?;
-                    if !first.marker_present
-                        || first.foreign_marker
-                        || first.binding.sidebar_id != id
-                    {
-                        continue;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-                    let second = self.task_observation(token).await?;
-                    if second.marker_present
-                        && !second.foreign_marker
-                        && second.binding.sidebar_id == id
-                        && first.page.activity_fingerprint() == second.page.activity_fingerprint()
-                    {
-                        return Ok(());
-                    }
+                let o = self.task_observation(token).await?;
+                if o.binding.sidebar_id == b.sidebar_id {
+                    return Ok(());
                 }
-                Err(error)
+                bail!("侧栏与内容归属未确认；未推进其他会话")
             }
             Err(error) => Err(error),
         }
@@ -299,10 +274,12 @@ const CONTEXT_SCRIPT: &str = r#"
   const publicTurns=[...main.querySelectorAll('[data-content-search-unit-key$=":assistant"], [data-message-author-role="assistant"]')].filter(visible).slice(-3);
   const visible_work=publicTurns.map(e=>(e.closest('article, [data-content-search-turn-key]') || e).innerText || '').join('\n\n').slice(-64000);
   const length_limit=/reached.*(?:conversation|chat).*limit|此对话.*长度上限|达到.*对话.*长度上限/i.test(statusText) || latestLines.some(l=>/^(you.*reached.*(?:conversation|chat).*limit.*|你.*(?:达到|已达到).*对话.*长度上限.*)$/i.test(l));
+  const loadLabel=e=>{const c=e.cloneNode(true);c.querySelectorAll('button, [role="button"], a').forEach(n=>n.remove());return normalize(c.textContent);};
   const loadError=/^(?:unable to load (?:this )?(?:ChatGPT )?conversation|无法加载.*(?:会话|对话))[。.!]?$/i;
-  const load_failed=/unable to load (?:this )?(?:ChatGPT )?conversation|无法加载.*(?:会话|对话)/i.test(statusText) || [...main.querySelectorAll('p, span, div')].some(e=>visible(e) && !e.closest(excluded) && e.children.length===0 && loadError.test(normalize(e.innerText)));
+  const load_failed=/unable to load (?:this )?(?:ChatGPT )?conversation|无法加载.*(?:会话|对话)/i.test(statusText) || [...document.querySelectorAll('p, span, div')].some(e=>visible(e) && !e.closest(excluded) && !e.querySelector(excluded) && normalize(e.innerText).length<180 && loadError.test(loadLabel(e)));
 
-  const offer=[...main.querySelectorAll('[role="dialog"], [role="group"], [data-testid*="card"]')].filter(visible).find(e=>/在\s*ChatGPT\s*Work\s*中继续|Continue in ChatGPT Work/i.test(e.innerText) && /留在聊天模式|stay in chat/i.test(e.innerText));
+  const stayButtons=[...document.querySelectorAll('button, [role="button"]')].filter(e=>visible(e) && !e.disabled && !e.closest(excluded) && /^(?:留在聊天(?:模式|中)|stay in chat)(?:\s*\d+.*)?$/i.test(normalize(e.innerText || e.getAttribute('aria-label'))));
+  const offer=stayButtons.find(button=>{for(let e=button.parentElement,n=0;e && n<7 && !e.matches('main, body');e=e.parentElement,n++){if(/在\s*ChatGPT\s*Work\s*中继续|Continue in ChatGPT Work/i.test(e.innerText) && /在\s*Work\s*中继续|Continue in Work/i.test(e.innerText))return true;}return false;});
   return {binding:{identity,sidebar_id:sidebarId,title:document.title.slice(0,160)},marker_present:lastText.includes(marker),user_text_chars:fullUserText.length,observed_markers:[...lastText.matchAll(/\[Fabushi:([^\]]+)\]/g)].map(m=>m[1]),foreign_marker:/\[Fabushi:[^\]]+\]/.test(lastText) && !lastText.includes(marker),interrupted,visible_work,length_limit,load_failed,approval_present:cards.length>0 || !!exact,approval_actionable:!!exact || cards.some(e=>e.querySelector('button[aria-haspopup="menu"]:not(:disabled)')),approval_fingerprint:identity+'|'+cardText,chat_work_offer:!!offer,empty_final:!!latest && page.response_actions_complete && page.response_action_turn_bound_to_last && !page.stop_available && !page.awaiting_assistant && !normalize(latest.querySelector('[data-markdown-text-style="assistant-message"], .markdown, [data-selected-text-overlay-target]')?.innerText || (/^(?:ChatGPT.*?[：:]\s*)?(?:Thinking|Thought|思考|正在思考)/i.test(normalize(latest.innerText))?'':latest.innerText))};
 })()
 "#;
@@ -450,10 +427,17 @@ const SCOPED_APPROVE_SCRIPT: &str = r#"
 const STAY_CHAT_SCRIPT: &str = r#"
 (() => {
   const visible=e=>!!(e && e.getClientRects().length);
-  const cards=[...document.querySelectorAll('[role="dialog"], [role="group"], [data-testid*="card"]')].filter(visible);
-  const card=cards.find(e=>/在\s*ChatGPT\s*Work\s*中继续|Continue in ChatGPT Work/i.test(e.innerText));
-  const button=[...(card?.querySelectorAll('button') || [])].find(b=>/^(留在聊天模式|stay in chat)(?:\s*\d+.*)?$/i.test((b.innerText || b.getAttribute('aria-label') || '').trim()));
-  if(button && !button.disabled){button.click();return {clicked:true};}return {clicked:false};
+  const norm=v=>String(v || '').replace(/\s+/g,' ').trim();
+  const excluded='[data-message-author-role="user"], [data-content-search-unit-key$=":user"], blockquote, pre, code, nav, aside';
+  const buttons=[...document.querySelectorAll('button, [role="button"]')].filter(e=>visible(e) && !e.disabled && e.getAttribute('aria-disabled')!=='true' && !e.closest(excluded));
+  for(const button of buttons.filter(e=>/^(?:留在聊天(?:模式|中)|stay in chat)(?:\s*\d+.*)?$/i.test(norm(e.innerText || e.getAttribute('aria-label'))))){
+    for(let card=button.parentElement,n=0;card && n<7 && !card.matches('main, body');card=card.parentElement,n++){
+      if(/在\s*ChatGPT\s*Work\s*中继续|Continue in ChatGPT Work/i.test(card.innerText) && /在\s*Work\s*中继续|Continue in Work/i.test(card.innerText)){
+        button.click();return {clicked:true,action:'stay-in-chat'};
+      }
+    }
+  }
+  return {clicked:false};
 })()
 "#;
 const SAFE_MODALS_SCRIPT: &str = r#"
@@ -494,10 +478,11 @@ const RETRY_LOAD_SCRIPT: &str = r#"
   const visible=e=>!!(e && e.getClientRects().length);
   const norm=v=>String(v || '').replace(/\s+/g,' ').trim();
   const excluded='[data-message-author-role="user"], [data-content-search-unit-key$=":user"], blockquote, pre, code, nav, aside';
+  const errorLabel=e=>{const c=e.cloneNode(true);c.querySelectorAll('button, [role="button"], a').forEach(n=>n.remove());return norm(c.textContent);};
   const error=/^(?:unable to load (?:this )?(?:ChatGPT )?conversation|无法加载.*(?:会话|对话))[。.!]?$/i;
-  for(const text of [...document.querySelectorAll('main p, main span, main div')].filter(e=>visible(e) && !e.closest(excluded) && e.children.length===0 && error.test(norm(e.innerText)))) {
-    for(let card=text.parentElement,n=0;card && n<4 && !card.matches('main, body');card=card.parentElement,n++) {
-      const retry=[...card.querySelectorAll('button, [role="button"], a')].find(e=>visible(e) && !e.disabled && e.getAttribute('aria-disabled')!=='true' && /^(?:重试|retry|try again)$/i.test(norm(e.innerText || e.getAttribute('aria-label'))));
+  for(const text of [...document.querySelectorAll('p, span, div')].filter(e=>visible(e) && !e.closest(excluded) && !e.querySelector(excluded) && norm(e.innerText).length<180 && error.test(errorLabel(e)))) {
+    for(let card=text,n=0;card && n<4 && !card.matches('main, body');card=card.parentElement,n++) {
+      const retry=[...card.querySelectorAll('button, [role="button"], a')].find(e=>visible(e) && !e.disabled && e.getAttribute('aria-disabled')!=='true' && /^(?:重试|重载|重新加载|retry|reload|try again)$/i.test(norm(e.innerText || e.getAttribute('aria-label'))));
       if(retry){retry.click();return {clicked:true};}
     }
   }

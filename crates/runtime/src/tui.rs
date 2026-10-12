@@ -114,7 +114,7 @@ fn draw(frame: &mut Frame, queue: &Queue, endpoint: &str, ui: &Ui) -> Result<()>
         .unwrap_or("监督进程未连接");
     let sidebar = Layout::vertical([Constraint::Min(5), Constraint::Length(8)]).split(cols[0]);
     let list = List::new(rows)
-        .block(block(" Fabushi 任务工作台 "))
+        .block(block(" Fabushi 工作台 r2 "))
         .highlight_style(Style::default().bg(Color::Rgb(55, 45, 78)))
         .highlight_symbol("▸ ");
     let mut state = ListState::default().with_selected(if ui.new_view || tasks.is_empty() {
@@ -132,7 +132,7 @@ fn draw(frame: &mut Frame, queue: &Queue, endpoint: &str, ui: &Ui) -> Result<()>
     };
     frame.render_widget(
         Paragraph::new(format!(
-            "{} · {}\n尝试：{}\n确认：{}\n扫描 {} · 已确认切换 {}\n最近扫描 {} · 用时 {}ms\nV 全局记录 · ? 帮助",
+            "{} · {}\n尝试：{}\n确认：{}\n扫描 {} · 已确认切换 {}\n最近扫描 {} · 用时 {}ms\nr2 · V 一小时记录 · ? 帮助",
             status, if settings.running { "开启" } else { "暂停" },
             selected_title(&settings.last_task), selected_title(&settings.last_confirmed_task),
             settings.scans, settings.switches, age(settings.last_attempt_at), settings.last_scan_ms
@@ -163,8 +163,8 @@ fn draw(frame: &mut Frame, queue: &Queue, endpoint: &str, ui: &Ui) -> Result<()>
     } else if ui.settings {
         feed.push_str(&format!("设置\n监督：{}\n全局当前会话自动授权：{}\n新任务模式：{:?}\n默认模型：{} / {}\n数据库：{}\n\nS 开启/恢复监督，Shift+P 暂停全部\nA 切换全局授权；L 请求安全 renderer 恢复\n恢复时保留任务标识、会话和进度；有授权/草稿/生成则等待。\n",settings.running,settings.global_auto_approve,settings.default_mode,settings.default_profile.model,settings.default_profile.effort_label(),queue.path.display()));
     } else if ui.logs {
-        feed.push_str("全部任务操作记录 · 最新在前 · V 返回任务 · PageDown 滚动\n");
-        for a in queue.activity("")?.iter().rev().take(100) {
+        feed.push_str("过去 1 小时 · 全部任务具体操作 · V 返回 · PageDown 滚动历史\n");
+        for a in queue.operations("")?.iter().rev() {
             let title = tasks
                 .iter()
                 .find(|t| t.id == a.task_id)
@@ -189,8 +189,8 @@ fn draw(frame: &mut Frame, queue: &Queue, endpoint: &str, ui: &Ui) -> Result<()>
         if let Some(b) = &t.binding {
             feed.push_str(&format!("会话：{}\n", b.sidebar_id));
         }
-        feed.push_str("\n执行记录 · 最新在前 · V 查看所有任务记录\n");
-        for a in queue.activity(&t.id)?.iter().rev().take(60) {
+        feed.push_str("\n过去 1 小时具体操作 · V 全局记录 · PageDown 查看历史\n");
+        for a in queue.operations(&t.id)?.iter().rev() {
             feed.push_str(&format!(
                 "[{}] {}  {}\n",
                 time_label(a.at),
