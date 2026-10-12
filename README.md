@@ -118,4 +118,6 @@ For supervision independent of an open TUI on macOS, install the per-user launch
 python3 scripts/install-supervisor-launchagent.py --binary /absolute/path/fabushi-chatgpt-auto-confirm --database /absolute/path/state.sqlite --log /absolute/path/supervisor.log
 ```
 
+Place the database in `~/Library/Application Support/FabushiSupervisor` before installation; macOS background workers can be blocked from accessing Documents. Stop existing workers before migrating an existing database and point the TUI to the same path. The installer copies its executable and writes its log in Application Support, with the requested log path linked to that journal.
+
 The agent starts at login and restarts an exited worker with a 30-second throttle. It shares the endpoint lease with the TUI, so only one worker controls the desktop. ChatGPT must remain available at the configured CDP endpoint; this does not bypass login or network failures. The installer prints inspection and stop commands.
