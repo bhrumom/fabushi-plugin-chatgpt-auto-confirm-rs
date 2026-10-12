@@ -105,6 +105,7 @@ const script = name => source.match(new RegExp(`const ${name}: &str = r#"([\\s\\
       });
       document.addEventListener('keydown',e=>{if(e.key==='Escape')document.querySelector('#popup')?.remove();});
     });
+    await page.locator('button[aria-label="Select ChatGPT model"], button[aria-label="选择 ChatGPT 模型"]').evaluate(e=>{e.style.display='none';setTimeout(()=>e.style.display='',500);});
     let result=await page.evaluate(native('PROFILE_SCRIPT').replace('__PROFILE__',JSON.stringify({model:'GPT-5.6 Sol',effort:3})));
     assert.equal(result.ok,true);assert.equal(result.effort,3);
     console.log('PASS model checked radio and exact 5-position effort verification');

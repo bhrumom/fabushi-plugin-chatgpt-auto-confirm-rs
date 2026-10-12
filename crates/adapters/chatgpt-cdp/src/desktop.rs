@@ -320,7 +320,9 @@ const PROFILE_SCRIPT: &str = r#"
   const sleep=ms=>new Promise(r=>setTimeout(r,ms));
   const labels=e=>[e.getAttribute('aria-label'),e.getAttribute('title'),e.innerText].map(normalize).filter(Boolean);
   const pointerClick=e=>{const r=e.getBoundingClientRect();const p={bubbles:true,cancelable:true,composed:true,button:0,buttons:1,clientX:r.x+r.width/2,clientY:r.y+r.height/2};e.dispatchEvent(new PointerEvent('pointerdown',{...p,pointerId:1,pointerType:'mouse',isPrimary:true}));e.dispatchEvent(new MouseEvent('mousedown',p));e.dispatchEvent(new PointerEvent('pointerup',{...p,buttons:0,pointerId:1,pointerType:'mouse',isPrimary:true}));e.dispatchEvent(new MouseEvent('mouseup',{...p,buttons:0}));e.dispatchEvent(new MouseEvent('click',{...p,buttons:0}));};
-  const button=[...document.querySelectorAll('button')].filter(visible).find(e=>labels(e).some(l=>/select chatgpt model|选择 ChatGPT 模型|思考强度|thinking effort/i.test(l)));
+  const findTrigger=()=>[...document.querySelectorAll('button')].filter(visible).find(e=>labels(e).some(l=>/select chatgpt model|选择 ChatGPT 模型|思考强度|thinking effort/i.test(l)));
+  let button=findTrigger();
+  for(let n=0;!button && n<12;n++){await sleep(250);button=findTrigger();}
   if(!button) return {ok:false,reason:'model-trigger-unavailable'};
   pointerClick(button);await sleep(700);
   const radios=()=>[...document.querySelectorAll('[role="menuitemradio"], [role="radio"]')].filter(visible);

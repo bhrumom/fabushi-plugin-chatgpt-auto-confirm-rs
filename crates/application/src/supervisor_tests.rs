@@ -546,3 +546,33 @@ async fn exact_marker_confirms_send_even_when_cached_turn_baseline_matches() {
         "sidebar-a"
     );
 }
+
+#[tokio::test]
+async fn other_verified_queue_task_approval_can_be_parked_for_next_stage() {
+    let mut o = terminal("other task");
+    o.approval_present = true;
+    let (s, d, c) = setup(task(), o, false, false);
+    let mut other = bound_task();
+    other.id = "other-task".into();
+    s.insert(&other).unwrap();
+    tick(&s, &d, &c).await;
+    assert_eq!(d.new_chats.load(Ordering::SeqCst), 1);
+    assert!(
+        s.list()
+            .unwrap()
+            .iter()
+            .find(|t| t.id == "other-task")
+            .unwrap()
+            .binding
+            .is_some()
+    );
+}
+#[tokio::test]
+async fn unowned_approval_blocks_fresh_stage_navigation() {
+    let mut o = terminal("unowned");
+    o.approval_present = true;
+    let (s, d, c) = setup(task(), o, false, false);
+    tick(&s, &d, &c).await;
+    assert_eq!(d.new_chats.load(Ordering::SeqCst), 0);
+    assert!(!s.list().unwrap()[0].send_clicked);
+}

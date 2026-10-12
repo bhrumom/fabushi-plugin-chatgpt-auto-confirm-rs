@@ -127,3 +127,12 @@ without being starved by a different task's approval state. Authorization
 priority is bounded by a sixty-second overdue-task threshold. Exact unique
 user markers confirm a desktop dispatch even when a cached transcript makes
 the user-turn baseline equal to the fresh conversation's count.
+
+Fresh-chat model preflight tolerates up to three seconds of native trigger
+mounting before failing closed, without selecting a guessed model.
+
+Another registered task's authorization card may be parked to start a ready
+execution/review stage only after its exact marker and stable binding are
+verified and the composer is empty. Preserve that task's binding and pending
+card for its next supervision visit; never dismiss or grant it on behalf of
+the new stage. Unowned authorization and all drafts still block navigation.

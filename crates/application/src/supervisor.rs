@@ -256,7 +256,30 @@ impl Supervisor<'_> {
                 )?;
                 return Ok(());
             }
-            if foreground.approval_present || !foreground.page.composer_text.trim().is_empty() {
+            let mut parked_other_approval = false;
+            if foreground.approval_present && foreground.page.composer_text.trim().is_empty() {
+                let other = self.store.list()?.into_iter().find(|other| {
+                    other.id != t.id
+                        && other.binding.as_ref().is_some_and(|b| {
+                            !b.sidebar_id.is_empty()
+                                && b.sidebar_id == foreground.binding.sidebar_id
+                        })
+                });
+                if let Some(other) = other {
+                    let verified = self.desktop.observe(&other.token).await?;
+                    if verified.marker_present
+                        && !verified.foreign_marker
+                        && verified.binding.sidebar_id == foreground.binding.sidebar_id
+                        && verified.page.composer_text.trim().is_empty()
+                    {
+                        parked_other_approval = true;
+                        self.persist(t,Some(("action",format!("保留另一队列任务 {} 的授权卡片及会话绑定；转入本任务新阶段，稍后回原会话处理授权",other.title))))?;
+                    }
+                }
+            }
+            if (foreground.approval_present && !parked_other_approval)
+                || !foreground.page.composer_text.trim().is_empty()
+            {
                 bail!("当前界面有未结算授权或未发送草稿，保留当前会话");
             }
             self.desktop.new_chat().await?;
