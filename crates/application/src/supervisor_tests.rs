@@ -492,3 +492,57 @@ async fn preflight_settles_work_offer_before_creating_or_sending_new_stage() {
             .any(|a| a.role == "action" && a.text.contains("留在聊天模式"))
     );
 }
+
+#[tokio::test]
+async fn review_stability_check_is_not_starved_by_other_task_approval() {
+    let mut t = bound_task();
+    t.phase = Phase::Review;
+    t.terminal_polls = 1;
+    t.terminal_since = 980_000;
+    t.last_scan_at = 980_000;
+    let reply = r#"{"taskId":"task","round":1,"status":"next","summary":"missing production parity","next":"implement the missing owner"}"#;
+    let observation = terminal(reply);
+    t.fingerprint = observation.page.activity_fingerprint();
+    let (s, d, c) = setup(t, observation, false, false);
+    let mut other = bound_task();
+    other.id = "approval-task".into();
+    other.state = TaskState::Approval;
+    other.last_scan_at = 995_000;
+    s.insert(&other).unwrap();
+    tick(&s, &d, &c).await;
+    let t = s
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|t| t.id == "task")
+        .unwrap();
+    assert_eq!(t.round, 2);
+    assert_eq!(t.phase, Phase::Work);
+    assert_eq!(t.next, "implement the missing owner");
+}
+#[tokio::test]
+async fn approval_priority_is_bounded_for_overdue_other_tasks() {
+    let mut t = bound_task();
+    t.state = TaskState::Approval;
+    t.last_scan_at = 995_000;
+    let (s, d, c) = setup(t, terminal("progress"), false, false);
+    let mut other = bound_task();
+    other.id = "overdue-task".into();
+    other.last_scan_at = 900_000;
+    s.insert(&other).unwrap();
+    tick(&s, &d, &c).await;
+    assert_eq!(s.settings().unwrap().last_task, "overdue-task");
+}
+#[tokio::test]
+async fn exact_marker_confirms_send_even_when_cached_turn_baseline_matches() {
+    let mut t = bound_task();
+    t.binding = None;
+    t.baseline_users = 1;
+    t.state = TaskState::Sending;
+    let (s, d, c) = setup(t, terminal("progress"), false, false);
+    tick(&s, &d, &c).await;
+    assert_eq!(
+        s.list().unwrap()[0].binding.as_ref().unwrap().sidebar_id,
+        "sidebar-a"
+    );
+}

@@ -39,6 +39,7 @@ pub trait TaskDesktop: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct SupervisorPolicy {
     pub rotation_ms: u64,
+    pub max_wait_ms: u64,
     pub send_gap_ms: u64,
     pub confirmation_ms: u64,
     pub stable_ms: u64,
@@ -52,6 +53,7 @@ impl Default for SupervisorPolicy {
     fn default() -> Self {
         Self {
             rotation_ms: 15_000,
+            max_wait_ms: 60_000,
             send_gap_ms: 60_000,
             confirmation_ms: 90_000,
             stable_ms: 4_000,
@@ -127,10 +129,19 @@ impl Supervisor<'_> {
             })
             .min_by_key(|t| {
                 (
-                    if t.state == TaskState::Sending || t.state == TaskState::Approval {
+                    if t.state == TaskState::Sending
+                        && t.binding.is_none()
+                        && now.saturating_sub(t.dispatch_at) < self.policy.confirmation_ms
+                    {
                         0
-                    } else {
+                    } else if t.terminal_polls > 0 {
                         1
+                    } else if now.saturating_sub(t.last_scan_at) >= self.policy.max_wait_ms {
+                        2
+                    } else if matches!(t.state, TaskState::Sending | TaskState::Approval) {
+                        3
+                    } else {
+                        4
                     },
                     t.last_scan_at,
                     t.created_at,
@@ -405,7 +416,7 @@ impl Supervisor<'_> {
                 t.pending_binding = Some(observed.binding.clone());
             }
             if observed.marker_present
-                && observed.page.user_turns > t.baseline_users
+                && observed.page.user_turns > 0
                 && !observed.binding.identity.is_empty()
                 && !observed.binding.sidebar_id.is_empty()
                 && !observed.binding.sidebar_id.starts_with("local-chatgpt:")
@@ -623,7 +634,11 @@ impl Supervisor<'_> {
             {
                 return self.finish(t, &observed.page.assistant_text);
             }
-            self.persist(t, None)?;
+            if t.terminal_polls == 1 {
+                self.persist(t,Some(("status", format!("第 {} 轮 {:?} 回复已出现完整结束证据；等待第二次稳定检查，确认后解析验收并推进下一阶段",t.round,t.phase))))?;
+            } else {
+                self.persist(t, None)?;
+            }
             return Ok(());
         }
         t.terminal_since = 0;

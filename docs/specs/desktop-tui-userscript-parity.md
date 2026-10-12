@@ -121,3 +121,9 @@ session and report that ownership cannot yet be recovered. The 15-second
 navigation interval is desktop-wide, not separately per task. Native load-error
 cards may have direct text nodes followed by their retry button; strip decision
 controls when projecting the error label and retry from that same container.
+
+A report with complete terminal controls receives its second stable check
+without being starved by a different task's approval state. Authorization
+priority is bounded by a sixty-second overdue-task threshold. Exact unique
+user markers confirm a desktop dispatch even when a cached transcript makes
+the user-turn baseline equal to the fresh conversation's count.

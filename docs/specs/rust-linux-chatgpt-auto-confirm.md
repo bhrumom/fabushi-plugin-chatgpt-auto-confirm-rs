@@ -310,7 +310,7 @@ rounds and report parsing; conversation-first scoped approvals; paced same-card
 load retry; interruption/length-limit context handoff; pause/edit/cancel/delete,
 queue import/export, scan/switch/recovery logs and live dashboard.
 
-Validation covers 36 Rust tests and sanitized DOM contracts. Local desktop
+Validation covers 39 Rust tests and sanitized DOM contracts. Local desktop
 observations demonstrated two complete goal dispatches, matching conversation
 markers, both conversation switches and current-conversation authorization.
 These observations do not prove completion of the mobile goals, exhaustive
