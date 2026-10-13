@@ -310,7 +310,7 @@ rounds and report parsing; conversation-first scoped approvals; paced same-card
 load retry; interruption/length-limit context handoff; pause/edit/cancel/delete,
 queue import/export, scan/switch/recovery logs and live dashboard.
 
-Validation covers 44 Rust tests and sanitized DOM contracts. Local desktop
+Validation covers 48 Rust tests and sanitized DOM contracts. Local desktop
 observations demonstrated two complete goal dispatches, matching conversation
 markers, both conversation switches and current-conversation authorization.
 These observations do not prove completion of the mobile goals, exhaustive
@@ -324,3 +324,7 @@ of automatically replayed. The past-hour operation journal filters polls before
 limiting history, with successful card clicks and dispatch preflight recorded.
 
 Desktop implementation status: embedded workbench entry and shared Queue command bridge implemented, with DOM and runtime regression coverage; full source replacement remains governed by the migration ledger.
+
+Embedded UI parity implementation status: userscript-style launcher/layout, task and workspace controls, scoped preferences, private attachment bridge/previews, shared two-hour feed and one-hour operations, safe cleanup, import/export and hydration retention implemented. Desktop-only substitutions and evidence are tracked in desktop-tui-userscript-parity.md.
+
+Approval deduplication implementation status: persisted request receipts survive remount/restart/phase reset; request-targeted click rechecks the live card. Resolved and older-user-turn cards are excluded from pending observations and terminal guards. New request IDs remain actionable even when their text matches a resolved request. Missing identity uses bounded message/card metadata and a content digest, with the ambiguity documented in desktop-tui-userscript-parity.md. Native conversation identity changes do not invalidate a receipt.

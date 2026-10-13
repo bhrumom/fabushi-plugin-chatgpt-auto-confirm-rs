@@ -159,3 +159,33 @@ retry, avoiding an endless restart from the top of a long virtual list.
 ## Embedded desktop workbench entry
 
 The supervisor remounts a fixed Fabushi workbench entry in the desktop main renderer. Its isolated shadow DOM preserves native composer and authorization selectors. Opening the panel exposes durable task state, round, one-hour operation journal, goal/once dispatch with model and effort, per-task pause/resume/retry and verified conversation open, global supervision controls, and a user-requested native TUI launcher. Commands are allowlisted and applied by runtime to the existing Queue; the panel does not own supervision policy or create a second database. Text from goals, task titles and journals is rendered with textContent. Inputs survive snapshot refresh, and a failed add preserves the user's input. Reload/remount reinstalls the entry on the next supervisor cycle.
+
+## Desktop embedded UI parity (2026-10-13)
+
+Reference verified against userscript main `4ff2f386dc40ab0e542250c0710f05c77bf1f612`, `workbench-and-lifecycle.inc.js` mount/paint contract. Replace the simplified panel with the same purple bottom-right launcher, 880×700 split desk, 250px task sidebar, header actions, settings, scrollable task feed, notice and bottom composer. Preserve responsive dimensions and safe literal text rendering.
+
+Required acceptance matrix:
+- New-task selection, task details/status badges, logical workspace groups and drag/move controls. Browser new-tab ownership/restoration maps to durable groups within the user's explicitly required single desktop instance; never open unrelated chats or additional instances.
+- Goal editing; independent per-task pause/resume, cancellation, terminal/paused-only deletion, exact recorded conversation opening and non-replaying retry. Active dispatch remains identity-bound.
+- Once/goal mode, three existing model presets, five correctly labelled reasoning positions, new-task defaults distinct from selected-task future-round preferences, per-task/default auto approval and global approval control.
+- Native file picker, clipboard/drop files, duplicate selection handling, image/video previews, clear attachments, bounded private local save before Queue insertion and existing upload-before-send contract. Failed submissions preserve text/files; acknowledgement cannot clear newer input.
+- Selected goal/profile/attachments, retained two-hour task events and public reply/checkpoint, current round/phase/session id, authorization/recovery counts, last scan age and cooldown. A separate one-hour concrete operation feed remains available with task/all filtering.
+- Global pause/resume, safe renderer memory cleanup, storage/scan/worker metrics, same-database native TUI. Cleanup defers on native response/approval/draft or embedded unsaved text/files; no browser discard API required.
+- Queue JSON import/export, imports paused and attachments explicitly reselected rather than trusting imported host filesystem paths.
+- Retain the same UI node, drafts, files, handlers and preview URLs across hydration removals through a narrowly scoped mount observer. Reinstall after full renderer reload. Commands acknowledge individually, remain allowlisted, and use transactional Queue revisions.
+
+Verify meaningful DOM and runtime regressions, Rust gates, CI at exact HEAD and installed desktop entry metadata. Record any browser-only substitution explicitly; do not claim standalone userscript replacement from UI parity alone.
+
+The embedded UI refresh/command loop runs independently of native conversation polling under the same endpoint owner; its scoped lifetime aborts with that worker. Cancelled tasks resume without replacing a confirmed send identity. Deletion uses revision compare-and-swap, and failed attachment staging cleans temporary bytes.
+
+## Performance acceptance after installed lag report
+
+Closed workbench polling must not query journals, transfer full goals/replies or rebuild its hidden feed. Probe only mount/open/command metadata; load detail snapshots on opening or explicit refresh, bound task feed text and rows, and refresh visible data at a bounded interval. Pending commands must still process promptly. Narrow loading-error detection/retry to exact retry controls and their bounded ancestors instead of reading/cloning every p/span/div in long transcripts. Large unrelated nodes and quoted code must never be read by the loading fallback. Record native CPU/RSS evidence separately from fixture contracts; do not claim a naturally bloated renderer is fixed merely from test success.
+
+The embedded host mounts outside the React-owned body, directly on the document element. Its observer watches only that mount anchor and debounces repair; body portal changes cannot repeatedly trigger workbench repairs.
+
+User-message metadata fallback reads data descriptors only and skips reactive property getters. A public DOM marker takes precedence; marker extraction must not trigger the native application's expensive rich-message/image parsing selectors.
+
+## 重渲染授权卡的请求去重
+
+授权成功后，将当前会话和请求标识持久化为任务回执，跨轮次、恢复和进程重启保留。观察和执行共享请求选择器；执行前核对同一请求。已处理或明确 resolved 的卡片不阻挡最终答复及阶段推进，不再次点击。当前用户轮次之前的历史卡片不执行。优先使用 request/tool-call/message 身份；缺少原生身份时以当前用户轮次、卡片所在消息和仅卡片正文的摘要降级。降级情形下，同一消息内完全相同且无身份的两个请求不能可靠区分，应避免重复授权。未成功点击的请求不写回执。日志只记录动作，不记录授权参数正文。

@@ -41,8 +41,8 @@ impl TaskStore for Store {
         }
         Ok(true)
     }
-    fn delete(&self, _id: &str) -> Result<()> {
-        Ok(())
+    fn delete(&self, _id: &str, _expected: u64) -> Result<bool> {
+        Ok(true)
     }
     fn activity(&self, _id: &str, _since: u64, _limit: usize) -> Result<Vec<Activity>> {
         Ok(self.events.lock().unwrap().clone())
@@ -123,8 +123,8 @@ impl TaskDesktop for Desktop {
         }
         Ok(())
     }
-    async fn approve(&self) -> Result<bool> {
-        Ok(true)
+    async fn approve(&self, request: &str) -> Result<bool> {
+        Ok(!request.contains("unavailable"))
     }
     async fn stay_chat(&self) -> Result<bool> {
         self.dispatches.lock().unwrap().push("STAY_CHAT".into());
@@ -611,4 +611,62 @@ async fn owned_marker_remains_authoritative_when_sidebar_is_unmounted() {
     c.0.fetch_add(16_000, Ordering::SeqCst);
     tick(&s, &d, &c).await;
     assert_eq!(s.list().unwrap()[0].phase, Phase::Review);
+}
+
+#[tokio::test]
+async fn resolved_approval_survives_remount_restart_and_does_not_block_final_review() {
+    let mut o = terminal("finished work");
+    o.approval_present = true;
+    o.approval_actionable = true;
+    o.approval_fingerprint = "native-a|request-first".into();
+    o.page.waiting_for_approval = true;
+    let (s, d, c) = setup(bound_task(), o, false, false);
+    tick(&s, &d, &c).await;
+    let saved = s.list().unwrap().remove(0);
+    assert_eq!(saved.approvals, 1);
+    // SQLite stores the same JSON: preserve the receipt across process restart.
+    let restored: Task = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+    assert_eq!(restored.approval_receipts, vec!["native-a|request-first"]);
+    *s.tasks.lock().unwrap() = vec![restored];
+    // Card disappears and then reappears unchanged after the settle period.
+    d.observation.lock().unwrap().approval_present = false;
+    c.0.fetch_add(15_000, Ordering::SeqCst);
+    tick(&s, &d, &c).await;
+    d.observation.lock().unwrap().approval_present = true;
+    c.0.fetch_add(15_000, Ordering::SeqCst);
+    tick(&s, &d, &c).await;
+    let t = s.list().unwrap().remove(0);
+    assert_eq!(t.approvals, 1);
+    assert_eq!(t.phase, Phase::Review);
+    assert_eq!(t.state, TaskState::Queued);
+    assert_eq!(t.approval_receipts.len(), 1);
+}
+
+#[tokio::test]
+async fn new_request_is_not_suppressed_by_old_approval_receipt() {
+    let mut t = bound_task();
+    t.approval_receipts.push("native-a|old-request".into());
+    let mut o = terminal("working");
+    o.approval_present = true;
+    o.approval_actionable = true;
+    o.approval_fingerprint = "native-a|new-request".into();
+    let (s, d, c) = setup(t, o, false, false);
+    tick(&s, &d, &c).await;
+    let t = s.list().unwrap().remove(0);
+    assert_eq!(t.approvals, 1);
+    assert_eq!(t.approval_receipts.len(), 2);
+}
+
+#[tokio::test]
+async fn failed_approval_action_does_not_create_receipt() {
+    let mut o = terminal("working");
+    o.approval_present = true;
+    o.approval_actionable = true;
+    o.approval_fingerprint = "unavailable-request".into();
+    let (s, d, c) = setup(bound_task(), o, false, false);
+    tick(&s, &d, &c).await;
+    let t = s.list().unwrap().remove(0);
+    assert_eq!(t.approvals, 0);
+    assert!(t.approval_receipts.is_empty());
+    assert_eq!(t.state, TaskState::Approval);
 }

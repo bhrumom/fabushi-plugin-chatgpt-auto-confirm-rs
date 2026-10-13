@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+base64.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 fabushi-chatgpt-application = { path = "../application" }

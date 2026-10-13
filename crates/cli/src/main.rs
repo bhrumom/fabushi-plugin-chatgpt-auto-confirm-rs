@@ -41,6 +41,10 @@ enum Commands {
     },
     /// Restore the workbench entry in the supervised desktop window.
     Workbench,
+    /// Stop stalled renderer JS and detach the embedded panel without clearing input.
+    WorkbenchSuspend,
+    /// Sample renderer function timings without collecting variable values.
+    WorkbenchProfile,
     Tui,
     TuiSnapshot {
         #[arg(long)]
@@ -188,6 +192,18 @@ async fn main() -> Result<()> {
         Commands::OpenTask { id } => {
             fabushi_chatgpt_runtime::activate_task(&Queue::open(&database)?, &endpoint, &id).await?
         }
+        Commands::WorkbenchProfile => println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &fabushi_chatgpt_runtime::profile_desktop_renderer(&endpoint).await?
+            )?
+        ),
+        Commands::WorkbenchSuspend => println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &fabushi_chatgpt_runtime::suspend_stalled_workbench(&endpoint).await?
+            )?
+        ),
         Commands::Workbench => println!(
             "{}",
             serde_json::to_string_pretty(

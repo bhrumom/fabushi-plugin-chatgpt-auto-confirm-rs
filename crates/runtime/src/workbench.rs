@@ -152,13 +152,49 @@ impl Queue {
             .find(|t| t.id == id)
             .ok_or_else(|| anyhow::anyhow!("task not found: {id}"))?;
         if action == "delete" {
-            self.store.delete(id)?;
+            if !t.state.terminal() && t.state != TaskState::Paused {
+                bail!("请先暂停或取消任务，再删除");
+            }
+            if !self.store.delete(id, t.revision)? {
+                bail!("任务版本已变化，请重试");
+            }
+            let remaining = self.tasks()?;
+            let root = self
+                .path
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join("attachments");
+            for attachment in &t.attachments {
+                let path = PathBuf::from(&attachment.path);
+                if path.starts_with(&root)
+                    && !remaining
+                        .iter()
+                        .any(|other| other.attachments.iter().any(|a| a.path == attachment.path))
+                {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
             return Ok(());
+        }
+        if t.state == TaskState::Done
+            && matches!(
+                action,
+                "edit" | "model" | "effort" | "auto" | "attach" | "clear-attachments"
+            )
+        {
+            bail!("已完成任务不可修改，请创建新任务");
         }
         let expected = t.revision;
         match action {
             "pause" => t.pause(),
-            "resume" => t.resume(),
+            "resume" => {
+                t.resume();
+                let mut settings = self.settings()?;
+                if settings.stop_task == t.id {
+                    settings.stop_task.clear();
+                    self.set_settings(settings)?;
+                }
+            }
             "cancel" => t.state = TaskState::Cancelled,
             "edit" => t.edit_goal(value.ok_or_else(|| anyhow::anyhow!("goal required"))?),
             "model" => t.profile.model = value.ok_or_else(|| anyhow::anyhow!("model required"))?,
@@ -169,11 +205,26 @@ impl Queue {
                 }
                 t.profile.effort = effort;
             }
-            "auto" => t.auto_approve = !t.auto_approve,
+            "auto" => {
+                t.auto_approve = match value.as_deref() {
+                    Some("true") => true,
+                    Some("false") => false,
+                    None => !t.auto_approve,
+                    _ => bail!("auto must be true or false"),
+                }
+            }
             "workspace" => t.workspace = value.unwrap_or_else(|| "桌面工作区".into()),
-            "attach" => t
-                .attachments
-                .extend(self.copy_files(&[PathBuf::from(value.unwrap_or_default())])?),
+            "attach" => {
+                for file in self.copy_files(&[PathBuf::from(value.unwrap_or_default())])? {
+                    if !t
+                        .attachments
+                        .iter()
+                        .any(|a| a.sha256 == file.sha256 && a.name == file.name)
+                    {
+                        t.attachments.push(file);
+                    }
+                }
+            }
             "clear-attachments" => t.attachments.clear(),
             "retry" => {
                 if t.state == TaskState::Paused {
@@ -271,6 +322,15 @@ pub async fn supervise(queue: Queue, endpoint: String, once: bool) -> Result<()>
     if !once && !queue.store.lease(&endpoint, &owner, wall_ms(), 120_000)? {
         return Ok(());
     }
+    let _panel = if once {
+        None
+    } else {
+        Some(crate::desktop_panel::spawn_panel_loop(
+            queue.clone(),
+            endpoint.clone(),
+            owner.clone(),
+        ))
+    };
     let heartbeat_queue = queue.clone();
     let heartbeat_endpoint = endpoint.clone();
     let heartbeat_owner = owner.clone();
@@ -299,7 +359,9 @@ pub async fn supervise(queue: Queue, endpoint: String, once: bool) -> Result<()>
         }
         let result_future = async {
             let cdp = ChatGptCdp::connect_desktop(&endpoint).await?;
-            crate::desktop_panel::sync_panel(&queue, &cdp).await?;
+            if once {
+                crate::desktop_panel::sync_panel(&queue, &cdp).await?;
+            }
             let settings = queue.settings()?;
             if !settings.stop_task.is_empty() {
                 if let Some(task) = queue
@@ -339,6 +401,7 @@ pub async fn supervise(queue: Queue, endpoint: String, once: bool) -> Result<()>
                 if !observation.page.response_in_flight()
                     && !observation.approval_present
                     && observation.page.composer_text.trim().is_empty()
+                    && cdp.surface().await?["workbench"]["unsaved"] != true
                 {
                     cdp.reload().await?;
                     let mut updated = queue.settings()?;

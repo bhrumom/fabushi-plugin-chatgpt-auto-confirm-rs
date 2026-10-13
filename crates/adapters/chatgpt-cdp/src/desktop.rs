@@ -6,8 +6,51 @@ use fabushi_chatgpt_domain::*;
 use serde_json::{Value, json};
 
 impl ChatGptCdp {
+    pub async fn profile_renderer(&self) -> Result<Value> {
+        use std::collections::HashMap;
+        self.command("Profiler.enable", serde_json::json!({}))
+            .await?;
+        self.command("Profiler.start", serde_json::json!({}))
+            .await?;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let result = self.command("Profiler.stop", serde_json::json!({})).await?;
+        let mut counts = HashMap::<u64, usize>::new();
+        if let Some(samples) = result["profile"]["samples"].as_array() {
+            for sample in samples {
+                if let Some(id) = sample.as_u64() {
+                    *counts.entry(id).or_default() += 1;
+                }
+            }
+        }
+        let mut rows = vec![];
+        if let Some(nodes) = result["profile"]["nodes"].as_array() {
+            for node in nodes {
+                let id = node["id"].as_u64().unwrap_or(0);
+                let count = counts.get(&id).copied().unwrap_or(0);
+                if count > 0 {
+                    rows.push((count,serde_json::json!({"samples":count,"function":node["callFrame"]["functionName"],"script":node["callFrame"]["scriptId"],"line":node["callFrame"]["lineNumber"],"url":node["callFrame"]["url"].as_str().unwrap_or("").split('?').next().unwrap_or("")})));
+                }
+            }
+        }
+        rows.sort_by_key(|row| std::cmp::Reverse(row.0));
+        Ok(serde_json::json!(
+            rows.into_iter()
+                .take(15)
+                .map(|row| row.1)
+                .collect::<Vec<_>>()
+        ))
+    }
+    pub async fn suspend_stalled_workbench(&self) -> Result<Value> {
+        self.command("Runtime.terminateExecution", serde_json::json!({}))
+            .await?;
+        self.evaluate(r#"(()=>{const b=window.__fabushiWorkbench;if(b){b.observer?.disconnect();clearInterval(b.timer);clearTimeout(b.mountRepairTimer);b.host.remove();}const composer=document.querySelector('#prompt-textarea,textarea,[contenteditable="true"]');return {suspended:!!b,unsaved:!!(b?.root?.getElementById('goal')?.value.trim()||b?.files?.length),native_draft:!!(composer?.value||composer?.textContent||'').trim()};})()"#).await
+    }
+    pub async fn workbench_probe(&self) -> Result<Value> {
+        self.evaluate(r#"(()=>{const b=window.__fabushiWorkbench;const composer=document.querySelector('#prompt-textarea,textarea,[contenteditable="true"]');return {version:b?.version||0,task_count:b?.snapshot?.tasks?.length||0,rendered_rows:b?.root?.querySelectorAll(".task-row").length||0,mounted:!!b?.host?.isConnected,open:!!b?.root?.getElementById('panel')?.classList.contains('open'),pending:!!b?.commands?.length,unsaved:!!(b?.root?.getElementById('goal')?.value.trim()||b?.files?.length),native_draft:!!(composer?.value||composer?.textContent||'').trim()};})()"#).await
+    }
     pub async fn workbench_panel(&self, snapshot: &Value) -> Result<Value> {
         let script = include_str!("workbench-panel.js")
+            .replace("__PANEL_CSS__", include_str!("workbench-panel.css"))
             .replace("__SNAPSHOT_JSON__", &serde_json::to_string(snapshot)?);
         self.evaluate(&script).await
     }
@@ -15,10 +58,20 @@ impl ChatGptCdp {
         self.evaluate(CONVERSATIONS_SCRIPT).await
     }
     pub async fn task_observation(&self, token: &str) -> Result<TaskObservation> {
-        let context = CONTEXT_SCRIPT.replace(
-            "__TOKEN__",
-            &serde_json::to_string(&format!("[Fabushi:{token}]"))?,
-        );
+        self.pending_task_observation(token, &[]).await
+    }
+    async fn pending_task_observation(
+        &self,
+        token: &str,
+        receipts: &[String],
+    ) -> Result<TaskObservation> {
+        let context = CONTEXT_SCRIPT
+            .replace("__APPROVAL_SCAN__", include_str!("approval-scan.js"))
+            .replace("__APPROVAL_RECEIPTS__", &serde_json::to_string(receipts)?)
+            .replace(
+                "__TOKEN__",
+                &serde_json::to_string(&format!("[Fabushi:{token}]"))?,
+            );
         let script = format!(
             "(() => {{ const page = {}; const context = {}; return {{ page, ...context }}; }})()",
             super::SNAPSHOT_SCRIPT,
@@ -126,7 +179,12 @@ impl ChatGptCdp {
         Ok(self.evaluate(RETRY_LOAD_SCRIPT).await?["clicked"] == true)
     }
     pub async fn approve_current_session(&self) -> Result<Value> {
-        self.evaluate(SCOPED_APPROVE_SCRIPT).await
+        self.evaluate(
+            &SCOPED_APPROVE_SCRIPT
+                .replace("__APPROVAL_SCAN__", include_str!("approval-scan.js"))
+                .replace("__APPROVAL_TARGET__", r#""""#),
+        )
+        .await
     }
     pub async fn dismiss_safe_modals(&self) -> Result<bool> {
         Ok(self.evaluate(SAFE_MODALS_SCRIPT).await?["clicked"] == true)
@@ -189,8 +247,14 @@ impl TaskDesktop for ChatGptCdp {
     async fn dispatch(&self, prompt: &str) -> Result<()> {
         self.send_prompt(prompt).await
     }
-    async fn approve(&self) -> Result<bool> {
-        Ok(self.evaluate(SCOPED_APPROVE_SCRIPT).await?["clicked"] == true)
+    async fn observe_pending(&self, token: &str, receipts: &[String]) -> Result<TaskObservation> {
+        self.pending_task_observation(token, receipts).await
+    }
+    async fn approve(&self, request: &str) -> Result<bool> {
+        let script = SCOPED_APPROVE_SCRIPT
+            .replace("__APPROVAL_SCAN__", include_str!("approval-scan.js"))
+            .replace("__APPROVAL_TARGET__", &serde_json::to_string(request)?);
+        Ok(self.evaluate(&script).await?["clicked"] == true)
     }
     async fn stay_chat(&self) -> Result<bool> {
         Ok(self.evaluate(STAY_CHAT_SCRIPT).await?["clicked"] == true)
@@ -230,14 +294,18 @@ const CONTEXT_SCRIPT: &str = r#"
   const userNodes=[...main.querySelectorAll('[data-message-author-role="user"], [data-content-search-unit-key$=":user"]')];
   const users=userNodes.length?userNodes:[...main.querySelectorAll('[data-user-message-bubble]')];
   const last=users.at(-1);
+  const data=(object,key)=>{const descriptor=Object.getOwnPropertyDescriptor(object || {},key);return descriptor && 'value' in descriptor?descriptor.value:undefined;};
   const userText=node=>{
     if(!node)return '';
-    const texts=[node.textContent || node.innerText || ''];
-    const add=value=>{if(typeof value==='string')texts.push(value);else if(Array.isArray(value)){for(const part of value){if(typeof part==='string')texts.push(part);else if(typeof part?.text==='string')texts.push(part.text);}}};
-    const key=Object.keys(node).find(k=>k.startsWith('__reactFiber$'));let fiber=key?node[key]:null;
-    for(let i=0;fiber && i<10;i++,fiber=fiber.return){
-      const p=fiber.memoizedProps || {};
-      add(p.text);add(p.content);add(p.message?.text);add(p.message?.content);add(p.message?.content?.parts);add(p.message?.parts);add(p.userMessage?.text);add(p.userMessage?.content);
+    const direct=node.textContent || '';
+    if(/\[Fabushi:[^\]]+\]/.test(direct))return direct;
+    const texts=[direct];
+    const add=value=>{if(typeof value==='string')texts.push(value);else if(Array.isArray(value)){for(const part of value){if(typeof part==='string')texts.push(part);else if(typeof data(part,'text')==='string')texts.push(data(part,'text'));}}};
+    const key=Object.keys(node).find(k=>k.startsWith('__reactFiber$'));let fiber=key?data(node,key):null;
+    for(let i=0;fiber && i<10;i++,fiber=data(fiber,'return')){
+      const props=data(fiber,'memoizedProps') || {};
+      const message=data(props,'message'),content=data(message,'content'),user=data(props,'userMessage');
+      add(data(props,'text'));add(data(props,'content'));add(data(message,'text'));add(content);add(data(content,'parts'));add(data(message,'parts'));add(data(user,'text'));add(data(user,'content'));
     }
     return texts.sort((a,b)=>b.length-a.length)[0] || '';
   };
@@ -263,34 +331,36 @@ const CONTEXT_SCRIPT: &str = r#"
   // Structural metadata is primary. Text fallback requires card topology.
   const excluded='[data-message-author-role="user"], [data-content-search-unit-key$=":user"], blockquote, pre, code, nav, aside';
   const approvalLabel=b=>{const c=b.cloneNode(true);c.querySelectorAll('kbd, [aria-hidden="true"]').forEach(n=>n.remove());return normalize(b.getAttribute('aria-label') || c.textContent).replace(/\s+(?:Esc|Enter|↵|⏎|⌄|▾)$/i,'').trim();};
-  const decisionParents=[...document.querySelectorAll('button[aria-haspopup="menu"]')].flatMap(b=>{const a=[];for(let e=b.parentElement,n=0;e && n<6 && !e.matches('main, body');e=e.parentElement,n++)a.push(e);return a;});
-  const candidates=[...decisionParents,...document.querySelectorAll('[data-testid*="approval"], [data-testid*="authorization"], [data-approval-card], [data-tool-approval], [role="dialog"], [role="group"]')].filter(e=>visible(e) && !e.closest(excluded));
-  const cards=candidates.filter(e=> {
-    const metadata=[...e.attributes].some(a=>/approval|authorization|permission/i.test(a.name+' '+a.value));
-    const labels=[...e.querySelectorAll('button, [role="button"]')].filter(visible).map(approvalLabel);
-    return metadata || (labels.some(l=>/^(allow|approve|允许|允许一次|allow once|approve once)$/i.test(l)) && labels.some(l=>/^(reject|deny|拒绝|拒绝授权)$/i.test(l)));
-  });
-  const exact=[...document.querySelectorAll('button, [role="button"]')].filter(b=>visible(b) && !b.disabled && !b.closest(excluded)).find(b=>/^(allow once|允许一次|approve once|仅允许本次|允许本次|允许本次会话|allow(?: .+)? for this session|allow(?: .+)? for this conversation)$/i.test(approvalLabel(b)));
-  const cardText=cards.map(e=>normalize(e.innerText)).join(' ').slice(0,1000);
+  __APPROVAL_SCAN__
+  const receipts=__APPROVAL_RECEIPTS__;
+  const pending=approvalScan().filter(c=>!c.resolved && !receipts.includes(c.key));
+  const approval=pending[0];
+  page.waiting_for_approval=pending.length>0;
   const statusNodes=[...main.querySelectorAll('[role="alert"], [role="status"], [data-testid*="error"]')].filter(e=>visible(e) && !e.closest('blockquote, pre, code, [data-content-search-unit-key$=":user"]'));
   const statusText=statusNodes.map(e=>normalize(e.innerText)).join(' ');
   const latest=[...main.querySelectorAll('[data-content-search-unit-key$=":assistant"], [data-message-author-role="assistant"], [data-local-conversation-final-assistant]')].at(-1);
-  const latestProjection=latest?.cloneNode(true);latestProjection?.querySelectorAll('blockquote, pre, code').forEach(e=>e.remove());
-  const latestLines=(latestProjection?.textContent || '').split('\n').map(normalize);
   const interruption=/^(?:connection (?:was )?(?:interrupted|lost)|连接(?:已)?中断|连接断开)(?:[，。,.：:]?\s*(?:waiting for (?:the )?(?:complete|full) answer|正在等待完整(?:答复|回复)))?[。.!]?$/i;
   const turn=latest?.closest('article, [data-content-search-turn-key]') || latest;
-  const interruptionNodes=[...(turn || main).querySelectorAll('p, span, div')].filter(e=>visible(e) && !e.closest('blockquote, pre, code, [data-content-search-unit-key$=":user"]') && e.children.length===0);
-  const interrupted=latestLines.some(l=>interruption.test(l)) || interruptionNodes.some(e=>interruption.test(normalize(e.innerText))) || /connection (?:was )?(?:interrupted|lost)|连接(?:已)?中断|连接断开/i.test(statusText);
+  const interruptionNodes=[...(turn || main).querySelectorAll('p, span, div')].filter(e=>e.childElementCount===0 && !e.closest('blockquote, pre, code, [data-content-search-unit-key$=":user"]'));
+  const paragraphs=[...(turn || main).querySelectorAll('p, [role="alert"], [role="status"]')].filter(e=>!e.closest('blockquote, pre, code, [data-content-search-unit-key$=":user"]') && !e.querySelector('blockquote,pre,code'));
+  const latestLines=[...paragraphs,...interruptionNodes].map(e=>e.textContent || '').filter(t=>t.length<500).map(normalize);
+  const interrupted=latestLines.some(l=>interruption.test(l)) || /connection (?:was )?(?:interrupted|lost)|连接(?:已)?中断|连接断开/i.test(statusText);
   const publicTurns=[...main.querySelectorAll('[data-content-search-unit-key$=":assistant"], [data-message-author-role="assistant"]')].filter(visible).slice(-3);
   const visible_work=publicTurns.map(e=>(e.closest('article, [data-content-search-turn-key]') || e).innerText || '').join('\n\n').slice(-64000);
   const length_limit=/reached.*(?:conversation|chat).*limit|此对话.*长度上限|达到.*对话.*长度上限/i.test(statusText) || latestLines.some(l=>/^(you.*reached.*(?:conversation|chat).*limit.*|你.*(?:达到|已达到).*对话.*长度上限.*)$/i.test(l));
   const loadLabel=e=>{const c=e.cloneNode(true);c.querySelectorAll('button, [role="button"], a').forEach(n=>n.remove());return normalize(c.textContent);};
   const loadError=/^(?:unable to load (?:this )?(?:ChatGPT )?conversation|无法加载.*(?:会话|对话))[。.!]?$/i;
-  const load_failed=/unable to load (?:this )?(?:ChatGPT )?conversation|无法加载.*(?:会话|对话)/i.test(statusText) || [...document.querySelectorAll('p, span, div')].some(e=>visible(e) && !e.closest(excluded) && !e.querySelector(excluded) && normalize(e.innerText).length<180 && loadError.test(loadLabel(e)));
+  const retries=[...document.querySelectorAll('button, [role="button"], a')].filter(e=>/^(?:重试|重载|重新加载|retry|reload|try again)$/i.test(normalize(e.getAttribute('aria-label') || e.textContent)) && visible(e) && !e.closest(excluded));
+  const load_failed=/unable to load (?:this )?(?:ChatGPT )?conversation|无法加载.*(?:会话|对话)/i.test(statusText) || retries.some(button=>{
+    for(let card=button.parentElement,n=0;card && n<5 && !card.matches('main,body');card=card.parentElement,n++){
+      const text=card.textContent || '';
+      if(text.length<250 && !card.closest(excluded) && !card.querySelector(excluded) && loadError.test(loadLabel(card)))return true;
+    }return false;
+  });
 
   const stayButtons=[...document.querySelectorAll('button, [role="button"]')].filter(e=>visible(e) && !e.disabled && !e.closest(excluded) && /^(?:留在聊天(?:模式|中)|stay in chat)(?:\s*\d+.*)?$/i.test(normalize(e.innerText || e.getAttribute('aria-label'))));
   const offer=stayButtons.find(button=>{for(let e=button.parentElement,n=0;e && n<7 && !e.matches('main, body');e=e.parentElement,n++){if(/在\s*ChatGPT\s*Work\s*中继续|Continue in ChatGPT Work/i.test(e.innerText) && /在\s*Work\s*中继续|Continue in Work/i.test(e.innerText))return true;}return false;});
-  return {binding:{identity,sidebar_id:sidebarId,title:document.title.slice(0,160)},marker_present:lastText.includes(marker),user_text_chars:fullUserText.length,observed_markers:[...lastText.matchAll(/\[Fabushi:([^\]]+)\]/g)].map(m=>m[1]),foreign_marker:/\[Fabushi:[^\]]+\]/.test(lastText) && !lastText.includes(marker),interrupted,visible_work,length_limit,load_failed,approval_present:cards.length>0 || !!exact,approval_actionable:!!exact || cards.some(e=>e.querySelector('button[aria-haspopup="menu"]:not(:disabled)')),approval_fingerprint:identity+'|'+cardText,chat_work_offer:!!offer,empty_final:!!latest && page.response_actions_complete && page.response_action_turn_bound_to_last && !page.stop_available && !page.awaiting_assistant && !normalize(latest.querySelector('[data-markdown-text-style="assistant-message"], .markdown, [data-selected-text-overlay-target]')?.innerText || (/^(?:ChatGPT.*?[：:]\s*)?(?:Thinking|Thought|思考|正在思考)/i.test(normalize(latest.innerText))?'':latest.innerText))};
+  return {binding:{identity,sidebar_id:sidebarId,title:document.title.slice(0,160)},marker_present:lastText.includes(marker),user_text_chars:fullUserText.length,observed_markers:[...lastText.matchAll(/\[Fabushi:([^\]]+)\]/g)].map(m=>m[1]),foreign_marker:/\[Fabushi:[^\]]+\]/.test(lastText) && !lastText.includes(marker),interrupted,visible_work,length_limit,load_failed,approval_present:!!approval,approval_actionable:!!approval?.actionable,approval_fingerprint:approval ? approval.key : '',chat_work_offer:!!offer,empty_final:!!latest && page.response_actions_complete && page.response_action_turn_bound_to_last && !page.stop_available && !page.awaiting_assistant && !normalize(latest.querySelector('[data-markdown-text-style="assistant-message"], .markdown, [data-selected-text-overlay-target]')?.innerText || (/^(?:ChatGPT.*?[：:]\s*)?(?:Thinking|Thought|思考|正在思考)/i.test(normalize(latest.innerText))?'':latest.innerText))};
 })()
 "#;
 const SWITCH_SCRIPT: &str = r#"
@@ -446,18 +516,13 @@ const SCOPED_APPROVE_SCRIPT: &str = r#"
   const excluded='[data-message-author-role="user"], [data-content-search-unit-key$=":user"], blockquote, pre, code, nav, aside';
   const buttons=()=>[...document.querySelectorAll('button, [role="button"], [role="menuitem"]')].filter(e=>visible(e) && !e.disabled && e.getAttribute('aria-disabled')!=='true' && !e.closest(excluded));
   const choose=()=>buttons().find(b=>session.test(label(b)));
-  const existing=choose();if(existing){existing.click();return {clicked:true,scope:'conversation'};}
-  // Native cards need not have a role. Require both decision controls within
-  // the same small ancestor, and ignore keyboard shortcut child text.
-  let card;
-  for(const button of buttons().filter(b=>once.test(label(b)) || /^(?:allow|approve|允许)$/i.test(label(b)))) {
-    for(let e=button.parentElement,n=0;e && n<6;n++,e=e.parentElement){
-      if(e.matches('main, body') || e.closest(excluded))break;
-      const labels=[...e.querySelectorAll('button, [role="button"]')].filter(visible).map(label);
-      if(labels.some(l=>/^(?:reject|deny|拒绝|拒绝授权)$/i.test(l))){card=e;break;}
-    }
-    if(card)break;
-  }
+  __APPROVAL_SCAN__
+  const target=__APPROVAL_TARGET__;
+  const selected=approvalScan().find(c=>!c.resolved && (!target || target===c.key));
+  const card=selected?.card;
+  if(!card)return {clicked:false,reason:'request-no-longer-pending'};
+  const existing=[...card.querySelectorAll('button,[role="button"]')].find(b=>visible(b) && !b.disabled && session.test(label(b)));
+  if(existing){existing.click();return {clicked:true,scope:'conversation'};}
   const split=card?.querySelector('button[aria-haspopup="menu"]:not(:disabled), [role="button"][aria-haspopup="menu"]');
   if(split){
     if(split.getAttribute('aria-expanded')!=='true'){
@@ -465,10 +530,12 @@ const SCOPED_APPROVE_SCRIPT: &str = r#"
       if(split.getAttribute('aria-expanded')!=='true')split.click();
     }
     await new Promise(r=>setTimeout(r,700));
+    if(!approvalScan().some(c=>!c.resolved && c.key===selected.key))return {clicked:false,reason:'request-changed-during-menu'};
     const choice=choose();if(choice){choice.click();return {clicked:true,scope:'conversation'};}
     document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
   }
-  const fallback=buttons().find(b=>once.test(label(b)));
+  if(!card.isConnected || !approvalScan().some(c=>!c.resolved && c.key===selected.key))return {clicked:false,reason:'request-no-longer-pending'};
+  const fallback=[...card.querySelectorAll('button,[role="button"]')].find(b=>visible(b) && !b.disabled && once.test(label(b)));
   if(fallback){fallback.click();return {clicked:true,scope:'once'};}
   return {clicked:false,reason:'no-matching-approval-action',card_found:!!card,split_found:!!split};
 })()
@@ -529,10 +596,11 @@ const RETRY_LOAD_SCRIPT: &str = r#"
   const excluded='[data-message-author-role="user"], [data-content-search-unit-key$=":user"], blockquote, pre, code, nav, aside';
   const errorLabel=e=>{const c=e.cloneNode(true);c.querySelectorAll('button, [role="button"], a').forEach(n=>n.remove());return norm(c.textContent);};
   const error=/^(?:unable to load (?:this )?(?:ChatGPT )?conversation|无法加载.*(?:会话|对话))[。.!]?$/i;
-  for(const text of [...document.querySelectorAll('p, span, div')].filter(e=>visible(e) && !e.closest(excluded) && !e.querySelector(excluded) && norm(e.innerText).length<180 && error.test(errorLabel(e)))) {
-    for(let card=text,n=0;card && n<4 && !card.matches('main, body');card=card.parentElement,n++) {
-      const retry=[...card.querySelectorAll('button, [role="button"], a')].find(e=>visible(e) && !e.disabled && e.getAttribute('aria-disabled')!=='true' && /^(?:重试|重载|重新加载|retry|reload|try again)$/i.test(norm(e.innerText || e.getAttribute('aria-label'))));
-      if(retry){retry.click();return {clicked:true};}
+  const retries=[...document.querySelectorAll('button, [role="button"], a')].filter(e=>/^(?:重试|重载|重新加载|retry|reload|try again)$/i.test(norm(e.getAttribute('aria-label') || e.textContent)) && visible(e) && !e.disabled && e.getAttribute('aria-disabled')!=='true' && !e.closest(excluded));
+  for(const retry of retries){
+    for(let card=retry.parentElement,n=0;card && n<5 && !card.matches('main,body');card=card.parentElement,n++){
+      const text=card.textContent || '';
+      if(text.length<250 && !card.closest(excluded) && !card.querySelector(excluded) && error.test(errorLabel(card))){retry.click();return {clicked:true};}
     }
   }
   return {clicked:false};
