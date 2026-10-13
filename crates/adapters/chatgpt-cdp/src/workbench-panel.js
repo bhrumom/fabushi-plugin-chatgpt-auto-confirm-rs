@@ -4,13 +4,13 @@
   const labels={queued:'排队',preparing:'准备',sending:'发送中',generating:'生成中',approval:'等待授权',waiting:'等待',reviewing:'验收中',cooldown:'冷却',recovering:'恢复中',paused:'已暂停',cancelled:'已取消',done:'已完成'};
   const terminal=t=>t && ['done','cancelled'].includes(t.state);
   const removable=t=>t && (terminal(t)||t.state==='paused');
-  if (!b || b.version !== 2) {
-    const previous={draft:b?.root?.getElementById('goal')?.value||'',title:b?.root?.getElementById('title')?.value||'',commands:b?.commands||[],open:b?.root?.getElementById('panel')?.style.display==='block'};
-    if(b){clearInterval(b.timer);b.observer?.disconnect();b.host.remove();}
+  if (!b || b.version !== 4) {
+    const previous={draft:b?.root?.getElementById('goal')?.value||'',title:b?.root?.getElementById('title')?.value||'',commands:b?.commands||[],files:b?.files||[],pending:b?.pending||new Map(),pendingGoal:b?.pendingGoal||'',pendingFiles:b?.pendingFiles||[],snapshot:b?.snapshot,open:b?.root?.getElementById('panel')?.style.display==='block'};
+    if(b){clearInterval(b.timer);clearTimeout(b.mountRepairTimer);b.observer?.disconnect();for(const url of b.urls||[])URL.revokeObjectURL(url);b.host.remove();}
     const host=document.createElement('div');host.id='fabushi-workbench-entry';
     const root=host.attachShadow({mode:'open'});
     root.innerHTML=`<style>__PANEL_CSS__</style><section id="panel" class="desk" aria-label="Fabushi 任务工作台"><aside><h3>Fabushi</h3><div id="tasks"></div><div id="workspace-editor" class="workspace-editor"><input id="workspace-name" placeholder="新工作区名称"><button id="workspace-save">移动</button></div><small class="drop-hint">拖动任务分组；所有工作区共用一个桌面实例</small></aside><div class="chat"><header><strong id="heading">任务工作台</strong><button id="edit">编辑目标</button><button id="settings-toggle">设置</button><button id="pause-current">暂停当前任务</button><button id="close" aria-label="收起任务工作台">×</button></header><div id="settings" class="settings"><label><input id="global-auto" type="checkbox">在受控桌面会话中自动处理授权卡</label><small>仅选择允许本次会话或允许一次；不会选择永久授权。</small><div class="tools"><button data-global="pause_all">暂停全部任务</button><button data-global="resume_all">继续全部任务</button><button id="cleanup" class="memory-cleanup">清理当前桌面内存</button><button data-global="open_tui">打开完整 TUI</button><button data-global="export">导出任务</button><button id="import">导入任务</button><input id="import-file" type="file" accept=".json,application/json" hidden></div><small id="memory-status" class="memory-status"></small><small>安全重载会保留数据库和会话归属；回复、授权、未保存文字或附件存在时等待。浏览器标签页卸载在单桌面实例中由安全重载替代。</small></div><div id="feed" class="feed" role="log" aria-live="polite"></div><div id="health" class="notice"></div><div id="notice" class="notice"></div><form id="compose" class="compose"><input id="title" type="text" placeholder="任务名称（可选）" maxlength="200"><textarea id="goal" aria-label="任务目标" placeholder="输入任务目标，可直接粘贴图片或视频…"></textarea><div class="attachment-box"><label class="attachment-picker"><input id="file-input" type="file" multiple aria-label="添加任务附件"><span>＋ 添加图片 / 视频 / 文件</span></label><button id="clear-files" type="button">清空附件</button><div id="files" class="attachment-list"></div><small class="attachment-note">附件私密保存在本机；完成上传后再发送目标。单文件 20 MiB，合计 50 MiB。</small></div><div class="tools"><select id="mode" aria-label="任务模式"><option value="once">单次任务</option><option value="goal">持续目标</option></select><select id="model" aria-label="ChatGPT 模型"><option>GPT-5.6 Sol</option><option>GPT-6</option><option>GPT-5.5</option></select><select id="effort" aria-label="ChatGPT 思考强度"><option value="0">即时</option><option value="1">中</option><option value="2">高</option><option value="3">极高</option><option value="4">Pro（第 5 档）</option></select><label><input id="auto" type="checkbox">本次会话自动授权</label><button id="send" class="send" type="submit" aria-label="发送任务">↑</button></div><small id="scope-hint"></small><div class="attachment-actions"><button id="attach-existing" type="button">添加到当前任务</button><button id="cancel-edit" type="button" hidden>取消编辑</button></div></form></div></section><button id="entry" class="launch" aria-label="打开 Fabushi 脚本工作台">⚡ Fabushi 脚本</button>`;
-    b={version:2,host,root,commands:previous.commands,next:1,selected:snapshot.settings?.ui_selected_task||'',editing:'',files:[],urls:[],pending:new Map(),lastNotice:'',profileKey:'',snapshot,updated:Date.now()};
+    b={version:4,host,root,commands:previous.commands,next:1,selected:snapshot.settings?.ui_selected_task||'',editing:'',files:previous.files,urls:[],pending:previous.pending,pendingGoal:previous.pendingGoal,pendingFiles:previous.pendingFiles,lastNotice:'',profileKey:'',snapshot:previous.snapshot||snapshot,updated:Date.now()};
     window.__fabushiWorkbench=b;
     const q=id=>root.getElementById(id);
     const node=(tag,text='',className='')=>{const n=document.createElement(tag);n.textContent=text;n.className=className;return n;};
@@ -24,7 +24,7 @@
     };b.enqueue=enqueue;
     const selected=()=>b.snapshot.tasks.find(t=>t.id===b.selected);
     const show=open=>{q('panel').classList.toggle('open',open);q('panel').style.display=open?'flex':'none';};
-    q('entry').onclick=()=>show(!q('panel').classList.contains('open'));q('close').onclick=()=>show(false);show(previous.open);
+    q('entry').onclick=()=>{const open=!q('panel').classList.contains('open');show(open);if(open){b.enqueue({action:'refresh'});b.render();}};q('close').onclick=()=>show(false);show(previous.open);
     q('settings-toggle').onclick=()=>q('settings').classList.toggle('open');
     root.querySelectorAll('[data-global]').forEach(button=>button.onclick=()=>enqueue({action:button.dataset.global}));
     q('global-auto').onchange=()=>enqueue({action:'global_auto',auto:q('global-auto').checked});
@@ -74,8 +74,8 @@
     b.newWorkspace=id=>{b.moveTask=id;q('workspace-editor').classList.add('open');q('workspace-name').focus();};
     q('workspace-save').onclick=()=>{const value=q('workspace-name').value.trim();if(value&&b.moveTask){enqueue({action:'workspace',id:b.moveTask,value});q('workspace-editor').classList.remove('open');}};
     q('goal').value=previous.draft;q('title').value=previous.title;
-    const repair=()=>{b.observer.disconnect();const parent=document.body||document.documentElement;if(host.parentNode!==parent)parent.append(host);for(const anchor of new Set([document,document.documentElement,document.body].filter(Boolean)))b.observer.observe(anchor,{childList:true});};
-    b.observer=new MutationObserver(repair);repair();
+    const repair=()=>{b.repairs=(b.repairs||0)+1;b.observer.disconnect();const parent=document.documentElement;if(host.parentNode!==parent)parent.append(host);for(const anchor of [document.documentElement])b.observer.observe(anchor,{childList:true});};
+    b.observer=new MutationObserver(()=>{if(host.parentNode===document.documentElement && host.isConnected)return;if(b.mountRepairTimer)return;b.mountRepairTimer=setTimeout(()=>{b.mountRepairTimer=0;repair();},250);});repair();
     b.timer=setInterval(()=>{if(Date.now()-b.updated>30000)q('health').textContent='监督器暂未更新；保留任务、输入与附件，等待恢复';},5000);
   }
   b.render=()=>{
@@ -90,10 +90,11 @@
     b.pending.delete(n.request_id);
     if(['add','edit','attach'].includes(n.action)){
       q('send').disabled=false;
-      if(n.ok){if(n.action!=='attach'&&q('goal').value===b.pendingGoal)q('goal').value='';if(n.action!=='edit'&&b.files.length===b.pendingFiles?.length&&b.files.every((f,i)=>f===b.pendingFiles[i])){b.files=[];b.paintFiles();}if(n.action==='add'){b.selected=n.result?.task_id||'';q('title').value='';}if(n.action==='edit'){b.editing='';q('cancel-edit').hidden=true;}}
+      if(n.ok){if(n.action!=='attach'&&q('goal').value===b.pendingGoal)q('goal').value='';if(n.action!=='edit'&&b.files.length===b.pendingFiles?.length&&b.files.every((f,i)=>f===b.pendingFiles[i])){b.files=[];b.paintFiles();}if(n.action==='add'){b.selected=n.result?.task_id||'';q('title').value='';}if(n.action==='edit'){b.editing='';q('cancel-edit').hidden=true;}}b.pendingFiles=[];b.pendingGoal='';
     }
     if(n.ok&&n.result?.download){const blob=new Blob([JSON.stringify(n.result.download,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download='fabushi-tasks.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
   }
+  if(!q('panel').classList.contains('open'))return;
   const sidebarSig=JSON.stringify(tasks.map(t=>[t.id,t.title,t.state,t.round,t.phase,t.workspace,t.last_error,t.profile]));
   if(b.sidebarSig!==sidebarSig||b.sidebarSelection!==b.selected){
     b.sidebarSig=sidebarSig;b.sidebarSelection=b.selected;q('tasks').replaceChildren();
@@ -120,6 +121,8 @@
   q('memory-status').textContent=`脚本堆 ${heap?(heap/1024/1024).toFixed(1)+' MiB':'指标不可用'} · 数据库 ${(Number(snapshot.storage_bytes||0)/1024/1024).toFixed(2)} MiB · 扫描 ${snapshot.scans||0} 次 · 最近扫描 ${settings.last_scan_ms||0} ms · 确认切换 ${settings.switches||0} 次`;
   const age=task?.last_scan_at?Math.max(0,Math.round((snapshot.now-task.last_scan_at)/1000))+' 秒前':'未扫描';const cool=task?.cooldown_until>snapshot.now?' · '+Math.ceil((task.cooldown_until-snapshot.now)/1000)+' 秒后重试':'';
   q('health').textContent=`单桌面实例 · ${snapshot.running?'监督中':'已暂停'} · ${snapshot.worker?'工作进程在线':'等待工作进程'} · ${task?'第 '+task.round+' 轮 '+(task.phase==='review'?'验收':'执行')+' · 上次扫描 '+age+cool:tasks.length+' 个任务'}${task?.last_error?' · 恢复原因：'+task.last_error:''}`;
+  if(!q('panel').classList.contains('open'))return;
+  if(snapshot.details===false){if(!q('feed').children.length)q('feed').append(node('p','正在加载任务详情…','muted'));return;}
   const feedSig=JSON.stringify([b.selected,task?.updated_at,task?.latest_reply,task?.goal,snapshot.activity,snapshot.operations]);
   if(b.feedSig!==feedSig){b.feedSig=feedSig;const feed=q('feed'),nearBottom=feed.scrollHeight-feed.scrollTop-feed.clientHeight<80;feed.replaceChildren();
     if(!task)feed.append(node('p','在下方输入任务。单次任务等待一次最终回复；持续目标在执行和独立规划/验收之间推进。附件完成上传后再发送目标。任务按记录的唯一会话恢复。'));
@@ -135,6 +138,7 @@
     const detail=node('details');detail.open=true;detail.append(node('summary','过去一小时的具体操作'));const filter=document.createElement('select');filter.id='log-filter';for(const [value,text]of [['all','全部任务'],['selected','当前任务']]){const o=node('option',text);o.value=value;filter.append(o);}filter.value=b.logFilter||'all';const logs=node('div','','history');logs.id='logs';const paint=()=>{b.logFilter=filter.value;const ops=(snapshot.operations||[]).filter(m=>filter.value!=='selected'||m.task_id===b.selected);logs.textContent=ops.map(m=>new Date(m.at).toLocaleTimeString()+' ['+m.task_id+'] '+m.text).join('\n')||'暂无记录';};filter.onchange=paint;paint();detail.append(filter,logs);feed.append(detail);if(nearBottom)feed.scrollTop=feed.scrollHeight;
   }
   };
+  if(snapshot.details===false&&b.snapshot){snapshot.tasks=snapshot.tasks.map(t=>{const old=b.snapshot.tasks.find(x=>x.id===t.id);return {...old,...t,goal:old?.goal||'',latest_reply:old?.latest_reply||''};});}
   b.snapshot=snapshot;b.updated=Date.now();b.render();
   return {commands:snapshot.notice?[]:b.commands.splice(0),unsaved:!!(b.q('goal').value.trim()||b.files.length)};
 })()

@@ -40,7 +40,16 @@ pub trait TaskDesktop: Send + Sync {
     async fn ensure_profile(&self, profile: &ExecutionProfile) -> Result<()>;
     async fn upload(&self, attachments: &[Attachment]) -> Result<()>;
     async fn dispatch(&self, prompt: &str) -> Result<()>;
-    async fn approve(&self) -> Result<bool>;
+    async fn observe_pending(&self, token: &str, receipts: &[String]) -> Result<TaskObservation> {
+        let mut observed = self.observe(token).await?;
+        if receipts.contains(&observed.approval_fingerprint) {
+            observed.approval_present = false;
+            observed.approval_actionable = false;
+            observed.page.waiting_for_approval = false;
+        }
+        Ok(observed)
+    }
+    async fn approve(&self, request: &str) -> Result<bool>;
     async fn stay_chat(&self) -> Result<bool>;
     async fn reload(&self) -> Result<()>;
     async fn retry_load(&self) -> Result<bool>;
@@ -251,7 +260,18 @@ impl Supervisor<'_> {
             )? {
                 return Ok(());
             }
-            let foreground = self.desktop.observe("").await?;
+            let foreground = self
+                .desktop
+                .observe_pending(
+                    "",
+                    &self
+                        .store
+                        .list()?
+                        .into_iter()
+                        .flat_map(|t| t.approval_receipts)
+                        .collect::<Vec<_>>(),
+                )
+                .await?;
             if foreground.chat_work_offer && !foreground.approval_present {
                 let clicked = self.desktop.stay_chat().await?;
                 t.cooldown_until = now + if clicked { 3_000 } else { 1_000 };
@@ -279,7 +299,10 @@ impl Supervisor<'_> {
                         })
                 });
                 if let Some(other) = other {
-                    let verified = self.desktop.observe(&other.token).await?;
+                    let verified = self
+                        .desktop
+                        .observe_pending(&other.token, &other.approval_receipts)
+                        .await?;
                     if verified.marker_present
                         && !verified.foreign_marker
                         && verified.binding.sidebar_id == foreground.binding.sidebar_id
@@ -336,7 +359,10 @@ impl Supervisor<'_> {
             if !self.current(t)? {
                 return Ok(());
             }
-            let before = self.desktop.observe(&t.token).await?;
+            let before = self
+                .desktop
+                .observe_pending(&t.token, &t.approval_receipts)
+                .await?;
             if before.approval_present
                 || before.page.response_in_flight()
                 || !before.page.composer_text.trim().is_empty()
@@ -389,7 +415,10 @@ impl Supervisor<'_> {
         if !self.current(t)? {
             return Ok(());
         }
-        let observed = self.desktop.observe(&t.token).await?;
+        let observed = self
+            .desktop
+            .observe_pending(&t.token, &t.approval_receipts)
+            .await?;
         if observed.foreign_marker {
             bail!("当前回复属于另一个任务，保留绑定并等待正确会话");
         }
@@ -571,8 +600,10 @@ impl Supervisor<'_> {
                 && observed.approval_actionable
                 && (t.approval_fingerprint != observed.approval_fingerprint
                     || now >= t.approval_settle_until)
-                && self.desktop.approve().await?
+                && self.desktop.approve(&observed.approval_fingerprint).await?
             {
+                t.approval_receipts
+                    .push(observed.approval_fingerprint.clone());
                 t.approval_fingerprint = observed.approval_fingerprint;
                 t.approval_settle_until = now + self.policy.approval_settle_ms;
                 t.approvals += 1;

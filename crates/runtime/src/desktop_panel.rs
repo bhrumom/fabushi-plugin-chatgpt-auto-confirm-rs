@@ -89,6 +89,7 @@ fn save_files(queue: &Queue, files: &[PanelFile], request: &str) -> Result<Incom
 fn apply(queue: &Queue, endpoint: &str, command: &PanelCommand) -> Result<serde_json::Value> {
     let mut result = json!({});
     match command.action.as_str() {
+        "refresh" => {}
         "select" => {
             if !command.id.is_empty() && !queue.tasks()?.iter().any(|t| t.id == command.id) {
                 bail!("任务不存在");
@@ -218,7 +219,7 @@ fn apply(queue: &Queue, endpoint: &str, command: &PanelCommand) -> Result<serde_
                     file.path.clear();
                 }
             }
-            result["download"] = json!({"version":1,"tasks":tasks,"settings":queue.settings()?,"activity":queue.store.activity("",crate::wall_ms().saturating_sub(7_200_000),10_000)?});
+            result["download"] = json!({"version":1,"tasks":tasks,"settings":queue.settings()?,"activity":queue.activity("")?});
         }
         "import" => {
             if command.value.len() > 10_000_000 {
@@ -294,26 +295,28 @@ fn open_tui(_: &Queue, _: &str) -> Result<()> {
     bail!("请在终端运行 tui")
 }
 
-fn panel_snapshot(queue: &Queue, endpoint: &str) -> Result<serde_json::Value> {
+fn panel_snapshot(queue: &Queue, endpoint: &str, details: bool) -> Result<serde_json::Value> {
     let settings = queue.settings()?;
     Ok(json!({
-        "version":2,"running":settings.running,"scans":settings.scans,
+        "version":4,"details":details,"running":settings.running,"scans":settings.scans,
         "settings":settings,"now":crate::wall_ms(),"worker":queue.heartbeat(endpoint)?,
         "storage_bytes":std::fs::metadata(&queue.path).map(|m|m.len()).unwrap_or(0),
         "tasks":queue.tasks()?.iter().map(|t|json!({
-          "id":t.id,"title":t.title,"goal":t.goal,"state":t.state,"mode":t.mode,"phase":t.phase,"round":t.round,"workspace":t.workspace,"profile":t.profile,"auto_approve":t.auto_approve,"attachments":t.attachments,"binding":t.binding,"updated_at":t.updated_at,"last_scan_at":t.last_scan_at,"cooldown_until":t.cooldown_until,"last_error":t.last_error,"approvals":t.approvals,"recoveries":t.recoveries,"latest_reply":t.latest_reply.chars().take(100_000).collect::<String>()
-        })).collect::<Vec<_>>(),"activity":queue.store.activity("",crate::wall_ms().saturating_sub(7_200_000),10_000)?,"operations":queue.operations("")?
+          "id":t.id,"title":t.title,"goal":if details {t.goal.as_str()} else {""},"state":t.state,"mode":t.mode,"phase":t.phase,"round":t.round,"workspace":t.workspace,"profile":t.profile,"auto_approve":t.auto_approve,"attachments":t.attachments,"binding":t.binding,"updated_at":t.updated_at,"last_scan_at":t.last_scan_at,"cooldown_until":t.cooldown_until,"last_error":t.last_error,"approvals":t.approvals,"recoveries":t.recoveries,"latest_reply":if details {t.latest_reply.chars().take(40_000).collect::<String>()} else {String::new()}
+        })).collect::<Vec<_>>(),"activity":if details {queue.store.activity("",crate::wall_ms().saturating_sub(7_200_000),2_000)?} else {vec![]},"operations":if details {queue.operations("")?} else {vec![]}
     }))
 }
 
 pub(crate) async fn sync_panel(queue: &Queue, cdp: &ChatGptCdp) -> Result<()> {
-    let snapshot = panel_snapshot(queue, cdp.endpoint())?;
+    let probe = cdp.workbench_probe().await?;
+    let details = probe["open"] == true;
+    let snapshot = panel_snapshot(queue, cdp.endpoint(), details)?;
     let result = cdp.workbench_panel(&snapshot).await?;
     let commands = result["commands"].as_array().cloned().unwrap_or_default();
     for value in commands.into_iter().take(50) {
         let command: PanelCommand = serde_json::from_value(value)?;
         let outcome = apply(queue, cdp.endpoint(), &command);
-        let mut feedback = panel_snapshot(queue, cdp.endpoint())?;
+        let mut feedback = panel_snapshot(queue, cdp.endpoint(), details)?;
         feedback["notice"] = match outcome {
             Ok(result) => {
                 json!({"request_id":command.request_id,"action":command.action,"ok":true,"text":if command.action=="cleanup"{"已请求安全重载；有回复、授权或草稿时等待，不强制清理"}else if command.action=="import"{"导入任务已暂停；附件需重新选择"}else{"操作已保存"},"result":result})
@@ -348,21 +351,60 @@ pub(crate) fn spawn_panel_loop(queue: Queue, endpoint: String, owner: String) ->
             if let Err(error) = result {
                 eprintln!("workbench: {error:#}");
             }
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
     }))
+}
+
+pub async fn profile_desktop_renderer(endpoint: &str) -> Result<serde_json::Value> {
+    ChatGptCdp::connect_desktop(endpoint)
+        .await?
+        .profile_renderer()
+        .await
+}
+
+/// Operator recovery: stop stalled renderer execution and detach only our panel.
+pub async fn suspend_stalled_workbench(endpoint: &str) -> Result<serde_json::Value> {
+    ChatGptCdp::connect_desktop(endpoint)
+        .await?
+        .suspend_stalled_workbench()
+        .await
 }
 
 /// Restore the embedded entry without navigating or dispatching a task.
 pub async fn show_desktop_workbench(queue: &Queue, endpoint: &str) -> Result<serde_json::Value> {
     let cdp = ChatGptCdp::connect_desktop(endpoint).await?;
     sync_panel(queue, &cdp).await?;
-    cdp.surface().await
+    cdp.workbench_probe().await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn closed_snapshot_excludes_transcript_and_journals() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("fabushi-panel-lite-{}", std::process::id()));
+        let queue = Queue::open(&dir.join("state.sqlite"))?;
+        queue.add(
+            "task".into(),
+            "long original goal".repeat(1000),
+            TaskMode::Goal,
+            ExecutionProfile::default(),
+            true,
+            &[],
+        )?;
+        let lite = panel_snapshot(&queue, "http://127.0.0.1:9223", false)?;
+        assert_eq!(lite["tasks"][0]["goal"], "");
+        assert_eq!(lite["tasks"][0]["latest_reply"], "");
+        assert!(lite["activity"].as_array().unwrap().is_empty());
+        assert!(lite["operations"].as_array().unwrap().is_empty());
+        assert!(lite.to_string().len() < 5000);
+        let full = panel_snapshot(&queue, "http://127.0.0.1:9223", true)?;
+        assert!(full["tasks"][0]["goal"].as_str().unwrap().len() > 10000);
+        drop(queue);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
     #[test]
     fn parity_controls_save_private_files_and_preserve_sent_identity() -> Result<()> {
         let dir = std::env::temp_dir().join(format!("fabushi-panel-parity-{}", std::process::id()));

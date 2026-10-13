@@ -1,5 +1,7 @@
 mod desktop_panel;
-pub use desktop_panel::show_desktop_workbench;
+pub use desktop_panel::{
+    profile_desktop_renderer, show_desktop_workbench, suspend_stalled_workbench,
+};
 mod tui;
 pub use tui::{run_tui, tui_snapshot};
 mod workbench;

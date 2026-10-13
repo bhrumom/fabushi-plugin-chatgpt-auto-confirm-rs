@@ -136,6 +136,8 @@ pub struct Task {
     pub approval_since: u64,
     pub approval_settle_until: u64,
     pub approval_fingerprint: String,
+    #[serde(default)]
+    pub approval_receipts: Vec<String>,
     pub approvals: u32,
     pub recoveries: u32,
     #[serde(default)]
@@ -190,6 +192,7 @@ impl Task {
             approval_since: 0,
             approval_settle_until: 0,
             approval_fingerprint: String::new(),
+            approval_receipts: Vec::new(),
             approvals: 0,
             recoveries: 0,
             last_load_retry_at: 0,

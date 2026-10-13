@@ -129,20 +129,25 @@ const script = name => source.match(new RegExp(`const ${name}: &str = r#"([\\s\\
     await page.locator('#fabushi-workbench-entry .task-action').filter({hasText:'删除'}).first().evaluate(el=>window.deleteDisabled=el.disabled);
     assert.equal(await page.evaluate(()=>window.deleteDisabled),true);
     const hostBefore=await page.locator('#fabushi-workbench-entry').evaluate(el=>{window.oldWorkbench=el;el.remove();return true;});
-    await page.waitForTimeout(30);assert.equal(hostBefore,true);
+    await page.waitForTimeout(350);assert.equal(hostBefore,true);
     assert.equal(await page.locator('#fabushi-workbench-entry').evaluate(el=>el===window.oldWorkbench),true);
     assert.equal(await page.locator('#fabushi-workbench-entry #goal').inputValue(),'提交后新写的草稿');
+    const repairs=await page.evaluate(()=>window.__fabushiWorkbench.repairs);
+    await page.evaluate(()=>{for(let i=0;i<1000;i++){const n=document.createElement('div');document.body.append(n);n.remove();}});
+    await page.waitForTimeout(350);
+    assert.equal(await page.evaluate(()=>window.__fabushiWorkbench.repairs),repairs);
+    assert.equal(await page.locator('#fabushi-workbench-entry').evaluate(el=>el.parentNode===document.documentElement),true);
     console.log('PASS userscript-style workbench layout, selected feed, future model edit, goal edit, private attachments, previews, acknowledgements, cleanup guard and hydration preservation');
   } finally { await browser.close(); }
 })().catch(error => {console.error(error); process.exitCode=1;});
 
 (async () => {
   const adapter = fs.readFileSync(path.join(__dirname, '../crates/adapters/chatgpt-cdp/src/desktop.rs'), 'utf8');
-  const native = name => adapter.match(new RegExp('const '+name+':\\s*&str\\s*=\\s*r#"([\\s\\S]*?)"#;'))[1];
+  const native = (name,receipts=[],target='') => adapter.match(new RegExp('const '+name+':\\s*&str\\s*=\\s*r#"([\\s\\S]*?)"#;'))[1].replace('__APPROVAL_SCAN__',()=>fs.readFileSync(path.join(__dirname,'../crates/adapters/chatgpt-cdp/src/approval-scan.js'),'utf8')).replace('__APPROVAL_RECEIPTS__',()=>JSON.stringify(receipts)).replace('__APPROVAL_TARGET__',()=>JSON.stringify(target));
   const browser = await chromium.launch({headless:true, ...(process.env.CHROME_BINARY ? {executablePath:process.env.CHROME_BINARY} : process.platform==='darwin' ? {executablePath:'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'} : {})});
   try {
     const page=await browser.newPage();
-    const context=token=>page.evaluate('(() => { const page = '+script('SNAPSHOT_SCRIPT')+'; return ('+native('CONTEXT_SCRIPT').replace('__TOKEN__',JSON.stringify('[Fabushi:'+token+']'))+'); })()');
+    const context=(token,receipts=[])=>page.evaluate('(() => { const page = '+script('SNAPSHOT_SCRIPT')+'; return ('+native('CONTEXT_SCRIPT',receipts).replace('__TOKEN__',JSON.stringify('[Fabushi:'+token+']'))+'); })()');
     await page.setContent('<main><article><div data-content-search-unit-key="x:user">Task [Fabushi:owned]</div></article><div data-testid="authorization-card">Provider needs permission</div><div role="status">Loading</div></main>');
     let c=await context('owned');
     assert.equal(c.marker_present,true);assert.equal(c.approval_present,true);assert.equal(c.approval_actionable,false);
@@ -194,6 +199,39 @@ const script = name => source.match(new RegExp(`const ${name}: &str = r#"([\\s\\
     result=await page.evaluate(native('SCOPED_APPROVE_SCRIPT'));assert.equal(result.scope,'conversation');
     assert.equal(await page.evaluate(()=>window.scope && !window.onceClicked && !window.wrong),true);
     console.log('PASS native screenshot card with shortcut badges prefers named provider conversation grant over once');
+    const approvalCard=id=>`<section data-approval-request-id="${id}"><p>GitHub permission</p><button>Reject</button><button onclick="window.clickedRequest='${id}'">Allow once</button></section>`;
+    await page.setContent('<main><div data-content-search-unit-key="u:user">[Fabushi:owned]</div><article data-content-search-turn-key="a">'+approvalCard('first')+'<p id="reply">Working</p></article></main>');
+    const first=(await context('owned')).approval_fingerprint;
+    assert.equal((await page.evaluate(native('SCOPED_APPROVE_SCRIPT',[],first))).clicked,true);
+    await page.locator('#reply').evaluate(e=>e.textContent='Final answer with much more text');
+    await page.locator('section').evaluate(e=>e.outerHTML=e.outerHTML);
+    assert.equal((await context('owned')).approval_fingerprint,first);
+    let ignored=await context('owned',[first]);
+    assert.equal(ignored.approval_present,false);assert.equal(ignored.page,undefined);
+    // The second request has identical wording but a distinct request id.
+    await page.locator('article').evaluate((e,html)=>e.insertAdjacentHTML('beforeend',html),approvalCard('second'));
+    const second=(await context('owned',[first])).approval_fingerprint;
+    assert.notEqual(second,first);
+    await page.evaluate(()=>window.clickedRequest='');
+    assert.equal((await page.evaluate(native('SCOPED_APPROVE_SCRIPT',[],second))).clicked,true);
+    assert.equal(await page.evaluate(()=>window.clickedRequest),'second');
+    await page.locator('[data-approval-request-id="second"]').evaluate(e=>e.remove());
+    assert.equal((await page.evaluate(native('SCOPED_APPROVE_SCRIPT',[],second))).clicked,false);
+    await page.locator('main').evaluate(e=>e.insertAdjacentHTML('beforeend','<div data-content-search-unit-key="next:user">Next turn [Fabushi:owned]</div>'));
+    assert.equal((await context('owned')).approval_present,false);
+    console.log('PASS stable approval identity, remount and final-answer deduplication, distinct identical requests, target recheck and historical exclusion');
+    await page.setContent('<main><div data-content-search-unit-key="u:user">[Fabushi:owned]</div><article data-content-search-turn-key="a"><div><button>Reject</button><button>Allow once</button></div><p id="reply">Working</p></article></main>');
+    const fallback=(await context('owned')).approval_fingerprint;
+    await page.locator('#reply').evaluate(e=>e.textContent='Final answer: unrelated changing content');
+    assert.equal((await context('owned')).approval_fingerprint,fallback);
+    assert.equal((await context('owned',[fallback])).approval_present,false);
+    await page.locator('article').evaluate(e=>e.setAttribute('data-content-search-turn-key','b'));
+    assert.notEqual((await context('owned',[fallback])).approval_fingerprint,fallback);
+    await page.locator('article').evaluate(e=>e.setAttribute('data-approval-state','resolved'));
+    assert.equal((await context('owned')).approval_present,false);
+    console.log('PASS missing-id fallback ignores reply changes, new message remains actionable and explicit resolved state is excluded');
+
+
     await page.setContent('<main><article><div data-content-search-unit-key="x:user">[Fabushi:owned]</div></article><article><div data-content-search-unit-key="x:assistant"><p>已提交 abc；等待 CI</p></div><span>连接中断</span></article></main>');
     c=await context('owned');assert.equal(c.interrupted,true);assert.ok(c.visible_work.includes('已提交 abc'));
     await page.locator('article:last-child span').evaluate(e=>e.innerText='Connection lost. Waiting for the full answer.');
@@ -249,6 +287,17 @@ const script = name => source.match(new RegExp(`const ${name}: &str = r#"([\\s\\
     result=await page.evaluate(native('SWITCH_SCRIPT').replace('__BINDING__',JSON.stringify({identity:'owned-id',sidebar_id:'owned-id',title:'task'})));
     assert.equal(result.needs_click,true);assert.equal(result.opened_sidebar,true);
     console.log('PASS virtual sidebar mounts exact recorded id, bounded background wait, collapsed sidebar and no unrelated chat clicks');
+    await page.setContent('<main><div data-content-search-unit-key="u:user">[Fabushi:large-fixture]</div><div data-content-search-unit-key="a:assistant">public reply</div></main><div id="unrelated-bulk"></div>');
+    await page.locator('#unrelated-bulk').evaluate(el=>{el.innerHTML='<div><span>ordinary text</span></div>'.repeat(5000);for(const node of [el,...el.querySelectorAll('*')])Object.defineProperty(node,'innerText',{get(){throw new Error('loading detection swept unrelated content');}});});
+    const largeObservation=await context('large-fixture');
+    assert.equal(largeObservation.load_failed,false);
+    assert.equal((await page.evaluate(native('RETRY_LOAD_SCRIPT'))).clicked,false);
+    await page.locator('[data-content-search-unit-key="u:user"]').evaluate(e=>{e.textContent='short public text';const props={};Object.defineProperty(props,'message',{get(){throw new Error('reactive message getter invoked');}});Object.defineProperty(props,'text',{get(){throw new Error('reactive text getter invoked');}});e.__reactFiber$unsafe={memoizedProps:props,return:null};});
+    assert.equal((await context('large-fixture')).marker_present,false);
+    await page.locator('[data-content-search-unit-key="u:user"]').evaluate(e=>e.textContent='[Fabushi:large-fixture]');
+    assert.equal((await context('large-fixture')).marker_present,true);
+    console.log('PASS marker proof reads DOM and plain metadata without invoking reactive message getters');
+    console.log('PASS bounded load detection ignores 10000 unrelated nodes without reading their innerText');
     console.log('PASS native role-less Work card, countdown, quoted exclusion and load error outside cached main');
 
 
