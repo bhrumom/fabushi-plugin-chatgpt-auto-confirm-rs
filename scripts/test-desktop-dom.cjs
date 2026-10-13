@@ -66,6 +66,37 @@ const script = name => source.match(new RegExp(`const ${name}: &str = r#"([\\s\\
     assert.equal((await evaluate('SURFACE_SCRIPT')).chat_mode, true);
     console.log('PASS pointerdown mode menu, nested ChatGPT choice, Chat composer');
     console.log('All desktop DOM contracts passed.');
+    await page.setContent('<main><div contenteditable="true" id="native-composer"></div></main>');
+    const panelScript = fs.readFileSync(path.join(__dirname, '../crates/adapters/chatgpt-cdp/src/workbench-panel.js'), 'utf8');
+    const panelSnapshot = {running:true,scans:9,tasks:[{id:'owned',title:'<img src=x onerror="window.injected=true">',round:4,phase:'执行',state:'生成中',approvals:2,recoveries:1,error:''}],operations:[{at:Date.now(),task_id:'owned',text:'已确认切换任务'}]};
+    const renderPanel = state => page.evaluate(panelScript.replace('__SNAPSHOT_JSON__', JSON.stringify(state)));
+    assert.deepEqual((await renderPanel(panelSnapshot)).commands, []);
+    await page.getByRole('button', {name:'打开 Fabushi 脚本工作台'}).click();
+    assert.equal(await page.locator('#fabushi-workbench-entry #panel').isVisible(), true);
+    const panelSurface = await evaluate('SURFACE_SCRIPT');
+    assert.equal(panelSurface.workbench.entry_present, true);
+    assert.equal(panelSurface.workbench.panel_open, true);
+    assert.equal(await page.locator('#fabushi-workbench-entry .task img').count(), 0);
+    assert.match(await page.locator('#fabushi-workbench-entry #logs').textContent(), /已确认切换任务/);
+    await page.locator('#fabushi-workbench-entry summary').first().click();
+    await page.locator('#fabushi-workbench-entry #goal').fill('用户尚未发送的目标');
+    await renderPanel(panelSnapshot);
+    assert.equal(await page.locator('#fabushi-workbench-entry #goal').inputValue(), '用户尚未发送的目标');
+    assert.equal(await page.evaluate(() => document.querySelectorAll('textarea,input').length), 0);
+    await page.locator('#fabushi-workbench-entry #send').click();
+    let actions = (await renderPanel(panelSnapshot)).commands;
+    assert.equal(actions.length, 1); assert.equal(actions[0].action, 'add');
+    assert.equal(actions[0].goal, '用户尚未发送的目标');
+    assert.deepEqual((await renderPanel(panelSnapshot)).commands, []);
+    await page.locator('#fabushi-workbench-entry [data-global="pause_all"]').click();
+    await renderPanel({...panelSnapshot,notice:{action:'add',ok:true,text:'已保存'}});
+    assert.equal((await renderPanel(panelSnapshot)).commands[0].action, 'pause_all');
+    assert.equal(await page.locator('#fabushi-workbench-entry #goal').inputValue(), '');
+    assert.equal(await page.locator('#fabushi-workbench-entry').count(), 1);
+    await page.locator('#fabushi-workbench-entry').evaluate(el => el.remove());
+    await renderPanel(panelSnapshot);
+    assert.equal(await page.locator('#fabushi-workbench-entry').count(), 1);
+    console.log('PASS desktop workbench entry, goal dispatch, safe literal rendering, preserved drafts, command acknowledgement and remount');
   } finally { await browser.close(); }
 })().catch(error => {console.error(error); process.exitCode=1;});
 

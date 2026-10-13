@@ -155,3 +155,7 @@ row is unmounted and only a transient native identity is projected. Keep its
 registered durable id; a different stable sidebar id still fails ownership.
 Bound each list scan to 24 steps and retain its scroll position for a later
 retry, avoiding an endless restart from the top of a long virtual list.
+
+## Embedded desktop workbench entry
+
+The supervisor remounts a fixed Fabushi workbench entry in the desktop main renderer. Its isolated shadow DOM preserves native composer and authorization selectors. Opening the panel exposes durable task state, round, one-hour operation journal, goal/once dispatch with model and effort, per-task pause/resume/retry and verified conversation open, global supervision controls, and a user-requested native TUI launcher. Commands are allowlisted and applied by runtime to the existing Queue; the panel does not own supervision policy or create a second database. Text from goals, task titles and journals is rendered with textContent. Inputs survive snapshot refresh, and a failed add preserves the user's input. Reload/remount reinstalls the entry on the next supervisor cycle.

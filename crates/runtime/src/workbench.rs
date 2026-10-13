@@ -299,6 +299,7 @@ pub async fn supervise(queue: Queue, endpoint: String, once: bool) -> Result<()>
         }
         let result_future = async {
             let cdp = ChatGptCdp::connect_desktop(&endpoint).await?;
+            crate::desktop_panel::sync_panel(&queue, &cdp).await?;
             let settings = queue.settings()?;
             if !settings.stop_task.is_empty() {
                 if let Some(task) = queue

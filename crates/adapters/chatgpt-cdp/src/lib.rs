@@ -406,6 +406,7 @@ const SURFACE_SCRIPT: &str = r#"
     title: document.title,
     desktop: location.protocol === 'app:',
     composer: visible(composer),
+    workbench: (()=>{const b=window.__fabushiWorkbench;return {entry_present:!!b?.host?.isConnected,panel_open:b?.root?.getElementById("panel")?.style.display === "block",updated_at:b?.updated || 0};})(),
     conversation_identity: document.querySelector('[data-above-composer-conversation-id]')?.getAttribute('data-above-composer-conversation-id') || document.querySelector('[data-chatgpt-selection-conversation-id]')?.getAttribute('data-chatgpt-selection-conversation-id') || null,
     inputs: [...document.querySelectorAll('textarea, [contenteditable="true"]')].filter(visible).map(e => ({tag:e.tagName, id:e.id, role:e.getAttribute('role'), placeholder:e.getAttribute('data-placeholder') || e.getAttribute('placeholder')})),
     work_composer: [...document.querySelectorAll('[data-codex-composer="true"]')].some(visible),

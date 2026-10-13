@@ -1,3 +1,4 @@
+mod desktop_panel;
 mod tui;
 pub use tui::{run_tui, tui_snapshot};
 mod workbench;
