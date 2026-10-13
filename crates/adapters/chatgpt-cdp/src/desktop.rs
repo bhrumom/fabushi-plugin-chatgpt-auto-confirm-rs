@@ -6,6 +6,11 @@ use fabushi_chatgpt_domain::*;
 use serde_json::{Value, json};
 
 impl ChatGptCdp {
+    pub async fn workbench_panel(&self, snapshot: &Value) -> Result<Value> {
+        let script = include_str!("workbench-panel.js")
+            .replace("__SNAPSHOT_JSON__", &serde_json::to_string(snapshot)?);
+        self.evaluate(&script).await
+    }
     pub async fn conversations(&self) -> Result<Value> {
         self.evaluate(CONVERSATIONS_SCRIPT).await
     }

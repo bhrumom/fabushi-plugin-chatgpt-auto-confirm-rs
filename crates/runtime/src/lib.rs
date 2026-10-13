@@ -1,3 +1,5 @@
+mod desktop_panel;
+pub use desktop_panel::show_desktop_workbench;
 mod tui;
 pub use tui::{run_tui, tui_snapshot};
 mod workbench;

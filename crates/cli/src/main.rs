@@ -39,6 +39,8 @@ enum Commands {
     OpenTask {
         id: String,
     },
+    /// Restore the workbench entry in the supervised desktop window.
+    Workbench,
     Tui,
     TuiSnapshot {
         #[arg(long)]
@@ -186,6 +188,16 @@ async fn main() -> Result<()> {
         Commands::OpenTask { id } => {
             fabushi_chatgpt_runtime::activate_task(&Queue::open(&database)?, &endpoint, &id).await?
         }
+        Commands::Workbench => println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &fabushi_chatgpt_runtime::show_desktop_workbench(
+                    &Queue::open(&database)?,
+                    &endpoint
+                )
+                .await?
+            )?
+        ),
         Commands::Tui => run_tui(Queue::open(&database)?, endpoint)?,
         Commands::TuiSnapshot { output } => {
             tui_snapshot(&Queue::open(&database)?, &endpoint, &output)?
