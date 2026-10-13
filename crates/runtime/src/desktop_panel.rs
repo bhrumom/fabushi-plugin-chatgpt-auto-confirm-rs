@@ -133,6 +133,13 @@ pub(crate) async fn sync_panel(queue: &Queue, cdp: &ChatGptCdp) -> Result<()> {
     Ok(())
 }
 
+/// Restore the embedded entry without navigating or dispatching a task.
+pub async fn show_desktop_workbench(queue: &Queue, endpoint: &str) -> Result<serde_json::Value> {
+    let cdp = ChatGptCdp::connect_desktop(endpoint).await?;
+    sync_panel(queue, &cdp).await?;
+    cdp.surface().await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

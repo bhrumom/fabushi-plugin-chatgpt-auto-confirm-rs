@@ -123,3 +123,5 @@ Place the database in `~/Library/Application Support/FabushiSupervisor` before i
 The agent starts at login and restarts an exited worker with a 30-second throttle. It shares the endpoint lease with the TUI, so only one worker controls the desktop. ChatGPT must remain available at the configured CDP endpoint; this does not bypass login or network failures. The installer prints inspection and stop commands.
 
 While the desktop supervisor is running, click **Fabushi 工作台** at the top right of ChatGPT to view tasks, rounds and the last hour of operations, submit a goal, or pause/resume supervision. **打开完整 TUI** opens the same database in a terminal. The entry returns after renderer reload; it is attached to the supervised desktop instance.
+
+`workbench` restores the embedded entry immediately without switching conversations or sending prompts.
