@@ -260,7 +260,7 @@ fn draw(frame: &mut Frame, queue: &Queue, endpoint: &str, ui: &Ui) -> Result<()>
             settings.default_mode,
             p.model,
             p.effort_label(),
-            settings.global_auto_approve
+            settings.default_auto_approve
         ));
         if !ui.files.is_empty() {
             composer.push_str(&format!(
@@ -418,7 +418,7 @@ fn handle_key(key: KeyEvent, queue: &Queue, _endpoint: &str, ui: &mut Ui) -> Res
                     ui.input.clone(),
                     settings.default_mode,
                     settings.default_profile,
-                    settings.global_auto_approve,
+                    settings.default_auto_approve,
                     &ui.files,
                 )?;
             }
@@ -628,7 +628,11 @@ fn handle_key(key: KeyEvent, queue: &Queue, _endpoint: &str, ui: &mut Ui) -> Res
                     return Ok(false);
                 }
                 let mut s = queue.settings()?;
-                s.global_auto_approve = !s.global_auto_approve;
+                if ui.settings {
+                    s.global_auto_approve = !s.global_auto_approve;
+                } else {
+                    s.default_auto_approve = !s.default_auto_approve;
+                }
                 queue.set_settings(s)?;
             }
             KeyCode::Char('v') => {

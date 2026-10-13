@@ -41,8 +41,8 @@ impl TaskStore for Store {
         }
         Ok(true)
     }
-    fn delete(&self, _id: &str) -> Result<()> {
-        Ok(())
+    fn delete(&self, _id: &str, _expected: u64) -> Result<bool> {
+        Ok(true)
     }
     fn activity(&self, _id: &str, _since: u64, _limit: usize) -> Result<Vec<Activity>> {
         Ok(self.events.lock().unwrap().clone())

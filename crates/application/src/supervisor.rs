@@ -17,7 +17,7 @@ pub trait TaskStore: Send + Sync {
     fn list(&self) -> Result<Vec<Task>>;
     fn insert(&self, task: &Task) -> Result<()>;
     fn save(&self, task: &mut Task, expected: u64, activity: Option<Activity>) -> Result<bool>;
-    fn delete(&self, id: &str) -> Result<()>;
+    fn delete(&self, id: &str, expected: u64) -> Result<bool>;
     fn activity(&self, id: &str, since: u64, limit: usize) -> Result<Vec<Activity>>;
     fn operations(&self, id: &str, since: u64, limit: usize) -> Result<Vec<Activity>> {
         Ok(self

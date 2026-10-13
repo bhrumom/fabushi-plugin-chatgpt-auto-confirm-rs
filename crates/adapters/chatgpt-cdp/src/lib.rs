@@ -9,7 +9,10 @@ use serde_json::{Value, json};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    MaybeTlsStream, WebSocketStream, connect_async_with_config,
+    tungstenite::{Message, protocol::WebSocketConfig},
+};
 
 #[derive(Debug, Clone, Deserialize)]
 struct TargetInfo {
@@ -67,7 +70,7 @@ impl ChatGptCdp {
             .websocket_debugger_url
             .clone()
             .ok_or_else(|| anyhow!("selected ChatGPT target has no websocket debugger URL"))?;
-        let (socket, _) = connect_async(&ws_url)
+        let (socket, _) = connect_async_with_config(&ws_url, Some(cdp_socket_config()), false)
             .await
             .with_context(|| format!("failed to connect CDP websocket {ws_url}"))?;
 
@@ -246,6 +249,13 @@ impl BrowserPort for ChatGptCdp {
     }
 }
 
+fn cdp_socket_config() -> WebSocketConfig {
+    // A 50 MiB attachment batch becomes ~67 MiB of base64 in one CDP frame.
+    WebSocketConfig::default()
+        .max_message_size(Some(96 * 1024 * 1024))
+        .max_frame_size(Some(96 * 1024 * 1024))
+}
+
 fn select_desktop_target(targets: &[TargetInfo]) -> Option<&TargetInfo> {
     // Auxiliary page and avatar-overlay renderers are never dispatch targets.
     targets.iter().find(|target| {
@@ -406,7 +416,7 @@ const SURFACE_SCRIPT: &str = r#"
     title: document.title,
     desktop: location.protocol === 'app:',
     composer: visible(composer),
-    workbench: (()=>{const b=window.__fabushiWorkbench;return {entry_present:!!b?.host?.isConnected,panel_open:b?.root?.getElementById("panel")?.style.display === "block",updated_at:b?.updated || 0};})(),
+    workbench: (()=>{const b=window.__fabushiWorkbench;return {entry_present:!!b?.host?.isConnected,panel_open:!!b?.root?.getElementById("panel")?.classList.contains("open"),version:b?.version || 0,task_count:b?.root?.querySelectorAll(".task-row").length || 0,updated_at:b?.updated || 0,unsaved:!!(b?.root?.getElementById("goal")?.value.trim() || b?.files?.length)};})(),
     conversation_identity: document.querySelector('[data-above-composer-conversation-id]')?.getAttribute('data-above-composer-conversation-id') || document.querySelector('[data-chatgpt-selection-conversation-id]')?.getAttribute('data-chatgpt-selection-conversation-id') || null,
     inputs: [...document.querySelectorAll('textarea, [contenteditable="true"]')].filter(visible).map(e => ({tag:e.tagName, id:e.id, role:e.getAttribute('role'), placeholder:e.getAttribute('data-placeholder') || e.getAttribute('placeholder')})),
     work_composer: [...document.querySelectorAll('[data-codex-composer="true"]')].some(visible),
@@ -466,6 +476,16 @@ const NEW_CHAT_SCRIPT: &str = r#"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attachment_batch_fits_bounded_cdp_frame() {
+        let bytes = 50usize * 1024 * 1024;
+        let envelope = bytes.div_ceil(3) * 4 + 1024 * 1024;
+        let config = cdp_socket_config();
+        assert!(config.max_frame_size.unwrap() >= envelope);
+        assert!(config.max_message_size.unwrap() >= envelope);
+        assert!(config.max_message_size.unwrap() <= 100 * 1024 * 1024);
+    }
 
     #[test]
     fn desktop_target_excludes_browser_overlay_and_auxiliary_windows() {

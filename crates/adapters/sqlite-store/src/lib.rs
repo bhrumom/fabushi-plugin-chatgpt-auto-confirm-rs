@@ -96,12 +96,8 @@ impl TaskStore for SqliteTaskStore {
         t.revision = saved.revision;
         Ok(true)
     }
-    fn delete(&self, id: &str) -> Result<()> {
-        self.lock()?.execute(
-            "UPDATE tasks SET deleted=1,revision=revision+1 WHERE id=?1",
-            [id],
-        )?;
-        Ok(())
+    fn delete(&self, id: &str, expected: u64) -> Result<bool> {
+        Ok(self.lock()?.execute("UPDATE tasks SET deleted=1,revision=revision+1 WHERE id=?1 AND revision=?2 AND deleted=0",params![id,expected])? == 1)
     }
     fn activity(&self, id: &str, since: u64, limit: usize) -> Result<Vec<Activity>> {
         let c = self.lock()?;
@@ -258,7 +254,8 @@ mod tests {
         assert!(s.lease("desktop", "a", 100, 100).unwrap());
         assert!(!s.lease("desktop", "b", 101, 100).unwrap());
         assert!(s.lease("desktop", "b", 201, 100).unwrap());
-        s.delete("test").unwrap();
+        assert!(!s.delete("test", 0).unwrap());
+        assert!(s.delete("test", 1).unwrap());
         assert!(s.list().unwrap().is_empty());
         s.restore("test").unwrap();
         assert_eq!(s.list().unwrap().len(), 1);

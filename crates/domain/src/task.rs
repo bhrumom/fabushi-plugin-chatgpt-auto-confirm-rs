@@ -230,6 +230,13 @@ impl Task {
         }
     }
     pub fn resume(&mut self) {
+        if self.state == TaskState::Cancelled {
+            self.state = if self.send_clicked {
+                TaskState::Waiting
+            } else {
+                TaskState::Queued
+            };
+        }
         if self.state == TaskState::Paused {
             self.state = self.paused_state.take().unwrap_or(TaskState::Queued);
         }
@@ -298,10 +305,12 @@ pub struct Settings {
     pub running: bool,
     pub global_auto_approve: bool,
     pub default_mode: TaskMode,
+    pub default_auto_approve: bool,
     pub default_profile: ExecutionProfile,
     pub revision: u64,
     pub last_send_at: u64,
     pub request_open: String,
+    pub ui_selected_task: String,
     pub hold_view_until: u64,
     pub request_reload: bool,
     pub stop_task: String,
@@ -320,10 +329,12 @@ impl Default for Settings {
             running: true,
             global_auto_approve: true,
             default_mode: TaskMode::Goal,
+            default_auto_approve: true,
             default_profile: ExecutionProfile::default(),
             revision: 0,
             last_send_at: 0,
             request_open: String::new(),
+            ui_selected_task: String::new(),
             hold_view_until: 0,
             request_reload: false,
             stop_task: String::new(),

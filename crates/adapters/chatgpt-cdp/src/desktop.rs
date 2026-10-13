@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 impl ChatGptCdp {
     pub async fn workbench_panel(&self, snapshot: &Value) -> Result<Value> {
         let script = include_str!("workbench-panel.js")
+            .replace("__PANEL_CSS__", include_str!("workbench-panel.css"))
             .replace("__SNAPSHOT_JSON__", &serde_json::to_string(snapshot)?);
         self.evaluate(&script).await
     }
