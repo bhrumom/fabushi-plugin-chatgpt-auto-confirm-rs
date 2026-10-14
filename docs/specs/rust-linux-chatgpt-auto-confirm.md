@@ -332,7 +332,7 @@ are preserved. Panel regression coverage includes global pause followed by indiv
 resume and repeated resume of an already-runnable task while supervision is stopped.
 
 Desktop mode recovery implementation status: `chat-mode` restores and verifies the
-ChatGPT composer over CDP without clicking New chat or sending input. It refuses
+ChatGPT mode over CDP without clicking New chat or sending input. It refuses
 to hide native drafts or selected attachments. Already-dispatched supervision
 restores ChatGPT mode before activating or observing the original task; dispatch
 markers and timestamps remain unchanged. DOM fixtures cover delayed mode menus,
@@ -346,6 +346,32 @@ identity before recording a pending binding; it never replaces the original prom
 phase, round, token or dispatch timestamp. Sidebar positioning waits for delayed
 history pagination at the bottom instead of wrapping before older rows mount.
 Runtime, application and DOM regression tests cover these recovery contracts.
+
+Mode/load-error recovery refinement: mode verification uses the native current-mode
+control independently of composer readiness. A ChatGPT load-error page with no input
+therefore reaches the same-conversation Retry path instead of accumulating mode
+errors and backoff. New-chat and Send still require a ready composer. Repeated
+interruption handoffs flatten prior carry checkpoints instead of nesting envelopes
+or duplicating `work_result` and `goal`, and shared turn containers exclude user
+prompt units from `visible_work`. The DOM and application regressions cover a
+composer-less load-error card, its exact Retry, blocked Send and bounded handoff carry.
+
+Interruption protection refinement: an active or waiting response and native drafts
+retain their original session despite interruption labels. An inactive interruption
+must remain stable for 60 seconds before handoff. Prior checkpoints and work results
+each use an 8,000-character window; newest progress uses 24,000 characters, with
+head/tail retention and the full material left in durable journals and source chats.
+This keeps the 48,000-character envelope from cutting off the latest next action.
+Regressions cover streaming/waiting/draft protection, the full grace interval and
+oversized Unicode checkpoints with original goal and newest tail preserved.
+
+Approval settlement refinement: a persisted click receipt no longer hides a current,
+unresolved approval card when no terminal response exists. Already-completed and
+historical cards remain suppressed. Current requests allow at most three scoped
+grant attempts, spaced at least 60 seconds apart, with counts surviving restart;
+exhaustion retains the original task and reports required manual verification.
+Regressions cover unresolved receipts, completed-card suppression, retry spacing,
+restart persistence and the three-attempt limit. Permanent grants remain excluded.
 
 Embedded UI parity implementation status: userscript-style launcher/layout, task and workspace controls, scoped preferences, private attachment bridge/previews, shared two-hour feed and one-hour operations, safe cleanup, import/export and hydration retention implemented. Desktop-only substitutions and evidence are tracked in desktop-tui-userscript-parity.md.
 

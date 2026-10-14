@@ -66,6 +66,15 @@ const script = name => source.match(new RegExp(`const ${name}: &str = r#"([\\s\\
     assert.equal((await evaluate('CHAT_MODE_SCRIPT')).reason,'mode-switch-would-hide-draft-or-attachments');
     assert.equal(await page.evaluate(()=>!!window.changed),false);
     console.log('PASS standalone chat-mode, delayed menu, retained conversation, no new chat/send, idempotence and draft protection');
+    await page.setContent('<button aria-label="切换模式，当前模式：ChatGPT">ChatGPT</button><main><div>无法加载此 ChatGPT 对话<button onclick="window.loadRetried=true">重试</button></div></main>');
+    assert.deepEqual(await evaluate('CHAT_MODE_SCRIPT'),{ok:true,changed:false});
+    assert.equal((await evaluate('SURFACE_SCRIPT')).composer,false);
+    const loadSource=fs.readFileSync(path.join(__dirname,'../crates/adapters/chatgpt-cdp/src/desktop.rs'),'utf8');
+    const loadRetry=loadSource.match(/const RETRY_LOAD_SCRIPT: &str = r#"([\s\S]*?)"#;/)[1];
+    assert.equal((await page.evaluate(loadRetry)).clicked,true);
+    assert.equal(await page.evaluate(()=>window.loadRetried),true);
+    assert.equal((await send('must not send from error page')).reason,'composer-not-found');
+    console.log('PASS composer-less ChatGPT load error reaches scoped Retry while Send remains blocked');
 
     await page.setContent('<button aria-label="切换模式，当前模式：Codex">Mode</button><button id="new">新聊天</button><div data-codex-composer="true" style="height:20px">Work</div><button id="chat-tab">聊天</button>');
     await page.evaluate(() => {
@@ -228,6 +237,8 @@ const script = name => source.match(new RegExp(`const ${name}: &str = r#"([\\s\\
     await page.locator('#reply').evaluate(e=>e.textContent='Final answer with much more text');
     await page.locator('section').evaluate(e=>e.outerHTML=e.outerHTML);
     assert.equal((await context('owned')).approval_fingerprint,first);
+    assert.equal((await context('owned',[first])).approval_present,true);
+    await page.locator('article').evaluate(e=>e.insertAdjacentHTML('beforeend','<div data-content-search-unit-key="a:assistant" data-is-streaming="false">Completed reply<button aria-label="Copy">Copy</button><button aria-label="Share">Share</button></div>'));
     let ignored=await context('owned',[first]);
     assert.equal(ignored.approval_present,false);assert.equal(ignored.page,undefined);
     // The second request has identical wording but a distinct request id.
@@ -246,6 +257,8 @@ const script = name => source.match(new RegExp(`const ${name}: &str = r#"([\\s\\
     const fallback=(await context('owned')).approval_fingerprint;
     await page.locator('#reply').evaluate(e=>e.textContent='Final answer: unrelated changing content');
     assert.equal((await context('owned')).approval_fingerprint,fallback);
+    assert.equal((await context('owned',[fallback])).approval_present,true);
+    await page.locator('article').evaluate(e=>e.insertAdjacentHTML('beforeend','<div data-content-search-unit-key="a:assistant" data-is-streaming="false">Completed reply<button aria-label="Copy">Copy</button><button aria-label="Share">Share</button></div>'));
     assert.equal((await context('owned',[fallback])).approval_present,false);
     await page.locator('article').evaluate(e=>e.setAttribute('data-content-search-turn-key','b'));
     assert.notEqual((await context('owned',[fallback])).approval_fingerprint,fallback);
@@ -332,12 +345,13 @@ const script = name => source.match(new RegExp(`const ${name}: &str = r#"([\\s\\
     assert.equal((await context('large-fixture')).marker_present,false);
     await page.locator('[data-content-search-unit-key="u:user"]').evaluate(e=>e.textContent='[Fabushi:large-fixture]');
     assert.equal((await context('large-fixture')).marker_present,true);
+    await page.setContent('<main><article data-content-search-turn-key="shared-turn"><div data-content-search-unit-key="u:user">LONG_ORIGINAL_GOAL [Fabushi:shared]</div><div data-content-search-unit-key="a:assistant"><p>assistant only progress</p></div></article></main>');
+    const sharedTurn=await context('shared');
+    assert.equal(sharedTurn.marker_present,true);
+    assert.equal(sharedTurn.visible_work.includes('LONG_ORIGINAL_GOAL'),false);
+    assert.equal(sharedTurn.visible_work.includes('assistant only progress'),true);
     console.log('PASS marker proof reads DOM and plain metadata without invoking reactive message getters');
     console.log('PASS bounded load detection ignores 10000 unrelated nodes without reading their innerText');
     console.log('PASS native role-less Work card, countdown, quoted exclusion and load error outside cached main');
-
-
-
-
   } finally {await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

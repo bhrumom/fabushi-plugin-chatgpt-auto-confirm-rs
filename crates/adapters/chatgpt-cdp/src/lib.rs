@@ -446,7 +446,16 @@ const CHAT_MODE_SCRIPT: &str = r#"
 (async () => {
   const visible = e => !!(e && e.getClientRects().length);
   const norm = v => String(v || '').replace(/\s+/g, ' ').trim();
-  const ready = () => [...document.querySelectorAll('#prompt-textarea, textarea, [contenteditable="true"]')].some(visible) && ![...document.querySelectorAll('[data-codex-composer="true"]')].some(visible);
+  // A native load-error page has no composer. Mode verification must still
+  // permit the supervisor to observe that page and click its scoped Retry.
+  // New-chat and Send keep their separate composer readiness checks.
+  const modeControl = () => [...document.querySelectorAll('button')].filter(visible).find(b=>/current mode|当前模式/i.test(b.getAttribute('aria-label') || ''));
+  const ready = () => {
+    const mode=modeControl();
+    if ([...document.querySelectorAll('[data-codex-composer="true"]')].some(visible)) return false;
+    if (mode) return /chatgpt/i.test(mode.getAttribute('aria-label') || '');
+    return [...document.querySelectorAll('#prompt-textarea, textarea, [contenteditable="true"]')].some(visible);
+  };
   if (ready()) return {ok:true, changed:false};
   const drafts = [...document.querySelectorAll('#prompt-textarea, textarea, [contenteditable="true"]')].filter(visible).some(e => norm(e.value ?? e.innerText ?? e.textContent));
   const files = [...document.querySelectorAll('input[type="file"]')].some(e => e.files?.length);
@@ -459,7 +468,7 @@ const CHAT_MODE_SCRIPT: &str = r#"
     b.dispatchEvent(new MouseEvent('mouseup',{...event,buttons:0}));
     b.dispatchEvent(new MouseEvent('click',{...event,buttons:0}));
   };
-  const switcher=[...document.querySelectorAll('button')].filter(visible).find(b=>/current mode|当前模式/i.test(b.getAttribute('aria-label') || ''));
+  const switcher=modeControl();
   if (switcher && !/chatgpt/i.test(switcher.getAttribute('aria-label') || '')) {
     if (switcher.getAttribute('aria-expanded') !== 'true' && switcher.getAttribute('data-state') !== 'open') click(switcher);
     let chat;
@@ -478,7 +487,7 @@ const CHAT_MODE_SCRIPT: &str = r#"
     if(chatTab && [...document.querySelectorAll('[data-codex-composer="true"]')].some(visible)) click(chatTab);
     await new Promise(r=>setTimeout(r,100));
   }
-  return {ok:false,reason:'desktop-chat-composer-not-ready'};
+  return {ok:false,reason:'desktop-chat-mode-not-ready'};
 })()
 "#;
 

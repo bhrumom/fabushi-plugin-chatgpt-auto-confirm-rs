@@ -336,7 +336,10 @@ const CONTEXT_SCRIPT: &str = r#"
   const approvalLabel=b=>{const c=b.cloneNode(true);c.querySelectorAll('kbd, [aria-hidden="true"]').forEach(n=>n.remove());return normalize(b.getAttribute('aria-label') || c.textContent).replace(/\s+(?:Esc|Enter|↵|⏎|⌄|▾)$/i,'').trim();};
   __APPROVAL_SCAN__
   const receipts=__APPROVAL_RECEIPTS__;
-  const pending=approvalScan().filter(c=>!c.resolved && !receipts.includes(c.key));
+  // A click receipt is not settlement evidence. Keep a still-live current card
+  // pending when no completed response exists; application owns paced retry limits.
+  const completedResponse=page.response_actions_complete && page.response_action_turn_bound_to_last && !page.awaiting_assistant && page.copy_available_on_last_assistant;
+  const pending=approvalScan().filter(c=>!c.resolved && (!receipts.includes(c.key) || !completedResponse));
   const approval=pending[0];
   page.waiting_for_approval=pending.length>0;
   const statusNodes=[...main.querySelectorAll('[role="alert"], [role="status"], [data-testid*="error"]')].filter(e=>visible(e) && !e.closest('blockquote, pre, code, [data-content-search-unit-key$=":user"]'));
@@ -349,7 +352,8 @@ const CONTEXT_SCRIPT: &str = r#"
   const latestLines=[...paragraphs,...interruptionNodes].map(e=>e.textContent || '').filter(t=>t.length<500).map(normalize);
   const interrupted=latestLines.some(l=>interruption.test(l)) || /connection (?:was )?(?:interrupted|lost)|连接(?:已)?中断|连接断开/i.test(statusText);
   const publicTurns=[...main.querySelectorAll('[data-content-search-unit-key$=":assistant"], [data-message-author-role="assistant"]')].filter(visible).slice(-3);
-  const visible_work=publicTurns.map(e=>(e.closest('article, [data-content-search-turn-key]') || e).innerText || '').join('\n\n').slice(-64000);
+  const assistantWork=e=>{const scope=e.closest('article, [data-content-search-turn-key]') || e;const userSel='[data-message-author-role="user"], [data-content-search-unit-key$=":user"], [data-user-message-bubble]';if(!scope.querySelector(userSel))return scope.innerText || e.innerText || '';const clone=scope.cloneNode(true);clone.querySelectorAll(userSel).forEach(n=>n.remove());return (clone.innerText || clone.textContent || e.innerText || '').trim();};
+  const visible_work=publicTurns.map(assistantWork).filter(Boolean).join('\n\n').slice(-64000);
   const length_limit=/reached.*(?:conversation|chat).*limit|此对话.*长度上限|达到.*对话.*长度上限/i.test(statusText) || latestLines.some(l=>/^(you.*reached.*(?:conversation|chat).*limit.*|你.*(?:达到|已达到).*对话.*长度上限.*)$/i.test(l));
   const loadLabel=e=>{const c=e.cloneNode(true);c.querySelectorAll('button, [role="button"], a').forEach(n=>n.remove());return normalize(c.textContent);};
   const loadError=/^(?:unable to load (?:this )?(?:ChatGPT )?conversation|无法加载.*(?:会话|对话))[。.!]?$/i;

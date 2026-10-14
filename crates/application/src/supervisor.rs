@@ -43,7 +43,7 @@ pub trait TaskDesktop: Send + Sync {
     async fn dispatch(&self, prompt: &str) -> Result<()>;
     async fn observe_pending(&self, token: &str, receipts: &[String]) -> Result<TaskObservation> {
         let mut observed = self.observe(token).await?;
-        if receipts.contains(&observed.approval_fingerprint) {
+        if receipts.contains(&observed.approval_fingerprint) && observed.page.terminal_evidence() {
             observed.approval_present = false;
             observed.approval_actionable = false;
             observed.page.waiting_for_approval = false;
@@ -80,7 +80,7 @@ impl Default for SupervisorPolicy {
             rate_limit_ms: 300_000,
             approval_reload_ms: 60_000,
             approval_settle_ms: 12_000,
-            handoff_guard_ms: 8_000,
+            handoff_guard_ms: 60_000,
         }
     }
 }
@@ -622,17 +622,27 @@ impl Supervisor<'_> {
             if t.approval_since == 0 {
                 t.approval_since = now;
             }
+            let received = t.approval_receipts.contains(&observed.approval_fingerprint);
+            let attempts = t
+                .approval_attempts
+                .get(&observed.approval_fingerprint)
+                .copied()
+                .unwrap_or(u8::from(received));
             if settings.global_auto_approve
                 && t.auto_approve
                 && observed.approval_actionable
-                && (t.approval_fingerprint != observed.approval_fingerprint
-                    || now >= t.approval_settle_until)
+                && attempts < 3
+                && (!received || now >= t.approval_settle_until)
                 && self.desktop.approve(&observed.approval_fingerprint).await?
             {
-                t.approval_receipts
-                    .push(observed.approval_fingerprint.clone());
+                if !received {
+                    t.approval_receipts
+                        .push(observed.approval_fingerprint.clone());
+                }
+                t.approval_attempts
+                    .insert(observed.approval_fingerprint.clone(), attempts + 1);
                 t.approval_fingerprint = observed.approval_fingerprint;
-                t.approval_settle_until = now + self.policy.approval_settle_ms;
+                t.approval_settle_until = now + self.policy.approval_settle_ms.max(60_000);
                 t.approvals += 1;
                 t.approval_since = now;
                 self.persist(
@@ -642,6 +652,10 @@ impl Supervisor<'_> {
                         "已选择当前会话授权；等待授权结算，不切换或续发".into(),
                     )),
                 )?;
+            } else if attempts >= 3 {
+                t.last_error = "当前授权请求尝试 3 次后仍未结算；保留原会话，等待人工核对".into();
+                t.cooldown_until = now + 60_000;
+                self.persist(t, None)?;
             } else if settings.global_auto_approve
                 && t.auto_approve
                 && now >= t.approval_settle_until
@@ -662,7 +676,7 @@ impl Supervisor<'_> {
             }
             return Ok(());
         }
-        if now < t.approval_settle_until {
+        if now < t.approval_settle_until && !observed.page.is_terminal() {
             self.persist(t, None)?;
             return Ok(());
         }
@@ -688,6 +702,26 @@ impl Supervisor<'_> {
             return Ok(());
         }
         if observed.interrupted || observed.length_limit || observed.empty_final {
+            if observed.page.response_in_flight() || !observed.page.composer_text.trim().is_empty()
+            {
+                t.recovery_guard_since = 0;
+                t.terminal_since = 0;
+                t.terminal_polls = 0;
+                t.state = if observed.page.response_in_flight() {
+                    TaskState::Generating
+                } else {
+                    TaskState::Waiting
+                };
+                self.persist(
+                    t,
+                    Some((
+                        "status",
+                        "异常提示仍在，但原回复尚在运行或存在未发送草稿；保留原会话，不接力或重发"
+                            .into(),
+                    )),
+                )?;
+                return Ok(());
+            }
             if t.recovery_guard_since == 0 {
                 t.recovery_guard_since = now;
             }
@@ -771,12 +805,19 @@ impl Supervisor<'_> {
             .as_ref()
             .map(|b| b.sidebar_id.as_str())
             .unwrap_or("");
+        let latest = strip_goal(&t.latest_reply, &t.goal);
+        let prior = compact_carry(&strip_goal(&t.carry, &t.goal), &latest);
         t.carry = bounded(
             &format!(
                 "中断原因：{reason}\n来源会话：{source}\n任务：{}；阶段：{:?}；轮次：{}\n此前接力材料：\n{}\n上一执行轮结果：\n{}\n中断前最后可见回复与工具进度：\n{}",
-                t.id, t.phase, t.round, t.carry, t.work_result, t.latest_reply
+                t.id,
+                t.phase,
+                t.round,
+                checkpoint_window(&prior, 8_000),
+                checkpoint_window(&t.work_result, 8_000),
+                checkpoint_window(&latest, 24_000)
             ),
-            96_000,
+            48_000,
         );
         t.reset_dispatch();
         t.recoveries += 1;
@@ -868,6 +909,62 @@ impl Supervisor<'_> {
         }
     }
 }
+
+fn strip_goal(text: &str, goal: &str) -> String {
+    let trimmed = goal.trim();
+    if trimmed.is_empty() {
+        return text.trim().into();
+    }
+    text.replace(trimmed, "").trim().into()
+}
+
+// Payloads keep the beginning and the latest tail; full replies remain in the
+// durable journal and recorded source chats. Budget each section before joining
+// so older context cannot crowd the newest checkpoint out of the envelope.
+fn checkpoint_window(text: &str, limit: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= limit {
+        return text.into();
+    }
+    let note = "\n[中间材料省略；完整记录保存在原会话和任务日志]\n";
+    let available = limit.saturating_sub(note.chars().count());
+    let head = available / 4;
+    let tail = available - head;
+    format!(
+        "{}{}{}",
+        chars[..head].iter().collect::<String>(),
+        note,
+        chars[chars.len() - tail..].iter().collect::<String>()
+    )
+}
+
+fn compact_carry(carry: &str, latest_reply: &str) -> String {
+    let mut current = carry.trim();
+    let mut checkpoints = Vec::new();
+    while let Some((_, after_prior)) = current.split_once("\n此前接力材料：\n")
+        && let Some((earlier, after_work)) = after_prior.split_once("\n上一执行轮结果：\n")
+        && let Some((_, prev_reply)) = after_work.split_once("\n中断前最后可见回复与工具进度：\n")
+    {
+        let prev = prev_reply.trim();
+        if !prev.is_empty() && prev != latest_reply && !latest_reply.contains(prev) {
+            checkpoints.push(prev);
+        }
+        current = earlier.trim();
+    }
+    if !current.is_empty() && current != latest_reply && !latest_reply.contains(current) {
+        checkpoints.push(current);
+    }
+    checkpoints.reverse();
+    let mut deduped: Vec<&str> = Vec::new();
+    for item in checkpoints {
+        if !deduped.iter().any(|existing| existing.contains(item)) {
+            deduped.retain(|existing| !item.contains(existing));
+            deduped.push(item);
+        }
+    }
+    deduped.join("\n\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
