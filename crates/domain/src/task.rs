@@ -360,6 +360,7 @@ impl Default for Settings {
 pub struct TaskObservation {
     pub page: PageSnapshot,
     pub binding: SessionBinding,
+    pub native_identity: String,
     pub marker_present: bool,
     pub user_text_chars: usize,
     pub observed_markers: Vec<String>,
@@ -373,6 +374,17 @@ pub struct TaskObservation {
     pub approval_fingerprint: String,
     pub chat_work_offer: bool,
     pub empty_final: bool,
+}
+impl TaskObservation {
+    pub fn matches_recorded_location(&self, recorded: &SessionBinding) -> bool {
+        !self.foreign_marker
+            && ((!recorded.sidebar_id.is_empty()
+                && !recorded.sidebar_id.starts_with("local-chatgpt:")
+                && self.binding.sidebar_id == recorded.sidebar_id)
+                || (!self.native_identity.is_empty()
+                    && (self.native_identity == recorded.identity
+                        || self.native_identity == recorded.sidebar_id)))
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

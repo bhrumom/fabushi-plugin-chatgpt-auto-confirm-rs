@@ -373,6 +373,17 @@ exhaustion retains the original task and reports required manual verification.
 Regressions cover unresolved receipts, completed-card suppression, retry spacing,
 restart persistence and the three-attempt limit. Permanent grants remain excluded.
 
+Virtualized-transcript recovery refinement: native surface identity is observed
+separately from the permanent sidebar ID, ignoring hidden sidebar rows and hidden
+selection metadata. An already-recorded matching native or permanent location
+does not require searching a local temporary ID in the sidebar. When user turns
+are unmounted, durable location proof supplies user-turn ownership for the current
+assistant response; visible unmarked or foreign user turns cannot inherit it.
+Permanent binding promotion and stable terminal checks still require complete
+response actions, and independent review parsing still verifies exact task/round.
+Regression coverage includes local-to-permanent promotion, virtualized review
+completion, another native session, Copy-only evidence and visible unmarked users.
+
 Embedded UI parity implementation status: userscript-style launcher/layout, task and workspace controls, scoped preferences, private attachment bridge/previews, shared two-hour feed and one-hour operations, safe cleanup, import/export and hydration retention implemented. Desktop-only substitutions and evidence are tracked in desktop-tui-userscript-parity.md.
 
 Approval deduplication implementation status: persisted request receipts survive remount/restart/phase reset; request-targeted click rechecks the live card. Resolved and older-user-turn cards are excluded from pending observations and terminal guards. New request IDs remain actionable even when their text matches a resolved request. Missing identity uses bounded message/card metadata and a content digest, with the ambiguity documented in desktop-tui-userscript-parity.md. Native conversation identity changes do not invalidate a receipt.

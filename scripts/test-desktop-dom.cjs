@@ -336,6 +336,12 @@ const script = name => source.match(new RegExp(`const ${name}: &str = r#"([\\s\\
     assert.equal(result.needs_click,true);
     assert.equal(await page.locator('a[href="/c/older-owned"]').count(),1);
     console.log('PASS sidebar waits for delayed history pagination before declaring chat absent');
+    await page.setContent('<aside style="display:none"><a href="/c/stale" aria-current="page"><span data-thread-title="true">Hidden stale</span></a><div data-chatgpt-selection-conversation-id="local-chatgpt:stale"></div></aside><nav><a href="/c/owned-permanent" aria-current="page"><span data-thread-title="true">Owned</span></a></nav><main><div data-chatgpt-selection-conversation-id="local-chatgpt:owned">Current selection</div><article><div data-content-search-unit-key="a:assistant">Completed review<button aria-label="Copy">Copy</button><button aria-label="Share">Share</button></div></article></main>');
+    const virtualized=await context('owned');
+    assert.equal(virtualized.marker_present,false);
+    assert.equal(virtualized.native_identity,'local-chatgpt:owned');
+    assert.equal(virtualized.binding.sidebar_id,'owned-permanent');
+    console.log('PASS virtualized native identity and permanent sidebar binding ignore hidden cached metadata');
     await page.setContent('<main><div data-content-search-unit-key="u:user">[Fabushi:large-fixture]</div><div data-content-search-unit-key="a:assistant">public reply</div></main><div id="unrelated-bulk"></div>');
     await page.locator('#unrelated-bulk').evaluate(el=>{el.innerHTML='<div><span>ordinary text</span></div>'.repeat(5000);for(const node of [el,...el.querySelectorAll('*')])Object.defineProperty(node,'innerText',{get(){throw new Error('loading detection swept unrelated content');}});});
     const largeObservation=await context('large-fixture');
