@@ -39,6 +39,12 @@ enum Commands {
     OpenTask {
         id: String,
     },
+    /// Verify the original dispatch marker and recover its missing conversation binding.
+    RecoverTask {
+        id: String,
+        #[arg(long)]
+        conversation: String,
+    },
     /// Restore the workbench entry in the supervised desktop window.
     Workbench,
     /// Stop stalled renderer JS and detach the embedded panel without clearing input.
@@ -111,6 +117,8 @@ enum Commands {
         port: u16,
     },
     Inspect,
+    /// Switch to ChatGPT mode without opening a new chat or sending a prompt.
+    ChatMode,
     NewChat,
     Browser {
         #[arg(long)]
@@ -191,6 +199,19 @@ async fn main() -> Result<()> {
         }
         Commands::OpenTask { id } => {
             fabushi_chatgpt_runtime::activate_task(&Queue::open(&database)?, &endpoint, &id).await?
+        }
+        Commands::RecoverTask { id, conversation } => {
+            fabushi_chatgpt_runtime::recover_task(
+                &Queue::open(&database)?,
+                &endpoint,
+                &id,
+                &conversation,
+            )
+            .await?;
+            println!(
+                "{}",
+                serde_json::json!({"ok":true,"task_id":id,"conversation":conversation,"resent":false})
+            );
         }
         Commands::WorkbenchProfile => println!(
             "{}",
@@ -323,6 +344,10 @@ async fn main() -> Result<()> {
             let cdp = connect(cli.backend, &endpoint).await?;
             cdp.new_desktop_chat().await?;
             println!("{}", serde_json::to_string_pretty(&cdp.surface().await?)?);
+        }
+        Commands::ChatMode => {
+            let cdp = connect(cli.backend, &endpoint).await?;
+            println!("{}", cdp.ensure_desktop_chat_mode().await?);
         }
         Commands::Browser {
             browser_binary,

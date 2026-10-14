@@ -191,6 +191,18 @@ impl ChatGptCdp {
         Ok(())
     }
 
+    /// Restore ChatGPT mode without creating a conversation or sending input.
+    pub async fn ensure_desktop_chat_mode(&self) -> Result<Value> {
+        if !self.desktop {
+            bail!("chat-mode requires the desktop backend");
+        }
+        let value = self.evaluate(CHAT_MODE_SCRIPT).await?;
+        if value["ok"] != true {
+            bail!("ChatGPT mode could not be restored: {value}");
+        }
+        Ok(value)
+    }
+
     pub async fn click_allow_once(&self) -> Result<bool> {
         let value = self.evaluate(APPROVE_ONCE_SCRIPT).await?;
         Ok(value
@@ -427,6 +439,46 @@ const SURFACE_SCRIPT: &str = r#"
     approval_controls: buttons.filter(b=>/allow|approve|允许|reject|拒绝/i.test(b.innerText || b.getAttribute('aria-label') || '')).map(b=>({ancestors:(()=>{const out=[];for(let e=b,n=0;e && n<12;e=e.parentElement,n++)out.push({tag:e.tagName,role:e.getAttribute('role'),unit:e.getAttribute('data-content-search-unit-key'),author:e.getAttribute('data-message-author-role')});return out;})(),label:b.innerText,aria_label:b.getAttribute('aria-label'),haspopup:b.getAttribute('aria-haspopup'),tag:b.tagName,role:b.getAttribute('role'),parent:b.parentElement?.outerHTML.slice(0,5000)})).slice(-12),
     controls: buttons.map(b => (b.getAttribute('aria-label') || b.innerText || '').trim()).filter(Boolean).slice(0, 60)
   };
+})()
+"#;
+
+const CHAT_MODE_SCRIPT: &str = r#"
+(async () => {
+  const visible = e => !!(e && e.getClientRects().length);
+  const norm = v => String(v || '').replace(/\s+/g, ' ').trim();
+  const ready = () => [...document.querySelectorAll('#prompt-textarea, textarea, [contenteditable="true"]')].some(visible) && ![...document.querySelectorAll('[data-codex-composer="true"]')].some(visible);
+  if (ready()) return {ok:true, changed:false};
+  const drafts = [...document.querySelectorAll('#prompt-textarea, textarea, [contenteditable="true"]')].filter(visible).some(e => norm(e.value ?? e.innerText ?? e.textContent));
+  const files = [...document.querySelectorAll('input[type="file"]')].some(e => e.files?.length);
+  if (drafts || files) return {ok:false, reason:'mode-switch-would-hide-draft-or-attachments'};
+  const click = b => {
+    const r=b.getBoundingClientRect(), event={bubbles:true,cancelable:true,composed:true,button:0,buttons:1,clientX:r.x+r.width/2,clientY:r.y+r.height/2};
+    b.dispatchEvent(new PointerEvent('pointerdown',{...event,pointerId:1,pointerType:'mouse',isPrimary:true}));
+    b.dispatchEvent(new MouseEvent('mousedown',event));
+    b.dispatchEvent(new PointerEvent('pointerup',{...event,buttons:0,pointerId:1,pointerType:'mouse',isPrimary:true}));
+    b.dispatchEvent(new MouseEvent('mouseup',{...event,buttons:0}));
+    b.dispatchEvent(new MouseEvent('click',{...event,buttons:0}));
+  };
+  const switcher=[...document.querySelectorAll('button')].filter(visible).find(b=>/current mode|当前模式/i.test(b.getAttribute('aria-label') || ''));
+  if (switcher && !/chatgpt/i.test(switcher.getAttribute('aria-label') || '')) {
+    if (switcher.getAttribute('aria-expanded') !== 'true' && switcher.getAttribute('data-state') !== 'open') click(switcher);
+    let chat;
+    for(let i=0;i<30;i++) {
+      const options=[...document.querySelectorAll('[role="menuitem"], [role="option"], [role="menuitemradio"]')].filter(visible);
+      chat=options.find(b=>/^(ChatGPT|Chat|聊天)$/i.test(norm(b.innerText || b.getAttribute('aria-label'))) || [...b.querySelectorAll('*')].some(c=>!c.children.length && norm(c.textContent)==='ChatGPT'));
+      if(chat) break;
+      await new Promise(r=>setTimeout(r,100));
+    }
+    if(!chat) return {ok:false,reason:'chatgpt-mode-option-not-found'};
+    click(chat);
+  }
+  for(let i=0;i<40;i++) {
+    if(ready()) return {ok:true,changed:true};
+    const chatTab=[...document.querySelectorAll('button, [role="tab"]')].filter(visible).find(b=>/^(Chat|聊天)$/i.test(norm(b.getAttribute('aria-label') || b.innerText)));
+    if(chatTab && [...document.querySelectorAll('[data-codex-composer="true"]')].some(visible)) click(chatTab);
+    await new Promise(r=>setTimeout(r,100));
+  }
+  return {ok:false,reason:'desktop-chat-composer-not-ready'};
 })()
 "#;
 

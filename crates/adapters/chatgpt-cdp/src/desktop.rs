@@ -196,6 +196,9 @@ fn text_hash_bytes(bytes: &[u8]) -> String {
 }
 #[async_trait]
 impl TaskDesktop for ChatGptCdp {
+    async fn ensure_chat_mode(&self) -> Result<bool> {
+        Ok(self.ensure_desktop_chat_mode().await?["changed"] == true)
+    }
     async fn retry_load(&self) -> Result<bool> {
         self.retry_loading_conversation().await
     }
@@ -409,7 +412,18 @@ const SWITCH_SCRIPT: &str = r#"
       await settle();row=find();let wrapped=false;
       for(let n=0;!row && n<24 && scrolled<24;n++){
         const before=list.scrollTop;
+        const height=list.scrollHeight, count=rows().length;
         list.scrollTop=Math.min(list.scrollHeight-list.clientHeight,before+Math.max(160,list.clientHeight*.75));
+        // Reaching the bottom starts asynchronous history pagination. Wait for
+        // the mounted list to grow before wrapping or reporting an absent chat.
+        if(list.scrollTop+list.clientHeight>=list.scrollHeight-2){
+          for(let poll=0;poll<12;poll++){
+            await settle();row=find();
+            if(row || list.scrollHeight>height || rows().length>count)break;
+          }
+          if(row)break;
+          if(list.scrollHeight>height || rows().length>count){scrolled++;continue;}
+        }
         if(list.scrollTop===before){
           if(wrapped || before===0)break;
           list.scrollTop=0;wrapped=true;

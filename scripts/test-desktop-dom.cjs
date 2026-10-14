@@ -45,6 +45,28 @@ const script = name => source.match(new RegExp(`const ${name}: &str = r#"([\\s\\
     assert.equal(await page.evaluate(() => !!window.wrong), false);
     console.log('PASS exact visible Allow once only');
 
+    await page.setContent('<button aria-label="切换模式，当前模式：Codex">Mode</button><button id="new" onclick="window.newChats=(window.newChats||0)+1">新聊天</button><div data-codex-composer="true" style="height:20px">Work</div><button id="chat-tab">聊天</button><div data-conversation-id="original">original conversation</div>');
+    await page.evaluate(() => {
+      document.querySelector('[aria-label]').addEventListener('pointerdown', () => setTimeout(() => {
+        const menu=document.createElement('div');menu.setAttribute('role','menu');
+        menu.innerHTML='<button role="menuitem"><span>ChatGPT</span><span>Ask questions</span></button>';
+        menu.querySelector('button').onclick=()=>{document.querySelector('[aria-label]').setAttribute('aria-label','切换模式，当前模式：ChatGPT');menu.remove();};
+        document.body.append(menu);
+      },250));
+      document.querySelector('#chat-tab').onclick=()=>{
+        document.querySelector('[data-codex-composer]').remove();
+        const composer=document.createElement('textarea');composer.id='prompt-textarea';document.body.append(composer);
+      };
+    });
+    assert.equal((await evaluate('CHAT_MODE_SCRIPT')).ok,true);
+    assert.equal(await page.evaluate(()=>window.newChats||0),0);
+    assert.equal(await page.locator('[data-conversation-id]').getAttribute('data-conversation-id'),'original');
+    assert.deepEqual(await evaluate('CHAT_MODE_SCRIPT'),{ok:true,changed:false});
+    await page.setContent('<button aria-label="切换模式，当前模式：Codex" onclick="window.changed=true">Mode</button><div data-codex-composer="true"><textarea>unsent draft</textarea></div>');
+    assert.equal((await evaluate('CHAT_MODE_SCRIPT')).reason,'mode-switch-would-hide-draft-or-attachments');
+    assert.equal(await page.evaluate(()=>!!window.changed),false);
+    console.log('PASS standalone chat-mode, delayed menu, retained conversation, no new chat/send, idempotence and draft protection');
+
     await page.setContent('<button aria-label="切换模式，当前模式：Codex">Mode</button><button id="new">新聊天</button><div data-codex-composer="true" style="height:20px">Work</div><button id="chat-tab">聊天</button>');
     await page.evaluate(() => {
       document.querySelector('[aria-label]').addEventListener('pointerdown', () => {
@@ -287,6 +309,20 @@ const script = name => source.match(new RegExp(`const ${name}: &str = r#"([\\s\\
     result=await page.evaluate(native('SWITCH_SCRIPT').replace('__BINDING__',JSON.stringify({identity:'owned-id',sidebar_id:'owned-id',title:'task'})));
     assert.equal(result.needs_click,true);assert.equal(result.opened_sidebar,true);
     console.log('PASS virtual sidebar mounts exact recorded id, bounded background wait, collapsed sidebar and no unrelated chat clicks');
+    await page.setContent('<div id="history" style="height:100px;overflow-y:auto;width:220px"><a href="/c/other"><span data-thread-title="true">Other</span></a><div style="height:120px"></div></div>');
+    await page.evaluate(()=>{
+      const list=document.querySelector('#history');
+      list.addEventListener('scroll',()=>{
+        if(list.scrollTop+list.clientHeight>=list.scrollHeight && !window.historyLoading){
+          window.historyLoading=true;
+          setTimeout(()=>list.insertAdjacentHTML('beforeend','<a href="/c/older-owned"><span data-thread-title="true">Older owned</span></a>'),600);
+        }
+      });
+    });
+    result=await page.evaluate(native('SWITCH_SCRIPT').replace('__BINDING__',JSON.stringify({identity:'older-owned',sidebar_id:'older-owned',title:'older'})));
+    assert.equal(result.needs_click,true);
+    assert.equal(await page.locator('a[href="/c/older-owned"]').count(),1);
+    console.log('PASS sidebar waits for delayed history pagination before declaring chat absent');
     await page.setContent('<main><div data-content-search-unit-key="u:user">[Fabushi:large-fixture]</div><div data-content-search-unit-key="a:assistant">public reply</div></main><div id="unrelated-bulk"></div>');
     await page.locator('#unrelated-bulk').evaluate(el=>{el.innerHTML='<div><span>ordinary text</span></div>'.repeat(5000);for(const node of [el,...el.querySelectorAll('*')])Object.defineProperty(node,'innerText',{get(){throw new Error('loading detection swept unrelated content');}});});
     const largeObservation=await context('large-fixture');

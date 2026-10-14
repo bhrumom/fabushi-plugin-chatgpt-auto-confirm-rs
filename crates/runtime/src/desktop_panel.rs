@@ -382,6 +382,71 @@ pub async fn show_desktop_workbench(queue: &Queue, endpoint: &str) -> Result<ser
 mod tests {
     use super::*;
     #[test]
+    fn resume_one_task_restarts_supervisor_without_resuming_others() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("fabushi-panel-resume-{}", std::process::id()));
+        let queue = Queue::open(&dir.join("state.sqlite"))?;
+        let mut task = queue.add(
+            "selected".into(),
+            "goal".into(),
+            TaskMode::Goal,
+            ExecutionProfile::default(),
+            false,
+            &[],
+        )?;
+        let other = queue.add(
+            "other".into(),
+            "other goal".into(),
+            TaskMode::Goal,
+            ExecutionProfile::default(),
+            false,
+            &[],
+        )?;
+        let revision = task.revision;
+        task.state = crate::TaskState::Sending;
+        task.send_clicked = true;
+        task.token = "original-dispatch".into();
+        task.dispatch_at = 1234;
+        assert!(queue.store.save(&mut task, revision, None)?);
+        queue.pause_all()?;
+        let mut settings = queue.settings()?;
+        settings.stop_task = task.id.clone();
+        queue.set_settings(settings)?;
+        assert!(!queue.settings()?.running);
+        let command: PanelCommand =
+            serde_json::from_value(json!({"action":"resume", "id":task.id}))?;
+        apply(&queue, "http://127.0.0.1:9223", &command)?;
+        assert!(queue.settings()?.running);
+        assert!(queue.settings()?.stop_task.is_empty());
+        let tasks = queue.tasks()?;
+        let resumed = tasks.iter().find(|t| t.id == task.id).unwrap();
+        assert_eq!(resumed.state, crate::TaskState::Sending);
+        assert_eq!(resumed.token, "original-dispatch");
+        assert_eq!(resumed.dispatch_at, 1234);
+        assert!(resumed.send_clicked);
+        assert_eq!(
+            tasks.iter().find(|t| t.id == other.id).unwrap().state,
+            crate::TaskState::Paused
+        );
+        // Repeated resume must also recover an already-runnable task after a global stop.
+        let mut settings = queue.settings()?;
+        settings.running = false;
+        queue.set_settings(settings)?;
+        apply(&queue, "http://127.0.0.1:9223", &command)?;
+        assert!(queue.settings()?.running);
+        assert_eq!(
+            queue
+                .tasks()?
+                .iter()
+                .find(|t| t.id == other.id)
+                .unwrap()
+                .state,
+            crate::TaskState::Paused
+        );
+        drop(queue);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+    #[test]
     fn closed_snapshot_excludes_transcript_and_journals() -> Result<()> {
         let dir = std::env::temp_dir().join(format!("fabushi-panel-lite-{}", std::process::id()));
         let queue = Queue::open(&dir.join("state.sqlite"))?;
