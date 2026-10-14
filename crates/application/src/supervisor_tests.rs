@@ -862,3 +862,81 @@ async fn unconsumed_approval_receipt_retries_at_intervals_with_durable_three_att
     assert!(saved.binding.is_some());
     assert_eq!(d.new_chats.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn virtualized_user_promotes_proven_local_session_and_finishes_exact_review() {
+    let mut t = bound_task();
+    t.binding = None;
+    t.round = 12;
+    t.phase = Phase::Review;
+    t.pending_binding = Some(SessionBinding {
+        identity: "local-chatgpt:owned".into(),
+        sidebar_id: "local-chatgpt:owned".into(),
+        title: "review".into(),
+    });
+    let mut o = terminal(
+        r#"{"taskId":"task","round":12,"status":"next","summary":"verified","next":"continue implementation"}"#,
+    );
+    o.marker_present = false;
+    o.native_identity = "local-chatgpt:owned".into();
+    o.page.user_turns = 0;
+    o.page.response_action_turn_bound_to_last = false;
+    let (s, d, c) = setup(t, o, false, false);
+    tick(&s, &d, &c).await;
+    assert_eq!(
+        s.list().unwrap()[0].binding.as_ref().unwrap().sidebar_id,
+        "sidebar-a"
+    );
+    for _ in 0..2 {
+        c.0.fetch_add(16_000, Ordering::SeqCst);
+        tick(&s, &d, &c).await;
+    }
+    let saved = s.list().unwrap()[0].clone();
+    assert_eq!(saved.round, 13);
+    assert_eq!(saved.phase, Phase::Work);
+    assert_eq!(saved.state, TaskState::Queued);
+    assert_eq!(d.new_chats.load(Ordering::SeqCst), 0);
+    assert!(d.dispatches.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn virtualized_user_cannot_bind_another_native_session_or_complete_from_copy_alone() {
+    let mut t = bound_task();
+    t.binding = None;
+    t.pending_binding = Some(SessionBinding {
+        identity: "local-chatgpt:owned".into(),
+        sidebar_id: "local-chatgpt:owned".into(),
+        title: "owned".into(),
+    });
+    let mut o = terminal("unrelated");
+    o.marker_present = false;
+    o.page.user_turns = 0;
+    o.native_identity = "local-chatgpt:other".into();
+    let (s, d, c) = setup(t, o, false, false);
+    tick(&s, &d, &c).await;
+    assert!(s.list().unwrap()[0].binding.is_none());
+    let mut o = terminal("partial");
+    o.marker_present = false;
+    o.page.user_turns = 0;
+    o.page.response_actions_complete = false;
+    let (s, d, c) = setup(bound_task(), o, false, false);
+    for _ in 0..3 {
+        tick(&s, &d, &c).await;
+        c.0.fetch_add(16_000, Ordering::SeqCst);
+    }
+    assert_eq!(s.list().unwrap()[0].phase, Phase::Work);
+    assert!(s.list().unwrap()[0].binding.is_some());
+}
+
+#[tokio::test]
+async fn visible_unmarked_user_does_not_inherit_recorded_session_proof() {
+    let mut o = terminal("reply to a manual unrelated message");
+    o.marker_present = false;
+    let (s, d, c) = setup(bound_task(), o, false, false);
+    for _ in 0..3 {
+        tick(&s, &d, &c).await;
+        c.0.fetch_add(16_000, Ordering::SeqCst);
+    }
+    assert_eq!(s.list().unwrap()[0].phase, Phase::Work);
+    assert_eq!(s.list().unwrap()[0].terminal_polls, 0);
+}

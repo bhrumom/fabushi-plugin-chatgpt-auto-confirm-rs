@@ -218,6 +218,12 @@ impl TaskDesktop for ChatGptCdp {
         {
             return Ok(());
         }
+        // Virtualized transcripts may unmount the user turn. A durable native
+        // location still identifies the already-open session; do not search a
+        // temporary local id in the permanent sidebar.
+        if current.matches_recorded_location(b) {
+            return Ok(());
+        }
         match self.switch_conversation(b).await {
             Ok(()) => {
                 for _ in 0..32 {
@@ -315,9 +321,9 @@ const CONTEXT_SCRIPT: &str = r#"
   const fullUserText=normalize(userText(last));
   const lastText=fullUserText.slice(-8000);
 
-  const raw=[...document.querySelectorAll('[data-above-composer-conversation-id]')].find(visible)?.getAttribute('data-above-composer-conversation-id') || document.querySelector('[data-chatgpt-selection-conversation-id]')?.getAttribute('data-chatgpt-selection-conversation-id') || '';
+  const raw=[...document.querySelectorAll('[data-above-composer-conversation-id]')].find(visible)?.getAttribute('data-above-composer-conversation-id') || [...document.querySelectorAll('[data-chatgpt-selection-conversation-id]')].find(visible)?.getAttribute('data-chatgpt-selection-conversation-id') || '';
   const nativeIdentity=raw.replace(/^chatgpt:/,'');
-  const titleNodes=[...document.querySelectorAll('[data-thread-title="true"]')];
+  const titleNodes=[...document.querySelectorAll('[data-thread-title="true"]')].filter(visible);
   let sidebarId='';
   for(const title of titleNodes) {
     const row=title.closest('[role="button"], a');
@@ -367,7 +373,7 @@ const CONTEXT_SCRIPT: &str = r#"
 
   const stayButtons=[...document.querySelectorAll('button, [role="button"]')].filter(e=>visible(e) && !e.disabled && !e.closest(excluded) && /^(?:留在聊天(?:模式|中)|stay in chat)(?:\s*\d+.*)?$/i.test(normalize(e.innerText || e.getAttribute('aria-label'))));
   const offer=stayButtons.find(button=>{for(let e=button.parentElement,n=0;e && n<7 && !e.matches('main, body');e=e.parentElement,n++){if(/在\s*ChatGPT\s*Work\s*中继续|Continue in ChatGPT Work/i.test(e.innerText) && /在\s*Work\s*中继续|Continue in Work/i.test(e.innerText))return true;}return false;});
-  return {binding:{identity,sidebar_id:sidebarId,title:document.title.slice(0,160)},marker_present:lastText.includes(marker),user_text_chars:fullUserText.length,observed_markers:[...lastText.matchAll(/\[Fabushi:([^\]]+)\]/g)].map(m=>m[1]),foreign_marker:/\[Fabushi:[^\]]+\]/.test(lastText) && !lastText.includes(marker),interrupted,visible_work,length_limit,load_failed,approval_present:!!approval,approval_actionable:!!approval?.actionable,approval_fingerprint:approval ? approval.key : '',chat_work_offer:!!offer,empty_final:!!latest && page.response_actions_complete && page.response_action_turn_bound_to_last && !page.stop_available && !page.awaiting_assistant && !normalize(latest.querySelector('[data-markdown-text-style="assistant-message"], .markdown, [data-selected-text-overlay-target]')?.innerText || (/^(?:ChatGPT.*?[：:]\s*)?(?:Thinking|Thought|思考|正在思考)/i.test(normalize(latest.innerText))?'':latest.innerText))};
+  return {native_identity:nativeIdentity,binding:{identity,sidebar_id:sidebarId,title:document.title.slice(0,160)},marker_present:lastText.includes(marker),user_text_chars:fullUserText.length,observed_markers:[...lastText.matchAll(/\[Fabushi:([^\]]+)\]/g)].map(m=>m[1]),foreign_marker:/\[Fabushi:[^\]]+\]/.test(lastText) && !lastText.includes(marker),interrupted,visible_work,length_limit,load_failed,approval_present:!!approval,approval_actionable:!!approval?.actionable,approval_fingerprint:approval ? approval.key : '',chat_work_offer:!!offer,empty_final:!!latest && page.response_actions_complete && page.response_action_turn_bound_to_last && !page.stop_available && !page.awaiting_assistant && !normalize(latest.querySelector('[data-markdown-text-style="assistant-message"], .markdown, [data-selected-text-overlay-target]')?.innerText || (/^(?:ChatGPT.*?[：:]\s*)?(?:Thinking|Thought|思考|正在思考)/i.test(normalize(latest.innerText))?'':latest.innerText))};
 })()
 "#;
 const SWITCH_SCRIPT: &str = r#"

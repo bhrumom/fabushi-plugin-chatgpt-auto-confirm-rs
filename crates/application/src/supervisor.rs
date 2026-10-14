@@ -442,17 +442,31 @@ impl Supervisor<'_> {
         if !self.current(t)? {
             return Ok(());
         }
-        let observed = self
+        let mut observed = self
             .desktop
             .observe_pending(&t.token, &t.approval_receipts)
             .await?;
         if observed.foreign_marker {
             bail!("当前回复属于另一个任务，保留绑定并等待正确会话");
         }
+        let virtualized_location = !observed.marker_present
+            && observed.page.user_turns == 0
+            && t.binding
+                .as_ref()
+                .or(t.pending_binding.as_ref())
+                .is_some_and(|b| observed.matches_recorded_location(b));
+        let owned_marker = observed.marker_present || virtualized_location;
+        if virtualized_location {
+            observed.page.user_turns = t.baseline_users.saturating_add(1);
+            observed.page.awaiting_assistant =
+                observed.page.assistant_turns < observed.page.user_turns;
+            observed.page.response_action_turn_bound_to_last =
+                observed.page.assistant_turns > 0 && !observed.page.awaiting_assistant;
+        }
         // A loading error may occur before a new conversation gets a stable id.
         // Keep the possible-send intent and retry this same visible conversation.
         if observed.load_failed || t.load_failure_pending {
-            if !observed.load_failed && observed.marker_present && !observed.foreign_marker {
+            if !observed.load_failed && owned_marker && !observed.foreign_marker {
                 t.load_failure_pending = false;
                 self.persist(
                     t,
@@ -501,13 +515,10 @@ impl Supervisor<'_> {
             return Ok(());
         }
         if t.binding.is_none() {
-            if observed.marker_present
-                && !observed.foreign_marker
-                && !observed.binding.sidebar_id.is_empty()
-            {
+            if owned_marker && !observed.foreign_marker && !observed.binding.sidebar_id.is_empty() {
                 t.pending_binding = Some(observed.binding.clone());
             }
-            if observed.marker_present
+            if owned_marker
                 && observed.page.user_turns > 0
                 && !observed.binding.identity.is_empty()
                 && !observed.binding.sidebar_id.is_empty()
@@ -560,7 +571,7 @@ impl Supervisor<'_> {
         }
         if let Some(binding) = &mut t.binding
             && binding.sidebar_id.starts_with("local-chatgpt:")
-            && observed.marker_present
+            && owned_marker
             && !observed.foreign_marker
             && !observed.binding.sidebar_id.starts_with("local-chatgpt:")
         {
@@ -569,14 +580,14 @@ impl Supervisor<'_> {
         let binding = t.binding.as_ref().expect("binding checked");
         if observed.binding.identity != binding.identity
             && (binding.sidebar_id.is_empty() || observed.binding.sidebar_id != binding.sidebar_id)
-            && !(observed.marker_present
+            && !(owned_marker
                 && !observed.foreign_marker
                 && (observed.binding.sidebar_id.is_empty()
                     || observed.binding.sidebar_id.starts_with("local-chatgpt:")))
         {
             bail!("会话切换尚未确认，拒绝读取或推进其他任务");
         }
-        if observed.marker_present && !observed.foreign_marker {
+        if owned_marker && !observed.foreign_marker {
             let mut confirmed = self.store.settings()?;
             if confirmed.last_confirmed_task != t.id {
                 if confirmed.last_confirmed_task.is_empty() {
@@ -690,7 +701,7 @@ impl Supervisor<'_> {
             self.persist(t, Some(("status", "请求频繁：等待五分钟后继续".into())))?;
             return Ok(());
         }
-        if !observed.marker_present {
+        if !owned_marker {
             t.state = TaskState::Waiting;
             self.persist(
                 t,
