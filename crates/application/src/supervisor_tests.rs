@@ -718,3 +718,40 @@ async fn failed_approval_action_does_not_create_receipt() {
     assert!(t.approval_receipts.is_empty());
     assert_eq!(t.state, TaskState::Approval);
 }
+
+#[tokio::test]
+async fn repeated_interruptions_compact_carry_without_nesting_or_repeating_work_and_goal() {
+    let mut t = bound_task();
+    t.carry = "checkpoint-0".into();
+    t.work_result = "round-5-verified-work-result".into();
+    let mut o = terminal("partial");
+    o.interrupted = true;
+    o.visible_work = format!("{}\ncheckpoint-1-progress", t.goal);
+    let (s, d, c) = setup(t, o, false, false);
+    tick(&s, &d, &c).await;
+    c.0.fetch_add(16_000, Ordering::SeqCst);
+    tick(&s, &d, &c).await;
+    {
+        let mut tasks = s.tasks.lock().unwrap();
+        tasks[0].send_clicked = true;
+        tasks[0].binding = Some(binding());
+        tasks[0].state = TaskState::Waiting;
+        tasks[0].cooldown_until = 0;
+    }
+    d.observation.lock().unwrap().visible_work = "checkpoint-2-progress".into();
+    c.0.fetch_add(16_000, Ordering::SeqCst);
+    tick(&s, &d, &c).await;
+    c.0.fetch_add(16_000, Ordering::SeqCst);
+    tick(&s, &d, &c).await;
+    let saved = s.list().unwrap().remove(0);
+    assert_eq!(saved.carry.matches("此前接力材料：").count(), 1);
+    assert_eq!(saved.carry.matches("上一执行轮结果：").count(), 1);
+    assert_eq!(
+        saved.carry.matches("round-5-verified-work-result").count(),
+        1
+    );
+    assert_eq!(saved.carry.matches(&saved.goal).count(), 0);
+    assert!(saved.carry.contains("checkpoint-0"));
+    assert!(saved.carry.contains("checkpoint-1-progress"));
+    assert!(saved.carry.contains("checkpoint-2-progress"));
+}
