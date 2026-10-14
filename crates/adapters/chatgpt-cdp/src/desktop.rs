@@ -349,7 +349,8 @@ const CONTEXT_SCRIPT: &str = r#"
   const latestLines=[...paragraphs,...interruptionNodes].map(e=>e.textContent || '').filter(t=>t.length<500).map(normalize);
   const interrupted=latestLines.some(l=>interruption.test(l)) || /connection (?:was )?(?:interrupted|lost)|连接(?:已)?中断|连接断开/i.test(statusText);
   const publicTurns=[...main.querySelectorAll('[data-content-search-unit-key$=":assistant"], [data-message-author-role="assistant"]')].filter(visible).slice(-3);
-  const visible_work=publicTurns.map(e=>(e.closest('article, [data-content-search-turn-key]') || e).innerText || '').join('\n\n').slice(-64000);
+  const assistantWork=e=>{const scope=e.closest('article, [data-content-search-turn-key]') || e;const userSel='[data-message-author-role="user"], [data-content-search-unit-key$=":user"], [data-user-message-bubble]';if(!scope.querySelector(userSel))return scope.innerText || e.innerText || '';const clone=scope.cloneNode(true);clone.querySelectorAll(userSel).forEach(n=>n.remove());return (clone.innerText || clone.textContent || e.innerText || '').trim();};
+  const visible_work=publicTurns.map(assistantWork).filter(Boolean).join('\n\n').slice(-64000);
   const length_limit=/reached.*(?:conversation|chat).*limit|此对话.*长度上限|达到.*对话.*长度上限/i.test(statusText) || latestLines.some(l=>/^(you.*reached.*(?:conversation|chat).*limit.*|你.*(?:达到|已达到).*对话.*长度上限.*)$/i.test(l));
   const loadLabel=e=>{const c=e.cloneNode(true);c.querySelectorAll('button, [role="button"], a').forEach(n=>n.remove());return normalize(c.textContent);};
   const loadError=/^(?:unable to load (?:this )?(?:ChatGPT )?conversation|无法加载.*(?:会话|对话))[。.!]?$/i;

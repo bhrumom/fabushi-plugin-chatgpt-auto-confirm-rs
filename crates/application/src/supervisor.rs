@@ -771,12 +771,19 @@ impl Supervisor<'_> {
             .as_ref()
             .map(|b| b.sidebar_id.as_str())
             .unwrap_or("");
+        let latest = strip_goal(&t.latest_reply, &t.goal);
+        let prior = compact_carry(&strip_goal(&t.carry, &t.goal), &latest);
         t.carry = bounded(
             &format!(
                 "中断原因：{reason}\n来源会话：{source}\n任务：{}；阶段：{:?}；轮次：{}\n此前接力材料：\n{}\n上一执行轮结果：\n{}\n中断前最后可见回复与工具进度：\n{}",
-                t.id, t.phase, t.round, t.carry, t.work_result, t.latest_reply
+                t.id,
+                t.phase,
+                t.round,
+                bounded(&prior, 24_000),
+                bounded(&t.work_result, 24_000),
+                bounded(&latest, 24_000)
             ),
-            96_000,
+            48_000,
         );
         t.reset_dispatch();
         t.recoveries += 1;
@@ -868,6 +875,42 @@ impl Supervisor<'_> {
         }
     }
 }
+
+fn strip_goal(text: &str, goal: &str) -> String {
+    let trimmed = goal.trim();
+    if trimmed.is_empty() {
+        return text.trim().into();
+    }
+    text.replace(trimmed, "").trim().into()
+}
+
+fn compact_carry(carry: &str, latest_reply: &str) -> String {
+    let mut current = carry.trim();
+    let mut checkpoints = Vec::new();
+    while let Some((_, after_prior)) = current.split_once("\n此前接力材料：\n")
+        && let Some((earlier, after_work)) = after_prior.split_once("\n上一执行轮结果：\n")
+        && let Some((_, prev_reply)) = after_work.split_once("\n中断前最后可见回复与工具进度：\n")
+    {
+        let prev = prev_reply.trim();
+        if !prev.is_empty() && prev != latest_reply && !latest_reply.contains(prev) {
+            checkpoints.push(prev);
+        }
+        current = earlier.trim();
+    }
+    if !current.is_empty() && current != latest_reply && !latest_reply.contains(current) {
+        checkpoints.push(current);
+    }
+    checkpoints.reverse();
+    let mut deduped: Vec<&str> = Vec::new();
+    for item in checkpoints {
+        if !deduped.iter().any(|existing| existing.contains(item)) {
+            deduped.retain(|existing| !item.contains(existing));
+            deduped.push(item);
+        }
+    }
+    deduped.join("\n\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
