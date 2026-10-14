@@ -88,9 +88,15 @@ struct Desktop {
     stay_success: bool,
     new_chats: AtomicU64,
     navigation_unavailable: bool,
+    mode_restores: AtomicU64,
+    capture_dispatch: bool,
 }
 #[async_trait]
 impl TaskDesktop for Desktop {
+    async fn ensure_chat_mode(&self) -> Result<bool> {
+        self.mode_restores.fetch_add(1, Ordering::SeqCst);
+        Ok(true)
+    }
     async fn new_chat(&self) -> Result<()> {
         self.new_chats.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -120,6 +126,13 @@ impl TaskDesktop for Desktop {
         self.dispatches.lock().unwrap().push(p.into());
         if self.fail_dispatch {
             bail!("transport closed after Send")
+        }
+        if self.capture_dispatch {
+            *self.observation.lock().unwrap() = TaskObservation {
+                marker_present: true,
+                binding: binding(),
+                ..Default::default()
+            };
         }
         Ok(())
     }
@@ -190,6 +203,8 @@ fn setup(t: Task, o: TaskObservation, pause: bool, fail: bool) -> (Arc<Store>, D
         stay_success: true,
         new_chats: AtomicU64::new(0),
         navigation_unavailable: false,
+        mode_restores: AtomicU64::new(0),
+        capture_dispatch: false,
     };
     (store, desktop, Time(AtomicU64::new(1_000_000)))
 }
@@ -225,6 +240,30 @@ async fn possible_send_survives_error_without_duplicate_dispatch() {
         s.list().unwrap()[0].binding.as_ref().unwrap().identity,
         "native-a"
     );
+}
+#[tokio::test]
+async fn sent_location_is_saved_before_next_poll_and_survives_pause() {
+    let (s, mut d, c) = setup(task(), TaskObservation::default(), false, false);
+    d.capture_dispatch = true;
+    tick(&s, &d, &c).await;
+    let mut sent = s.list().unwrap()[0].clone();
+    assert!(sent.send_clicked);
+    assert_eq!(
+        sent.pending_binding.as_ref().unwrap().sidebar_id,
+        binding().sidebar_id
+    );
+    let revision = sent.revision;
+    sent.pause();
+    s.save(&mut sent, revision, None).unwrap();
+    assert_eq!(
+        s.list().unwrap()[0]
+            .pending_binding
+            .as_ref()
+            .unwrap()
+            .sidebar_id,
+        binding().sidebar_id
+    );
+    assert_eq!(d.dispatches.lock().unwrap().len(), 1);
 }
 #[tokio::test]
 async fn terminal_work_queues_fresh_independent_review_instead_of_completing_goal() {
@@ -427,6 +466,15 @@ async fn unknown_send_after_confirmation_timeout_waits_without_duplicate_dispatc
     assert!(t.send_clicked);
     assert_eq!(t.token, "owned");
     assert_eq!(t.state, TaskState::Sending);
+    assert_eq!(d.mode_restores.load(Ordering::SeqCst), 1);
+    assert_eq!(d.new_chats.load(Ordering::SeqCst), 0);
+    assert!(
+        s.events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|a| a.text.contains("已恢复 ChatGPT"))
+    );
     assert!(d.dispatches.lock().unwrap().is_empty());
 }
 #[tokio::test]

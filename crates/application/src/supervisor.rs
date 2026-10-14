@@ -34,6 +34,7 @@ pub trait TaskStore: Send + Sync {
 }
 #[async_trait]
 pub trait TaskDesktop: Send + Sync {
+    async fn ensure_chat_mode(&self) -> Result<bool>;
     async fn new_chat(&self) -> Result<()>;
     async fn activate(&self, binding: &SessionBinding, token: &str) -> Result<()>;
     async fn observe(&self, token: &str) -> Result<TaskObservation>;
@@ -385,6 +386,18 @@ impl Supervisor<'_> {
                 return Ok(());
             }
             self.desktop.dispatch(&t.prepared_prompt).await?;
+            // Capture the first marker-proven location before the next polling
+            // interval; pausing immediately after Send must not lose the chat.
+            if let Ok(sent) = self
+                .desktop
+                .observe_pending(&t.token, &t.approval_receipts)
+                .await
+                && sent.marker_present
+                && !sent.foreign_marker
+                && !sent.binding.identity.is_empty()
+            {
+                t.pending_binding = Some(sent.binding);
+            }
             self.persist(
                 t,
                 Some((
@@ -401,6 +414,20 @@ impl Supervisor<'_> {
             let mut config = self.store.settings()?;
             config.last_send_at = self.now();
             self.store.save_settings(&mut config)?;
+            return Ok(());
+        }
+        if self.desktop.ensure_chat_mode().await?
+            && !self.persist(
+                t,
+                Some((
+                    "action",
+                    "已恢复 ChatGPT 聊天模式；保留原会话和发送意图，继续核对任务标记".into(),
+                )),
+            )?
+        {
+            return Ok(());
+        }
+        if !self.current(t)? {
             return Ok(());
         }
         if let Some(binding) = t.binding.as_ref().or(t.pending_binding.as_ref()) {

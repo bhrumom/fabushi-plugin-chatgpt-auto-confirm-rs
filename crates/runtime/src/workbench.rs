@@ -189,11 +189,6 @@ impl Queue {
             "pause" => t.pause(),
             "resume" => {
                 t.resume();
-                let mut settings = self.settings()?;
-                if settings.stop_task == t.id {
-                    settings.stop_task.clear();
-                    self.set_settings(settings)?;
-                }
             }
             "cancel" => t.state = TaskState::Cancelled,
             "edit" => t.edit_goal(value.ok_or_else(|| anyhow::anyhow!("goal required"))?),
@@ -249,6 +244,14 @@ impl Queue {
         }
         if !self.store.save(&mut t, expected, Some(event))? {
             bail!("任务版本已变化，请重试");
+        }
+        if action == "resume" && t.state.runnable() {
+            let mut settings = self.settings()?;
+            settings.running = true;
+            if settings.stop_task == t.id {
+                settings.stop_task.clear();
+            }
+            self.set_settings(settings)?;
         }
         Ok(())
     }
@@ -461,8 +464,122 @@ pub async fn activate_task(queue: &Queue, endpoint: &str, id: &str) -> Result<()
         .binding
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("task not bound"))?;
-    ChatGptCdp::connect_desktop(endpoint)
-        .await?
-        .activate(b, &t.token)
-        .await
+    let desktop = ChatGptCdp::connect_desktop(endpoint).await?;
+    desktop.ensure_desktop_chat_mode().await?;
+    desktop.activate(b, &t.token).await
+}
+
+/// Reattach a lost dispatch only after observing its exact marker in the named chat.
+pub async fn recover_task(
+    queue: &Queue,
+    endpoint: &str,
+    id: &str,
+    conversation: &str,
+) -> Result<()> {
+    use fabushi_chatgpt_application::TaskDesktop;
+    let task = queue
+        .tasks()?
+        .into_iter()
+        .find(|t| t.id == id)
+        .ok_or_else(|| anyhow::anyhow!("task not found"))?;
+    if !task.send_clicked || task.token.is_empty() || task.state.terminal() {
+        bail!("任务没有待恢复的发送意图");
+    }
+    let desktop = ChatGptCdp::connect_desktop(endpoint).await?;
+    desktop.ensure_desktop_chat_mode().await?;
+    desktop
+        .activate(
+            &SessionBinding {
+                identity: conversation.into(),
+                sidebar_id: conversation.into(),
+                title: String::new(),
+            },
+            &task.token,
+        )
+        .await?;
+    let observed = desktop.observe(&task.token).await?;
+    save_recovered_task(queue, task, observed, conversation)
+}
+
+fn save_recovered_task(
+    queue: &Queue,
+    mut task: Task,
+    observed: TaskObservation,
+    conversation: &str,
+) -> Result<()> {
+    if !observed.marker_present
+        || observed.foreign_marker
+        || observed.binding.sidebar_id != conversation
+        || conversation.is_empty()
+    {
+        bail!("原任务标记与指定会话不匹配，未修改任务记录");
+    }
+    let revision = task.revision;
+    task.pending_binding = Some(observed.binding);
+    task.cooldown_until = 0;
+    task.last_error.clear();
+    task.updated_at = wall_ms();
+    let event = Activity {
+        task_id: task.id.clone(),
+        at: wall_ms(),
+        role: "action".into(),
+        text: "原发送标记已核对，恢复会话定位；保留原轮次、发送意图和上下文，不重发".into(),
+    };
+    if !queue.store.save(&mut task, revision, Some(event))? {
+        bail!("任务版本已变化，请重试恢复");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    #[test]
+    fn recovered_chat_requires_exact_marker_and_retains_dispatch() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("fabushi-recover-task-{}", std::process::id()));
+        let queue = Queue::open(&dir.join("state.sqlite"))?;
+        let mut task = queue.add(
+            "owned".into(),
+            "goal".into(),
+            TaskMode::Goal,
+            ExecutionProfile::default(),
+            false,
+            &[],
+        )?;
+        let revision = task.revision;
+        task.state = TaskState::Sending;
+        task.send_clicked = true;
+        task.token = "original".into();
+        task.dispatch_at = 1234;
+        task.round = 5;
+        task.phase = Phase::Review;
+        task.prepared_prompt = "original prompt".into();
+        assert!(queue.store.save(&mut task, revision, None)?);
+        let mut observed = TaskObservation {
+            binding: SessionBinding {
+                identity: "chat".into(),
+                sidebar_id: "chat".into(),
+                title: "chat".into(),
+            },
+            ..Default::default()
+        };
+        assert!(save_recovered_task(&queue, task.clone(), observed.clone(), "chat").is_err());
+        observed.marker_present = true;
+        observed.foreign_marker = true;
+        assert!(save_recovered_task(&queue, task.clone(), observed.clone(), "chat").is_err());
+        observed.foreign_marker = false;
+        assert!(save_recovered_task(&queue, task.clone(), observed.clone(), "different").is_err());
+        save_recovered_task(&queue, task, observed, "chat")?;
+        let recovered = queue.tasks()?[0].clone();
+        assert_eq!(recovered.pending_binding.unwrap().sidebar_id, "chat");
+        assert_eq!(recovered.state, TaskState::Sending);
+        assert_eq!(recovered.token, "original");
+        assert_eq!(recovered.dispatch_at, 1234);
+        assert_eq!(recovered.prepared_prompt, "original prompt");
+        assert_eq!(recovered.round, 5);
+        assert_eq!(recovered.phase, Phase::Review);
+        drop(queue);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
 }

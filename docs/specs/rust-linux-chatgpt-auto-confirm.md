@@ -325,6 +325,28 @@ limiting history, with successful card clicks and dispatch preflight recorded.
 
 Desktop implementation status: embedded workbench entry and shared Queue command bridge implemented, with DOM and runtime regression coverage; full source replacement remains governed by the migration ledger.
 
+Single-task resume implementation status: after saving a runnable task, resume also
+enables global supervision and clears that task's pending stop request. Other paused
+tasks remain paused; the original dispatch marker, timestamp and confirmation state
+are preserved. Panel regression coverage includes global pause followed by individual
+resume and repeated resume of an already-runnable task while supervision is stopped.
+
+Desktop mode recovery implementation status: `chat-mode` restores and verifies the
+ChatGPT composer over CDP without clicking New chat or sending input. It refuses
+to hide native drafts or selected attachments. Already-dispatched supervision
+restores ChatGPT mode before activating or observing the original task; dispatch
+markers and timestamps remain unchanged. DOM fixtures cover delayed mode menus,
+the Chat tab, idempotence and draft protection; application tests cover restoring
+mode for unconfirmed sends without creating a conversation or repeating dispatch.
+
+Lost-dispatch recovery implementation status: after Send, the first marker-proven
+conversation location is saved before the next scan, retaining it across pause.
+`recover-task ID --conversation ID` verifies the original marker and exact sidebar
+identity before recording a pending binding; it never replaces the original prompt,
+phase, round, token or dispatch timestamp. Sidebar positioning waits for delayed
+history pagination at the bottom instead of wrapping before older rows mount.
+Runtime, application and DOM regression tests cover these recovery contracts.
+
 Embedded UI parity implementation status: userscript-style launcher/layout, task and workspace controls, scoped preferences, private attachment bridge/previews, shared two-hour feed and one-hour operations, safe cleanup, import/export and hydration retention implemented. Desktop-only substitutions and evidence are tracked in desktop-tui-userscript-parity.md.
 
 Approval deduplication implementation status: persisted request receipts survive remount/restart/phase reset; request-targeted click rechecks the live card. Resolved and older-user-turn cards are excluded from pending observations and terminal guards. New request IDs remain actionable even when their text matches a resolved request. Missing identity uses bounded message/card metadata and a content digest, with the ambiguity documented in desktop-tui-userscript-parity.md. Native conversation identity changes do not invalidate a receipt.
