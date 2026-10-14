@@ -138,6 +138,8 @@ pub struct Task {
     pub approval_fingerprint: String,
     #[serde(default)]
     pub approval_receipts: Vec<String>,
+    #[serde(default)]
+    pub approval_attempts: std::collections::BTreeMap<String, u8>,
     pub approvals: u32,
     pub recoveries: u32,
     #[serde(default)]
@@ -193,6 +195,7 @@ impl Task {
             approval_settle_until: 0,
             approval_fingerprint: String::new(),
             approval_receipts: Vec::new(),
+            approval_attempts: std::collections::BTreeMap::new(),
             approvals: 0,
             recoveries: 0,
             last_load_retry_at: 0,

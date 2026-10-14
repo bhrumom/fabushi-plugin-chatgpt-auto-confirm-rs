@@ -355,7 +355,7 @@ async fn interrupted_turn_with_copy_actions_recovers_before_review_and_carries_c
     let (s, d, c) = setup(t, o, false, false);
     tick(&s, &d, &c).await;
     assert!(s.list().unwrap()[0].binding.is_some());
-    c.0.fetch_add(16_000, Ordering::SeqCst);
+    c.0.fetch_add(70_000, Ordering::SeqCst);
     tick(&s, &d, &c).await;
     let saved = s.list().unwrap()[0].clone();
     assert!(saved.binding.is_none());
@@ -383,7 +383,7 @@ async fn interruption_with_empty_render_preserves_last_checkpoint() {
     };
     let (s, d, c) = setup(t, o, false, false);
     tick(&s, &d, &c).await;
-    c.0.fetch_add(16_000, Ordering::SeqCst);
+    c.0.fetch_add(70_000, Ordering::SeqCst);
     tick(&s, &d, &c).await;
     assert!(
         s.list().unwrap()[0]
@@ -729,7 +729,7 @@ async fn repeated_interruptions_compact_carry_without_nesting_or_repeating_work_
     o.visible_work = format!("{}\ncheckpoint-1-progress", t.goal);
     let (s, d, c) = setup(t, o, false, false);
     tick(&s, &d, &c).await;
-    c.0.fetch_add(16_000, Ordering::SeqCst);
+    c.0.fetch_add(70_000, Ordering::SeqCst);
     tick(&s, &d, &c).await;
     {
         let mut tasks = s.tasks.lock().unwrap();
@@ -739,9 +739,9 @@ async fn repeated_interruptions_compact_carry_without_nesting_or_repeating_work_
         tasks[0].cooldown_until = 0;
     }
     d.observation.lock().unwrap().visible_work = "checkpoint-2-progress".into();
-    c.0.fetch_add(16_000, Ordering::SeqCst);
+    c.0.fetch_add(70_000, Ordering::SeqCst);
     tick(&s, &d, &c).await;
-    c.0.fetch_add(16_000, Ordering::SeqCst);
+    c.0.fetch_add(70_000, Ordering::SeqCst);
     tick(&s, &d, &c).await;
     let saved = s.list().unwrap().remove(0);
     assert_eq!(saved.carry.matches("此前接力材料：").count(), 1);
@@ -754,4 +754,111 @@ async fn repeated_interruptions_compact_carry_without_nesting_or_repeating_work_
     assert!(saved.carry.contains("checkpoint-0"));
     assert!(saved.carry.contains("checkpoint-1-progress"));
     assert!(saved.carry.contains("checkpoint-2-progress"));
+}
+
+#[tokio::test]
+async fn interruption_does_not_abandon_streaming_waiting_reply_or_draft() {
+    for mode in 0..3 {
+        let mut o = terminal("latest progress");
+        o.interrupted = true;
+        if mode == 0 {
+            o.page.stop_available = true;
+        }
+        if mode == 1 {
+            o.page.awaiting_assistant = true;
+        }
+        if mode == 2 {
+            o.page.composer_text = "unsent draft".into();
+        }
+        let (s, d, c) = setup(bound_task(), o, false, false);
+        tick(&s, &d, &c).await;
+        c.0.fetch_add(600_000, Ordering::SeqCst);
+        tick(&s, &d, &c).await;
+        let saved = s.list().unwrap()[0].clone();
+        assert!(saved.binding.is_some());
+        assert!(saved.send_clicked);
+        assert_eq!(saved.token, "owned");
+        assert_eq!(saved.recoveries, 0);
+        assert_eq!(d.new_chats.load(Ordering::SeqCst), 0);
+        assert!(d.dispatches.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn inactive_interruption_waits_a_full_minute_before_handoff() {
+    let mut o = terminal("latest progress");
+    o.interrupted = true;
+    let (s, d, c) = setup(bound_task(), o, false, false);
+    tick(&s, &d, &c).await;
+    c.0.fetch_add(16_000, Ordering::SeqCst);
+    tick(&s, &d, &c).await;
+    assert!(s.list().unwrap()[0].binding.is_some());
+    c.0.fetch_add(45_000, Ordering::SeqCst);
+    tick(&s, &d, &c).await;
+    assert!(s.list().unwrap()[0].binding.is_none());
+    assert_eq!(s.list().unwrap()[0].state, TaskState::Queued);
+}
+
+#[tokio::test]
+async fn large_handoff_budget_preserves_newest_tail_and_goal_once() {
+    let mut t = bound_task();
+    t.carry = "old-context-".repeat(8_000);
+    t.work_result = "verified-work-".repeat(8_000);
+    let mut o = terminal("latest");
+    o.interrupted = true;
+    o.visible_work = format!(
+        "{}\nLATEST_HEAD\n{}\nLATEST_TAIL_NEXT_ACTION",
+        t.goal,
+        "进度资料".repeat(10_000)
+    );
+    let (s, d, c) = setup(t, o, false, false);
+    tick(&s, &d, &c).await;
+    c.0.fetch_add(70_000, Ordering::SeqCst);
+    tick(&s, &d, &c).await;
+    let saved = s.list().unwrap()[0].clone();
+    assert!(saved.carry.chars().count() <= 48_000);
+    assert!(saved.carry.contains("LATEST_HEAD"));
+    assert!(saved.carry.contains("LATEST_TAIL_NEXT_ACTION"));
+    assert_eq!(saved.prompt().matches(&saved.goal).count(), 1);
+    assert_eq!(saved.carry.matches("此前接力材料：").count(), 1);
+}
+
+#[tokio::test]
+async fn unconsumed_approval_receipt_retries_at_intervals_with_durable_three_attempt_limit() {
+    let o = TaskObservation {
+        approval_present: true,
+        approval_actionable: true,
+        approval_fingerprint: "still-pending-request".into(),
+        marker_present: true,
+        binding: binding(),
+        page: PageSnapshot {
+            awaiting_assistant: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let (s, d, c) = setup(bound_task(), o, false, false);
+    tick(&s, &d, &c).await;
+    assert_eq!(s.list().unwrap()[0].approvals, 1);
+    c.0.fetch_add(16_000, Ordering::SeqCst);
+    tick(&s, &d, &c).await;
+    assert_eq!(s.list().unwrap()[0].approvals, 1);
+    c.0.fetch_add(45_000, Ordering::SeqCst);
+    tick(&s, &d, &c).await;
+    assert_eq!(s.list().unwrap()[0].approvals, 2);
+    let saved = s.list().unwrap()[0].clone();
+    *s.tasks.lock().unwrap() =
+        vec![serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap()];
+    for _ in 0..3 {
+        c.0.fetch_add(61_000, Ordering::SeqCst);
+        tick(&s, &d, &c).await;
+    }
+    let saved = s.list().unwrap()[0].clone();
+    assert_eq!(saved.approvals, 3);
+    assert_eq!(saved.approval_receipts.len(), 1);
+    assert_eq!(saved.approval_attempts["still-pending-request"], 3);
+    assert_eq!(saved.state, TaskState::Approval);
+    assert!(saved.last_error.contains("3 次"));
+    assert!(saved.binding.is_some());
+    assert_eq!(d.new_chats.load(Ordering::SeqCst), 0);
 }

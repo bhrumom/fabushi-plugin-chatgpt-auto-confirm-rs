@@ -356,6 +356,23 @@ or duplicating `work_result` and `goal`, and shared turn containers exclude user
 prompt units from `visible_work`. The DOM and application regressions cover a
 composer-less load-error card, its exact Retry, blocked Send and bounded handoff carry.
 
+Interruption protection refinement: an active or waiting response and native drafts
+retain their original session despite interruption labels. An inactive interruption
+must remain stable for 60 seconds before handoff. Prior checkpoints and work results
+each use an 8,000-character window; newest progress uses 24,000 characters, with
+head/tail retention and the full material left in durable journals and source chats.
+This keeps the 48,000-character envelope from cutting off the latest next action.
+Regressions cover streaming/waiting/draft protection, the full grace interval and
+oversized Unicode checkpoints with original goal and newest tail preserved.
+
+Approval settlement refinement: a persisted click receipt no longer hides a current,
+unresolved approval card when no terminal response exists. Already-completed and
+historical cards remain suppressed. Current requests allow at most three scoped
+grant attempts, spaced at least 60 seconds apart, with counts surviving restart;
+exhaustion retains the original task and reports required manual verification.
+Regressions cover unresolved receipts, completed-card suppression, retry spacing,
+restart persistence and the three-attempt limit. Permanent grants remain excluded.
+
 Embedded UI parity implementation status: userscript-style launcher/layout, task and workspace controls, scoped preferences, private attachment bridge/previews, shared two-hour feed and one-hour operations, safe cleanup, import/export and hydration retention implemented. Desktop-only substitutions and evidence are tracked in desktop-tui-userscript-parity.md.
 
 Approval deduplication implementation status: persisted request receipts survive remount/restart/phase reset; request-targeted click rechecks the live card. Resolved and older-user-turn cards are excluded from pending observations and terminal guards. New request IDs remain actionable even when their text matches a resolved request. Missing identity uses bounded message/card metadata and a content digest, with the ambiguity documented in desktop-tui-userscript-parity.md. Native conversation identity changes do not invalidate a receipt.

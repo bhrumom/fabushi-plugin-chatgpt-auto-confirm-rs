@@ -237,6 +237,8 @@ const script = name => source.match(new RegExp(`const ${name}: &str = r#"([\\s\\
     await page.locator('#reply').evaluate(e=>e.textContent='Final answer with much more text');
     await page.locator('section').evaluate(e=>e.outerHTML=e.outerHTML);
     assert.equal((await context('owned')).approval_fingerprint,first);
+    assert.equal((await context('owned',[first])).approval_present,true);
+    await page.locator('article').evaluate(e=>e.insertAdjacentHTML('beforeend','<div data-content-search-unit-key="a:assistant" data-is-streaming="false">Completed reply<button aria-label="Copy">Copy</button><button aria-label="Share">Share</button></div>'));
     let ignored=await context('owned',[first]);
     assert.equal(ignored.approval_present,false);assert.equal(ignored.page,undefined);
     // The second request has identical wording but a distinct request id.
@@ -255,6 +257,8 @@ const script = name => source.match(new RegExp(`const ${name}: &str = r#"([\\s\\
     const fallback=(await context('owned')).approval_fingerprint;
     await page.locator('#reply').evaluate(e=>e.textContent='Final answer: unrelated changing content');
     assert.equal((await context('owned')).approval_fingerprint,fallback);
+    assert.equal((await context('owned',[fallback])).approval_present,true);
+    await page.locator('article').evaluate(e=>e.insertAdjacentHTML('beforeend','<div data-content-search-unit-key="a:assistant" data-is-streaming="false">Completed reply<button aria-label="Copy">Copy</button><button aria-label="Share">Share</button></div>'));
     assert.equal((await context('owned',[fallback])).approval_present,false);
     await page.locator('article').evaluate(e=>e.setAttribute('data-content-search-turn-key','b'));
     assert.notEqual((await context('owned',[fallback])).approval_fingerprint,fallback);

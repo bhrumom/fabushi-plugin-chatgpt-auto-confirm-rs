@@ -336,7 +336,10 @@ const CONTEXT_SCRIPT: &str = r#"
   const approvalLabel=b=>{const c=b.cloneNode(true);c.querySelectorAll('kbd, [aria-hidden="true"]').forEach(n=>n.remove());return normalize(b.getAttribute('aria-label') || c.textContent).replace(/\s+(?:Esc|Enter|↵|⏎|⌄|▾)$/i,'').trim();};
   __APPROVAL_SCAN__
   const receipts=__APPROVAL_RECEIPTS__;
-  const pending=approvalScan().filter(c=>!c.resolved && !receipts.includes(c.key));
+  // A click receipt is not settlement evidence. Keep a still-live current card
+  // pending when no completed response exists; application owns paced retry limits.
+  const completedResponse=page.response_actions_complete && page.response_action_turn_bound_to_last && !page.awaiting_assistant && page.copy_available_on_last_assistant;
+  const pending=approvalScan().filter(c=>!c.resolved && (!receipts.includes(c.key) || !completedResponse));
   const approval=pending[0];
   page.waiting_for_approval=pending.length>0;
   const statusNodes=[...main.querySelectorAll('[role="alert"], [role="status"], [data-testid*="error"]')].filter(e=>visible(e) && !e.closest('blockquote, pre, code, [data-content-search-unit-key$=":user"]'));
