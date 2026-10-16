@@ -129,12 +129,3 @@ While the desktop supervisor is running, click **Fabushi 工作台** at the top 
 The embedded desk now follows userscript 2.10.47: **⚡ Fabushi 脚本** at the bottom right opens a task/workspace sidebar, selected task feed, settings and goal composer. It supports goal editing, pause/resume/cancel/delete, future-round model/effort and scoped approval preferences, file selection/paste/drop with previews, private attachments, recorded-session open, recovery controls, two-hour task history and one-hour concrete operations. Drag/move uses logical workspaces inside one desktop instance. Safe memory cleanup defers on responses, approval or drafts/files. Queue JSON imports start paused and require attachments to be reselected. UI refresh and command processing run separately from conversation polling under the same worker lease.
 
 Performance: closed desks receive lightweight metadata without transcript/journal payloads and never redraw the hidden feed. Visible data is refreshed on a bounded five-second loop; retry/error detection inspects exact retry controls and bounded card ancestors rather than walking every transcript div. Mount repairs are debounced to avoid a microtask repair loop. `workbench-suspend` is an operator recovery command for a wedged renderer: it interrupts renderer JavaScript and detaches this panel without clearing drafts or task storage. Restore with `workbench`.
-
-## Fabushi OMA-001 Offline Mini App (`.fabapp`)
-
-The repository also includes an OMA-001 offline Web/Wasm mini-app workbench (`org.fabushi.chatgpt-auto-confirm`, publisher `bhrumom`, version `0.1.0`) under `miniapp/` (`docs/specs/fabushi-miniapp.md`, `docs/adr/0005-fabushi-offline-web-workbench.md`):
-
-- `miniapp/wasm` — WebAssembly adapter over `crates/domain` (`fabushi-chatgpt-domain`);
-- `miniapp/web` — offline task queue, Work/Review prompt synthesis (`[Fabushi:<token>]`), `MAHAYANA_TASK_REPORT_V1` review JSON verification, `PageSnapshot` terminal/URL evaluation, and bounded JSON report export;
-- `miniapp/scripts/package.py`, `test_package.py`, `test_browser.cjs` — deterministic OMA-001 resource preparation, Ed25519 manifest tamper checks, and offline Chromium verification (`.github/workflows/miniapp-ci.yml`).
-
