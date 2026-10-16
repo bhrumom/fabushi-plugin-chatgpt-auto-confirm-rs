@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'none'; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>ChatGPT Auto-Confirm · Fabushi</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <main>
+    <header><div class="mark" aria-hidden="true">⚡</div><div><p class="eyebrow">FABUSHI MINI APP · DESKTOP PREVIEW</p><h1>ChatGPT Auto-Confirm</h1><p class="subtitle">离线任务编排、提示词与独立验收工作台</p></div><span class="badge">本地运行</span></header>
+    <section class="intro"><h2>每一次派发与验收，都绑定精确证据。</h2><p>复用原生 Rust 领域内核（<code>fabushi-chatgpt-domain</code>），在本地生成带 <code>[Fabushi:token]</code> 标记的 Work / Review 提示词，并校验 <code>MAHAYANA_TASK_REPORT_V1</code> 验收报告与终态快照。所有数据留在当前沙箱，不联网、不读取任何凭据。</p></section>
+    <section class="workspace" aria-label="离线任务与验收工作台">
+      <div class="card"><div class="section-head"><h2>01 · 任务编排与提示词</h2><span>最多 64 个任务 · 16 KiB/目标</span></div>
+        <label class="field"><span>任务标题</span><input id="task-title" type="text" maxlength="120" placeholder="例如：完成插件市场上架验收"></label>
+        <label class="field"><span>原始目标</span><textarea id="task-goal" rows="3" placeholder="输入完整任务目标与约束…"></textarea></label>
+        <div class="row">
+          <label class="field"><span>模式</span><select id="task-mode"><option value="goal">持续目标（Work + Review）</option><option value="once">单次执行（Once）</option></select></label>
+          <label class="field"><span>阶段</span><select id="task-phase"><option value="work">Work 执行轮</option><option value="review">Review 独立验收</option></select></label>
+          <label class="field"><span>轮次</span><input id="task-round" type="number" min="1" max="999" value="1"></label>
+        </div>
+        <label class="field"><span>最新执行结果 / 接力上下文（可选）</span><textarea id="work-result" rows="2" placeholder="Review 阶段被验收材料或上一轮接力说明…"></textarea></label>
+        <div class="actions"><button id="add-task" disabled>生成提示词并加入队列</button><button id="reset-queue" class="secondary" disabled>清空队列</button></div>
+        <ul id="selection" aria-label="已编排任务"></ul><p id="selection-summary">还没有编排任务</p>
+      </div>
+      <div class="card"><div class="section-head"><h2>02 · 验收与终态核验</h2><span>MAHAYANA_TASK_REPORT_V1</span></div>
+        <p>粘贴独立验收输出或终态参数，使用本地 Rust 内核核对 <code>taskId</code>、<code>round</code>、<code>status</code> 与最后一条回复的 Copy 终态证据（仅 Stop 消失不构成完成）。</p>
+        <label class="field"><span>独立验收输出（含 JSON）</span><textarea id="review-input" rows="3" placeholder='{"taskId":"task-1","round":1,"status":"next","summary":"已核实进度","next":"继续完成剩余步骤"}'></textarea></label>
+        <div class="actions"><button id="verify-review" disabled>校验验收报告</button><button id="verify-snapshot" class="secondary" disabled>校验终态快照</button></div>
+        <pre id="prompt-preview" aria-label="生成提示词预览">生成的 Work / Review 提示词将显示在这里。</pre>
+        <p id="status" role="status" aria-live="polite">正在加载本地 Rust 内核…</p>
+      </div>
+    </section>
+    <section class="card"><div class="section-head"><h2>03 · 本次核验结果</h2><button id="export" class="secondary" disabled>导出报告</button></div><div class="stats"><div><span>已编排任务</span><strong id="task-count">0</strong></div><div><span>通过验收报告</span><strong id="review-count">0</strong></div><div><span>终态快照校验</span><strong id="snapshot-count">0</strong></div></div><ul id="results" aria-label="核验记录"></ul><p class="note">导出的 JSON 仅包含本地编排的任务摘要、提示词哈希与核验结论，不包含账号凭据或宿主路径。刷新或关闭会清除本次会话队列。</p></section>
+    <details class="card"><summary>能力、数据与来源</summary><p>离线资源包：HTML / CSS / JavaScript / Rust WebAssembly。来源为同仓库的 <code>fabushi-chatgpt-domain</code> 纯领域实现。</p><p>此 Web 离线小程序不提供本机 ChatGPT.app / Chromium CDP 连接、自动点击「允许一次 / Allow once」、SQLite 后台常驻守护或系统目录读写。上述原生能力需要独立的 Fabushi Host / Connector 授权运行时，不会在离线沙箱中静默执行或伪造。</p><p>任务队列与核验结果仅保存在当前页面内存。显示偏好可保存在当前小程序的 Web 存储中；宿主提供账号与小程序隔离。</p><label class="setting"><input id="remember" type="checkbox">记住显示偏好</label><button id="clear" class="secondary">删除已保存的显示偏好</button><p id="storage-status" role="status"></p><p>版本 0.1.0 · MIT License · 依赖许可证随发行包提供。</p></details>
+    <footer>精确标记，独立验收。所有校验在本地完成。</footer>
+  </main>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
