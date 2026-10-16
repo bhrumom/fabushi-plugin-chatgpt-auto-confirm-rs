@@ -1,0 +1,77 @@
+name: Offline Mini App
+on:
+  pull_request:
+  push:
+    branches: [main, 'codex/**']
+permissions:
+  contents: read
+env:
+  TESTED_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+jobs:
+  offline-miniapp:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: ${{ env.TESTED_COMMIT }}
+      - name: Disk preflight
+        run: python3 scripts/disk_guard.py --path . --planned-bytes 8589934592
+      - name: Pinned toolchain
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal --component rustfmt --component clippy
+          rustup override set 1.98.0
+          rustup target add --toolchain 1.98.0 wasm32-unknown-unknown
+          rustc --version
+          cargo --version
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Architecture gate
+        run: ./scripts/check-architecture.sh
+      - name: Resolve separate Web adapter lockfile
+        run: |
+          if test -f miniapp/wasm/Cargo.lock; then
+            cargo fetch --manifest-path miniapp/wasm/Cargo.toml --locked
+          else
+            cargo generate-lockfile --manifest-path miniapp/wasm/Cargo.toml
+          fi
+      - name: Adapter format and tests
+        run: |
+          cargo fmt --manifest-path miniapp/wasm/Cargo.toml -- --check
+          cargo test --manifest-path miniapp/wasm/Cargo.toml --locked
+          cargo clippy --manifest-path miniapp/wasm/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Preserve third-party notices from resolved dependencies
+        working-directory: miniapp/wasm
+        run: |
+          mkdir -p dist
+          python3 ../../scripts/license_report.py
+      - name: Build Web adapter and matching bindings
+        run: |
+          cargo build --manifest-path miniapp/wasm/Cargo.toml --locked --release --target wasm32-unknown-unknown
+          cargo install wasm-bindgen-cli --version 0.2.129 --locked
+          wasm-bindgen miniapp/wasm/target/wasm32-unknown-unknown/release/chatgpt_auto_confirm_web_adapter.wasm --target web --out-dir miniapp-generated
+      - name: Prepare unsigned resources
+        run: python3 miniapp/scripts/package.py --pkg miniapp-generated --resources miniapp-resources --commit "$TESTED_COMMIT" --output chatgpt-auto-confirm-UNSIGNED.zip
+      - name: Install test-only tools
+        run: |
+          python3 -m pip install cryptography==46.0.3
+          npm install --no-save playwright@1.55.1
+          npx playwright install --with-deps chromium
+      - name: Package adversarial tests
+        run: python3 miniapp/scripts/test_package.py miniapp-resources
+      - name: Offline browser contracts
+        run: node miniapp/scripts/test_browser.cjs miniapp-resources
+      - name: Preserve preparation evidence (not a published release)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: offline-miniapp-preparation-${{ env.TESTED_COMMIT }}
+          path: |
+            chatgpt-auto-confirm-UNSIGNED.zip
+            chatgpt-auto-confirm-UNSIGNED.zip.sha256
+            miniapp-resources
+            miniapp/wasm/Cargo.lock
+            miniapp/registry-release.json
+            miniapp/marketplace-draft.json
+            miniapp-ui*.png

@@ -1,0 +1,16 @@
+{
+  "status": "draft",
+  "identity": { "namespace": "bhrumom", "name": "chatgpt-auto-confirm", "kind": "web-miniapp" },
+  "displayName": "ChatGPT Auto-Confirm 离线工作台",
+  "description": "复用原生 Rust fabushi-chatgpt-domain 的离线任务编排、Work/Review 提示词生成、MAHAYANA_TASK_REPORT_V1 独立验收与终态快照核验工作台。此 Desktop 预览不包含本机 ChatGPT CDP 连接或自动点击授权。",
+  "publisher": { "id": "bhrumom", "verified": false, "verificationEvidence": [] },
+  "sourceUrl": "https://github.com/bhrumom/fabushi-plugin-chatgpt-auto-confirm-rs",
+  "licenseSpdx": "MIT",
+  "categories": ["developer-tools", "productivity"],
+  "tags": ["offline", "rust", "wasm", "task-workbench"],
+  "release": { "version": "0.1.0", "channel": "preview", "platforms": ["desktop"], "minHostApi": 1, "requestedCapabilities": [] },
+  "offlineCore": true,
+  "networkPolicy": { "mode": "deny", "allowedOrigins": [] },
+  "publicationEligible": false,
+  "publicationBlockers": ["catalog-authorized-production-signature", "publisher-binding-and-scan-review", "packaged-Fabushi-install-offline-isolation-lifecycle-acceptance"]
+}

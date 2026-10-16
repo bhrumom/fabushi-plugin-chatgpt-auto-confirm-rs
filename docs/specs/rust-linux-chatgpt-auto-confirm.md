@@ -387,3 +387,21 @@ completion, another native session, Copy-only evidence and visible unmarked user
 Embedded UI parity implementation status: userscript-style launcher/layout, task and workspace controls, scoped preferences, private attachment bridge/previews, shared two-hour feed and one-hour operations, safe cleanup, import/export and hydration retention implemented. Desktop-only substitutions and evidence are tracked in desktop-tui-userscript-parity.md.
 
 Approval deduplication implementation status: persisted request receipts survive remount/restart/phase reset; request-targeted click rechecks the live card. Resolved and older-user-turn cards are excluded from pending observations and terminal guards. New request IDs remain actionable even when their text matches a resolved request. Missing identity uses bounded message/card metadata and a content digest, with the ambiguity documented in desktop-tui-userscript-parity.md. Native conversation identity changes do not invalidate a receipt.
+## 12. Fabushi OMA-001 offline mini-app workbench
+
+Authoritative package specification: `docs/specs/fabushi-miniapp.md` and
+`docs/adr/0005-fabushi-offline-web-workbench.md`.
+
+Implemented:
+- separate `miniapp/wasm` Cargo workspace (`chatgpt-auto-confirm-web-adapter`,
+  `unsafe_code = "forbid"`) exposing `fabushi-chatgpt-domain` over `wasm-bindgen`;
+- offline HTML/CSS/JS Task & Review Workbench (`miniapp/web`) with strict
+  `default-src 'none'; connect-src 'none'` CSP and inline Wasm byte delivery;
+- deterministic OMA-001 `.zip` preparation and `.fabapp` Ed25519 manifest
+  verification (`miniapp/scripts/package.py`, `miniapp/scripts/test_package.py`);
+- offline Playwright Chromium acceptance (`miniapp/scripts/test_browser.cjs`)
+  and `.github/workflows/miniapp-ci.yml`.
+
+Live ChatGPT CDP attachment, automatic `Allow once / 允许一次` clicking, and
+SQLite WAL background supervision remain native Host/CLI responsibilities and
+are explicitly unavailable in the offline Web sandbox.
